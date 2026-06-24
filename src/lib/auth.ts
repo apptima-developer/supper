@@ -2,8 +2,8 @@ import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { readJson } from "./json-store";
-import { userListSchema, type Role } from "./types";
+import { userRepository } from "./repositories";
+import type { Role } from "./types";
 
 const COOKIE_NAME = "supportdesk_session";
 const secret = new TextEncoder().encode(process.env.SESSION_SECRET || "supportdesk-local-change-this-secret");
@@ -11,7 +11,7 @@ const secret = new TextEncoder().encode(process.env.SESSION_SECRET || "supportde
 export type Session = { userId: string; username: string; name: string; role: Role };
 
 export async function authenticate(username: string, password: string): Promise<Session | null> {
-  const users = await readJson("auth/users.json", userListSchema);
+  const users = await userRepository.list();
   const user = users.find((candidate) => candidate.username.toLowerCase() === username.toLowerCase() && candidate.active);
   if (!user || !(await bcrypt.compare(password, user.passwordHash))) return null;
   return { userId: user.id, username: user.username, name: user.name, role: user.role };

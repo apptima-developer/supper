@@ -2,9 +2,8 @@ import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession } from "@/lib/auth";
-import { updateJson } from "@/lib/json-store";
-import { writeAudit } from "@/lib/repositories";
-import { roleSchema, userListSchema, type User } from "@/lib/types";
+import { userRepository, writeAudit } from "@/lib/repositories";
+import { roleSchema, type User } from "@/lib/types";
 
 const updateAccountSchema = z.object({
   username: z.string().trim().min(3, "Username must be at least 3 characters"),
@@ -39,28 +38,23 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
     const passwordHash = input.password ? await bcrypt.hash(input.password, 10) : null;
 
-    let previous: User | undefined;
-    let updated: User | undefined;
-    await updateJson("auth/users.json", userListSchema, (users) => {
-      const username = input.username.toLowerCase();
-      const email = input.email.toLowerCase();
-      if (users.some((user) => user.id !== id && user.username.toLowerCase() === username)) throw new Error("Username already exists");
-      if (users.some((user) => user.id !== id && user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
-      return users.map((user) => {
-        if (user.id !== id) return user;
-        previous = user;
-        updated = {
-          ...user,
-          username: input.username,
-          name: input.username,
-          email: input.email,
-          role: input.role,
-          active: input.active,
-          passwordHash: passwordHash || user.passwordHash,
-        };
-        return updated;
-      });
-    });
+    const users = await userRepository.list();
+    const username = input.username.toLowerCase();
+    const email = input.email.toLowerCase();
+    if (users.some((user) => user.id !== id && user.username.toLowerCase() === username)) throw new Error("Username already exists");
+    if (users.some((user) => user.id !== id && user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
+
+    const previous = users.find((user) => user.id === id);
+    const updated = previous ? {
+      ...previous,
+      username: input.username,
+      name: input.username,
+      email: input.email,
+      role: input.role,
+      active: input.active,
+      passwordHash: passwordHash || previous.passwordHash,
+    } : undefined;
+    if (updated) await userRepository.save(updated);
 
     if (!previous || !updated) throw new Error("Account not found");
     await writeAudit({

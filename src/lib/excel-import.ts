@@ -9,16 +9,20 @@ import {
   normalizeOwnerEfforts,
   ticketDiff,
 } from "./domain";
-import { listBackups, readJson, writeJsonAtomic } from "./json-store";
+import { listBackups, readJson } from "./json-store";
 import {
+  auditRepository,
+  customerRepository,
   importRepository,
+  masterRepositories,
+  replaceImportedCoreData,
+  ticketHistoryRepository,
+  ticketRepository,
   writeAudit,
 } from "./repositories";
 import {
   auditListSchema,
-  customerListSchema,
   historyListSchema,
-  namedMasterListSchema,
   ticketListSchema,
   type Audit,
   type Customer,
@@ -381,9 +385,9 @@ function parseTickets(
 
 async function loadImportReferenceData(overrides?: Partial<ImportReferenceData>): Promise<ImportReferenceData> {
   const [customers, priorities, issueTypes] = await Promise.all([
-    overrides?.customers ?? readJson("core/customers.json", customerListSchema),
-    overrides?.priorities ?? readJson("master/priorities.json", namedMasterListSchema),
-    overrides?.issueTypes ?? readJson("master/issue-types.json", namedMasterListSchema),
+    overrides?.customers ?? customerRepository.list(),
+    overrides?.priorities ?? masterRepositories.priorities.list(),
+    overrides?.issueTypes ?? masterRepositories.issueTypes.list(),
   ]);
   return { customers, priorities, issueTypes };
 }
@@ -490,12 +494,13 @@ export async function commitImport(
 ) {
   const beforeBackups = new Set(await listBackups());
   const [existingCustomers, existingTickets, existingHistory, existingAudit] = await Promise.all([
-    readJson("core/customers.json", customerListSchema),
-    readJson("core/tickets.json", ticketListSchema),
-    readJson("core/ticket-history.json", historyListSchema),
-    readJson("audit/audit-log.json", auditListSchema),
+    customerRepository.list(),
+    ticketRepository.list(),
+    ticketHistoryRepository.list(),
+    auditRepository.list(),
   ]);
   const now = new Date().toISOString();
+  const batchId = crypto.randomUUID();
   const tickets = [...existingTickets];
   const history = [...existingHistory];
   const audits: Audit[] = [];
@@ -536,13 +541,12 @@ export async function commitImport(
     }
   }
 
-  await writeJsonAtomic("core/tickets.json", tickets, ticketListSchema);
-  await writeJsonAtomic("core/ticket-history.json", history, historyListSchema);
-  await writeJsonAtomic(
-    "audit/audit-log.json",
-    [...audits.reverse(), ...existingAudit].slice(0, 10000),
-    auditListSchema,
-  );
+  const relationalBackups = await replaceImportedCoreData({
+    tickets: ticketListSchema.parse(tickets),
+    history: historyListSchema.parse(history),
+    audit: auditListSchema.parse([...audits.reverse(), ...existingAudit].slice(0, 10000)),
+    backupId: batchId,
+  });
 
   const summary = {
     customersCreated, customersUpdated, ticketsCreated, ticketsUpdated, ticketsSkipped,
@@ -554,8 +558,8 @@ export async function commitImport(
   };
   const afterBackups = (await listBackups()).filter((backup) => !beforeBackups.has(backup));
   const batch: ImportBatch = {
-    id: crypto.randomUUID(), fileName, kind, status: "completed", summary,
-    backupPaths: afterBackups, actor, createdAt: now,
+    id: batchId, fileName, kind, status: "completed", summary,
+    backupPaths: [...relationalBackups, ...afterBackups], actor, createdAt: now,
   };
   await importRepository.add(batch);
   await writeAudit({

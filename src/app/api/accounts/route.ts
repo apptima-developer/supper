@@ -2,9 +2,8 @@ import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession } from "@/lib/auth";
-import { updateJson } from "@/lib/json-store";
-import { writeAudit } from "@/lib/repositories";
-import { roleSchema, userListSchema, type User } from "@/lib/types";
+import { userRepository, writeAudit } from "@/lib/repositories";
+import { roleSchema, type User } from "@/lib/types";
 
 const createAccountSchema = z.object({
   username: z.string().trim().min(3, "Username must be at least 3 characters"),
@@ -22,36 +21,33 @@ export async function POST(request: Request) {
 
     const raw = await request.json();
     const input = createAccountSchema.parse(raw);
-    let created: Omit<User, "passwordHash"> | undefined;
 
-    await updateJson("auth/users.json", userListSchema, async (users) => {
-      const username = input.username.toLowerCase();
-      const email = input.email.toLowerCase();
-      if (users.some((user) => user.username.toLowerCase() === username)) throw new Error("Username already exists");
-      if (users.some((user) => user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
+    const users = await userRepository.list();
+    const username = input.username.toLowerCase();
+    const email = input.email.toLowerCase();
+    if (users.some((user) => user.username.toLowerCase() === username)) throw new Error("Username already exists");
+    if (users.some((user) => user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
 
-      const passwordHash = await bcrypt.hash(input.password, 10);
-      const user: User = {
-        id: crypto.randomUUID(),
-        username: input.username,
-        name: input.username,
-        email: input.email,
-        passwordHash,
-        role: input.role,
-        active: input.active,
-      };
-      created = {
-        id: user.id,
-        username: user.username,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        active: user.active,
-      };
-      return [...users, user];
-    });
+    const passwordHash = await bcrypt.hash(input.password, 10);
+    const user: User = {
+      id: crypto.randomUUID(),
+      username: input.username,
+      name: input.username,
+      email: input.email,
+      passwordHash,
+      role: input.role,
+      active: input.active,
+    };
+    await userRepository.create(user);
+    const created: Omit<User, "passwordHash"> = {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      active: user.active,
+    };
 
-    if (!created) throw new Error("Account was not created");
     await writeAudit({
       action: "create",
       entity: "user",

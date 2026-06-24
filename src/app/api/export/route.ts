@@ -1,18 +1,14 @@
 import ExcelJS from "exceljs";
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
+import { loadExportData } from "@/lib/repositories";
 
 export const runtime = "nodejs";
 
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const [customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes] = await Promise.all([
-    customerRepository.list(), ticketRepository.list(), masterRepositories.sla.list(),
-    masterRepositories.holidays.list(), masterRepositories.teams.list(), masterRepositories.statuses.list(),
-    masterRepositories.priorities.list(), masterRepositories.issueTypes.list(), masterRepositories.contractTypes.list(),
-  ]);
+  const { customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes } = await loadExportData();
   const workbook = new ExcelJS.Workbook();
   for (const [name, rows] of [
     ["Customer_MD_Control", customers], ["Issues_Log", tickets], ["SLA", sla],

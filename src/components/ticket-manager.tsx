@@ -10,7 +10,7 @@ import { Dialog, DialogContent } from "./ui/dialog";
 import { Input, Label, Select, Textarea } from "./ui/input";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
-import { hoursFromMd, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, totalOwnerEffortHours } from "@/lib/domain";
+import { hoursFromMd, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
 import { formatDate, formatIssueType } from "@/lib/utils";
 import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket } from "@/lib/types";
 
@@ -20,7 +20,7 @@ const blank = {
   customerKey: "",
   issueTitle: "",
   issueType: "",
-  severity: "P3",
+  severity: "Medium",
   owner: "",
   status: "00 - Open",
   startDate: "",
@@ -37,19 +37,12 @@ const workingHoursPerDay = 8;
 const workStartHour = 9;
 const workEndHour = workStartHour + workingHoursPerDay;
 const closedKanbanStatuses = new Set(["resolved", "closed", "cancelled"]);
-const slaSeverityFields = { P1: "p1", P2: "p2", P3: "p3", P4: "p4" } as const;
-const severityAliases = {
-  CRITICAL: "P1",
-  HIGH: "P2",
-  MEDIUM: "P3",
-  LOW: "P4",
-  UNSPECIFIED: "P4",
-} as const;
+const slaSeverityFields: Record<TicketSeverityCode, keyof Pick<Sla, "p1" | "p2" | "p3" | "p4">> = { P1: "p1", P2: "p2", P3: "p3", P4: "p4" };
 const severityOptions = [
-  { value: "P1", label: "P1 - Critical" },
-  { value: "P2", label: "P2 - High" },
-  { value: "P3", label: "P3 - Medium" },
-  { value: "P4", label: "P4 - Low" },
+  { value: "Critical", label: "P1 - Critical" },
+  { value: "High", label: "P2 - High" },
+  { value: "Medium", label: "P3 - Medium" },
+  { value: "Low", label: "P4 - Low" },
 ] as const;
 
 function ticketSortTime(ticket: Ticket) {
@@ -76,14 +69,8 @@ function formatHours(value: number) {
   return Math.max(0, Number(value) || 0).toFixed(5);
 }
 
-function severityCode(severity: string): keyof typeof slaSeverityFields {
-  const normalized = severity.trim().toUpperCase();
-  const key = severityAliases[normalized as keyof typeof severityAliases] || normalized;
-  return key in slaSeverityFields ? key as keyof typeof slaSeverityFields : "P3";
-}
-
 function severityTone(severity: string) {
-  const key = severityCode(severity);
+  const key = ticketSeverityCode(severity);
   if (key === "P1") return "rose";
   if (key === "P2") return "amber";
   if (key === "P3") return "blue";
@@ -200,7 +187,7 @@ function businessHoursBetween(start: Date, end: Date, holidayDates: Set<string>)
 }
 
 function slaField(severity: string) {
-  return slaSeverityFields[severityCode(severity)];
+  return slaSeverityFields[ticketSeverityCode(severity)];
 }
 
 function slaHours(customerName: string, severity: string, slaRules: Sla[]) {
@@ -333,7 +320,7 @@ export function TicketManager({
       customerKey: String(formData.get("customerKey")),
       issueTitle: String(formData.get("issueTitle")),
       issueType: String(formData.get("issueType")),
-      severity: String(formData.get("severity")),
+      severity: ticketSeverityLabel(String(formData.get("severity") || "")),
       ...effortPayload(effortRows),
       status: String(formData.get("status")),
       startDate: String(formData.get("startDate")),
@@ -459,7 +446,7 @@ export function TicketManager({
                       <td className="whitespace-nowrap px-4 py-2">
                         <div className="flex items-center gap-1.5">
                           <span>{formatIssueType(ticket.issueType)}</span>
-                          <Badge tone={severityTone(ticket.severity)}>{ticket.severity}</Badge>
+                          <Badge tone={severityTone(ticket.severity)}>{ticketSeverityLabel(ticket.severity)}</Badge>
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2 text-[11px]">{formatDate(ticket.startDate || ticket.date)}</td>
@@ -532,7 +519,7 @@ export function TicketManager({
               </div>
               <div>
                 <Label>Severity</Label>
-                <Select name="severity" defaultValue={severityCode(editing?.severity || blank.severity)}>
+                <Select name="severity" defaultValue={ticketSeverityLabel(editing?.severity || blank.severity)}>
                   {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </Select>
               </div>

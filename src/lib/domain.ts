@@ -5,6 +5,31 @@ export const KANBAN_COLUMNS = ["open", "in_progress", "waiting", "monitor", "res
 export const KANBAN_ARCHIVE_AGE_DAYS = 90;
 export const HOURS_PER_MD = 8;
 const dayMs = 24 * 60 * 60 * 1000;
+export const ticketSeverityLabels = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" } as const;
+export type TicketSeverityCode = keyof typeof ticketSeverityLabels;
+const ticketSeverityCodes = new Set(Object.keys(ticketSeverityLabels));
+const ticketSeverityCodeByLabel = { CRITICAL: "P1", HIGH: "P2", MEDIUM: "P3", LOW: "P4" } as const;
+
+function compactSeverity(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+export function ticketSeverityCode(severity: string): TicketSeverityCode {
+  const compact = compactSeverity(severity);
+  const code = compact.match(/^P[1-4]/)?.[0];
+  if (code && ticketSeverityCodes.has(code)) return code as TicketSeverityCode;
+  return ticketSeverityCodeByLabel[compact as keyof typeof ticketSeverityCodeByLabel] || "P3";
+}
+
+export function ticketSeverityLabel(severity: string) {
+  const raw = severity.trim();
+  const compact = compactSeverity(raw);
+  const code = compact.match(/^P[1-4]/)?.[0];
+  if (code && ticketSeverityCodes.has(code)) return ticketSeverityLabels[code as TicketSeverityCode];
+  const mapped = ticketSeverityCodeByLabel[compact as keyof typeof ticketSeverityCodeByLabel];
+  if (mapped) return ticketSeverityLabels[mapped];
+  return raw || ticketSeverityLabels.P3;
+}
 
 export function roundEffortHours(value: number) {
   return Number(Math.max(0, value || 0).toFixed(5));

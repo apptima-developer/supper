@@ -2,8 +2,7 @@ import { redirect } from "next/navigation";
 import { AccountManager } from "@/components/account-manager";
 import { PageHeader } from "@/components/page-header";
 import { requireSession } from "@/lib/auth";
-import { readJson } from "@/lib/json-store";
-import { userListSchema } from "@/lib/types";
+import { userRepository } from "@/lib/repositories";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +10,7 @@ export default async function AccountsPage() {
   const session = await requireSession();
   if (session.role !== "admin") redirect("/dashboard");
 
-  const users = (await readJson("auth/users.json", userListSchema))
+  const users = (await userRepository.list())
     .map((user) => ({
       id: user.id,
       username: user.username,

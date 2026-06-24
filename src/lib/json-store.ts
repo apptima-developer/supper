@@ -8,6 +8,10 @@ const supabaseEnabled = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.
 const strictSupabase = process.env.DATA_BACKEND === "supabase" || process.env.NODE_ENV === "production";
 
 type StoreModule = typeof import("./store");
+type JsonBatchSpec = Record<string, { path: string; schema: ZodType }>;
+type JsonBatchResult<T extends JsonBatchSpec> = {
+  [K in keyof T]: T[K] extends { schema: ZodType<infer Output> } ? Output : never;
+};
 
 async function store(): Promise<StoreModule> {
   return import("./store");
@@ -43,6 +47,39 @@ export async function readJson<T>(relativePath: string, schema: ZodType<T>): Pro
   }
   if (strictSupabase) throw supabaseRequiredError("read", relativePath);
   return readFileJson(relativePath, schema);
+}
+
+export async function readJsonBatch<T extends JsonBatchSpec>(specs: T): Promise<JsonBatchResult<T>> {
+  const entries = Object.entries(specs) as Array<[keyof T & string, T[keyof T]]>;
+  const paths = entries.map(([, spec]) => spec.path);
+
+  if (supabaseEnabled) {
+    try {
+      const values = await (await store()).getStores(paths);
+      const result: Partial<JsonBatchResult<T>> = {};
+      for (const [name, spec] of entries) {
+        const value = values[spec.path];
+        if (value === undefined) {
+          if (strictSupabase) throw supabaseRequiredError("read", spec.path);
+          result[name] = await readFileJson(spec.path, spec.schema) as JsonBatchResult<T>[keyof T];
+        } else {
+          result[name] = spec.schema.parse(value) as JsonBatchResult<T>[keyof T];
+        }
+      }
+      return result as JsonBatchResult<T>;
+    } catch (error) {
+      if (strictSupabase) throw error;
+      console.warn(`Supabase batch read failed for ${paths.join(", ")}; falling back to local data/.`);
+    }
+  }
+
+  if (strictSupabase) throw supabaseRequiredError("read", paths.join(", "));
+
+  const pairs = await Promise.all(entries.map(async ([name, spec]) => [
+    name,
+    await readFileJson(spec.path, spec.schema),
+  ] as const));
+  return Object.fromEntries(pairs) as JsonBatchResult<T>;
 }
 
 export async function writeJsonAtomic<T>(relativePath: string, value: T, schema: ZodType<T>) {

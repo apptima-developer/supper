@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CalendarClock, CircleUserRound, History, Timer } from "lucide-react";
-import { ticketRepository } from "@/lib/repositories";
+import { loadTicketDetailData } from "@/lib/repositories";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, statusTone } from "@/components/ui/badge";
 import { hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel } from "@/lib/domain";
@@ -15,9 +15,8 @@ function formatHours(value: number) {
 
 export default async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const ticket = await ticketRepository.get(id);
+  const { ticket, history } = await loadTicketDetailData(id);
   if (!ticket) notFound();
-  const history = await ticketRepository.history(ticket.id);
   const ownerEfforts = normalizeOwnerEfforts(ticket.ownerEfforts, ticket.owner, hoursFromMd(ticket.mdUsed));
   const logText = ticketLogText(ticket);
 

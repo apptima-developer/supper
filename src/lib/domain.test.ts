@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contractLifecycle, customerKey, isKanbanArchiveCandidate, manualContractStatus, mapKanbanStatus, recalculateCustomer, ticketAgeDays } from "./domain";
+import { contractLifecycle, customerKey, isKanbanArchiveCandidate, manualContractStatus, mapKanbanStatus, recalculateCustomer, ticketAgeDays, ticketSeverityCode, ticketSeverityLabel } from "./domain";
 import { can } from "./rbac";
 import type { Customer, Ticket } from "./types";
 
@@ -9,6 +9,18 @@ function ticket(id: string, mdUsed: number, chargeable: boolean): Ticket { retur
 
 describe("status mapping", () => {
   it.each([["00 - Open", "open"], ["09 - Re-Open", "open"], ["03 - Dev Inprogress", "in_progress"], ["4 - Dev Inprogress", "in_progress"], ["07 - Waiting user", "waiting"], ["05 - Monitor", "monitor"], ["08 - Resolved", "resolved"], ["02 - Closed", "closed"], ["01 - Cancel", "cancelled"]] as const)("maps %s", (raw, mapped) => expect(mapKanbanStatus(raw)).toBe(mapped));
+});
+
+describe("ticket severity", () => {
+  it.each([
+    ["P1", "P1", "Critical"],
+    ["P2 - High", "P2", "High"],
+    ["Medium", "P3", "Medium"],
+    ["low", "P4", "Low"],
+  ] as const)("normalizes %s", (raw, code, label) => {
+    expect(ticketSeverityCode(raw)).toBe(code);
+    expect(ticketSeverityLabel(raw)).toBe(label);
+  });
 });
 
 describe("MD calculation", () => { it("uses chargeable ticket effort only", () => { const result = recalculateCustomer(customer, [ticket("1", 3.25, true), ticket("2", 9, false), ticket("3", 5, true)]); expect(result.mdUsed).toBe(8.25); expect(result.mdRemaining).toBe(1.75); expect(result.burnRate).toBe(82.5); expect(result.mdStatus).toBe("Warning"); }); });

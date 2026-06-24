@@ -17,6 +17,23 @@ export async function getStore<T>(key: string): Promise<T | undefined> {
   return data.value as T;
 }
 
+export async function getStores(keys: readonly string[]): Promise<Record<string, unknown | undefined>> {
+  const uniqueKeys = [...new Set(keys)];
+  if (!uniqueKeys.length) return {};
+
+  const { data, error } = await supabaseAdmin
+    .from("app_store")
+    .select("key,value")
+    .in("key", uniqueKeys);
+
+  if (error) {
+    throw new Error(`Failed to read app_store batch: ${error.message}`);
+  }
+
+  const rows = new Map((data || []).map((row) => [row.key, row.value as unknown]));
+  return Object.fromEntries(uniqueKeys.map((key) => [key, rows.get(key)]));
+}
+
 export async function setStore<T>(key: string, value: T): Promise<void> {
   const { error } = await supabaseAdmin
     .from("app_store")

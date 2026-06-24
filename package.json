@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "supabase:seed": "dotenv -e .env.local -- node scripts/seed-supabase.mjs"
+    "supabase:seed": "dotenv -e .env.local -- node scripts/seed-supabase.mjs",
+    "supabase:migrate:relational": "dotenv -e .env.local -- node scripts/migrate-app-store-to-relational.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

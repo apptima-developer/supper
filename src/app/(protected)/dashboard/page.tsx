@@ -17,7 +17,7 @@ import { Badge, statusTone } from "@/components/ui/badge";
 import { EmptyState } from "@/components/empty-state";
 import { Progress } from "@/components/ui/progress";
 import { MdChart, StatusChart } from "@/components/dashboard-charts";
-import { customerRepository, ticketRepository } from "@/lib/repositories";
+import { loadDashboardData } from "@/lib/repositories";
 import {
   contractLifecycle,
   hoursFromMd,
@@ -107,7 +107,7 @@ function MetricCard({
 }
 
 export default async function DashboardPage() {
-  const [customers, tickets] = await Promise.all([customerRepository.list(), ticketRepository.list()]);
+  const { customers, tickets } = await loadDashboardData();
   const now = new Date();
   const activeCustomers = customers.filter((customer) => customer.active);
   const archivedCustomers = customers.length - activeCustomers.length;
@@ -117,6 +117,7 @@ export default async function DashboardPage() {
     const due = dueTime(ticket);
     return due !== null && due < now.getTime();
   });
+  const overdueTicketIds = new Set(overdueTickets.map((ticket) => ticket.id));
   const dueThisWeek = openTickets.filter((ticket) => {
     const due = dueTime(ticket);
     return due !== null && due >= now.getTime() && due <= now.getTime() + weekMs;
@@ -160,7 +161,7 @@ export default async function DashboardPage() {
       const current = map.get(name) || { owner: name, tickets: 0, hours: 0, overdue: 0 };
       current.tickets += 1;
       current.hours += effort.hours;
-      if (overdueTickets.some((item) => item.id === ticket.id)) current.overdue += 1;
+      if (overdueTicketIds.has(ticket.id)) current.overdue += 1;
       map.set(name, current);
     }
     return map;
