@@ -7,7 +7,7 @@ import { Toaster } from "sonner";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: { default: "SupportDesk MD Control", template: "%s | SupportDesk" },
+  title: { default: "SUPPER - SupportDesk MD Control", template: "%s | SupportDesk" },
   description: "Internal support operations and maintenance-day control",
 };
 
