@@ -1,0 +1,98 @@
+[
+  {
+    "id": "acd2f1fb-b20b-431c-9611-40ca4d12d797",
+    "customerName": "AH",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "762d6384-679b-437f-9dfd-f33a9186cf9b",
+    "customerName": "BST",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "cb527c17-34a8-40a5-821a-6da3d3298353",
+    "customerName": "BEE",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "afa01d29-ca64-4e6c-93a1-c4fcce6f3841",
+    "customerName": "DSG",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "712aec29-ea27-40d2-937d-5f0e8abdec98",
+    "customerName": "PTTOR",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "69189179-1b7b-4c67-9b9f-ea6bf2192c99",
+    "customerName": "TUG",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "9e46d830-d4db-4dda-b57e-82e88ec5f5ad",
+    "customerName": "CIMB",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "2d25ea43-20f7-4bc3-82c8-53a347ddcd71",
+    "customerName": "BEM",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "93c6d691-8bfe-4cf2-b6de-318a5e02d1c5",
+    "customerName": "FWD",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "09511a5c-36d5-49e5-9ff4-0122eb15ffdd",
+    "customerName": "PTTDG",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "b86c887d-0dca-41b3-82bd-1990fcaa499d",
+    "customerName": "TOP",
+    "p1": 8,
+    "p2": 16,
+    "p3": 32,
+    "p4": 80
+  },
+  {
+    "id": "226e2151-b51e-40d0-966e-508881a18b1e",
+    "customerName": "SEC",
+    "p1": 8,
+    "p2": 8,
+    "p3": 32,
+    "p4": 80
+  }
+]

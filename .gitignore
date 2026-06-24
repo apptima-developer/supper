@@ -32,6 +32,12 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# SupportDesk runtime artifacts
+/data/backups/
+/data/reports/generated/
+*.pre-restore.bak
 
 # vercel
 .vercel
@@ -39,3 +45,24 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+node_modules/
+.next/
+.turbo/
+.vercel/
+out/
+dist/
+build/
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+*.sqlite
+*.db

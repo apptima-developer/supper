@@ -1,0 +1,47 @@
+[
+  {
+    "id": "usr-admin",
+    "username": "admin",
+    "name": "System Admin",
+    "email": "",
+    "passwordHash": "$2b$10$unBCqc.CAP5UG1gff4c9tuGuv5P.bHbHBCFZdPMze8Xk3D7cR2DxG",
+    "role": "admin",
+    "active": true
+  },
+  {
+    "id": "usr-lead",
+    "username": "lead",
+    "name": "Support Lead",
+    "email": "",
+    "passwordHash": "$2b$10$y3k/mcfr1LkPr2TetHzIL.mrcuNnHTXV6UMACARxwjTsGPAnTLg6O",
+    "role": "lead",
+    "active": true
+  },
+  {
+    "id": "usr-support",
+    "username": "support",
+    "name": "Support Agent",
+    "email": "",
+    "passwordHash": "$2b$10$HnXj8nDlaTLnWq0hHDbZzedHFuBUxv1nr44bUTR6UY7JnEKpBsefO",
+    "role": "support",
+    "active": true
+  },
+  {
+    "id": "usr-sales",
+    "username": "sales",
+    "name": "Sales Executive",
+    "email": "",
+    "passwordHash": "$2b$10$mFQSq4j.h34bNWLtLcdUo./l2Z.1ZRBp.OBX.EnRI5V3x3Tg5MATO",
+    "role": "sales",
+    "active": true
+  },
+  {
+    "id": "02b2cb9c-a30d-4544-98ea-5294a5ab43e1",
+    "username": "preamyuda",
+    "name": "preamyuda",
+    "email": "preamyuda@iamconsulting.co.th",
+    "passwordHash": "$2b$10$SblzW7UObzFCzyjXDNsEmOAxhg1YtI8Sc.tRS12k8ful4DqZ1rVMG",
+    "role": "support",
+    "active": true
+  }
+]

@@ -1,0 +1,1 @@
+export function Progress({ value, tone = "bg-gradient-to-r from-[#0a84ff] to-[#20c9b7]" }: { value: number; tone?: string }) { return <div className="h-2 overflow-hidden rounded-full bg-sky-100/80 shadow-inner"><div className={`h-full rounded-full shadow-[0_0_18px_rgba(14,165,233,.28)] ${tone}`} style={{ width: `${Math.min(Math.max(value, 0), 100)}%` }} /></div>; }

@@ -1,0 +1,90 @@
+[
+  {
+    "id": "2d4d8006-d420-44d5-8317-68a84e8e7935",
+    "name": "Krittamet",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "12f36cf0-67f0-4731-acb3-9c1b584534b2",
+    "name": "Preamyuda",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "961bafb8-c802-4c21-ab51-c9d3494d1a25",
+    "name": "Thanate",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "71fb4f57-cd84-4f72-b47e-c049154b9e51",
+    "name": "Patcharapol",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "6287b80e-aeb1-4904-b493-89cb19926747",
+    "name": "Karn",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "92661c68-c83f-4b95-b8e7-9478a70db91c",
+    "name": "Sawitree",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "04891f16-aaf5-4afa-a041-97cb1ce7b547",
+    "name": "Pongchaipat",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "fe16b6a6-cb15-4002-95b9-93048db7d157",
+    "name": "Ganpapath",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "58b7f27c-05be-4cb0-bb60-283ee4ca32e0",
+    "name": "Nadvadee",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "0d4fe778-ebfd-4722-a143-4a634a8823fd",
+    "name": "Wasana",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "db517f8c-d5c5-4c60-bfa3-aadde35a6d4f",
+    "name": "Pongsri",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "b20201bb-1624-42fe-9780-19b9929d97d2",
+    "name": "Thanapong",
+    "active": true,
+    "lob": "EID"
+  },
+  {
+    "id": "50f48b94-6c33-4733-bd53-bc402f46e525",
+    "name": "FI Team",
+    "active": true
+  },
+  {
+    "id": "6dc6ad9a-4183-4ddd-900e-0ba9b23b9fdf",
+    "name": "00 - Unassigned",
+    "active": true
+  },
+  {
+    "id": "e162966c-c2e5-483b-bc73-eacac7ffa7fe",
+    "name": "Benjaphon",
+    "active": true,
+    "lob": "EID"
+  }
+]

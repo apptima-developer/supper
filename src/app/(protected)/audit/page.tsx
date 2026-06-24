@@ -1,0 +1,10 @@
+import { redirect } from "next/navigation";
+import { PageHeader } from "@/components/page-header";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/empty-state";
+import { requireSession } from "@/lib/auth";
+import { can } from "@/lib/rbac";
+import { auditRepository } from "@/lib/repositories";
+import { formatDate } from "@/lib/utils";
+export const dynamic = "force-dynamic";
+export default async function AuditPage() { const session = await requireSession(); if (!can(session.role, "audit:view")) redirect("/dashboard"); const items = await auditRepository.list(); return <><PageHeader title="Audit log" description="Immutable operational trail for create, update, delete, import, restore, and reporting actions." /><div className="overflow-hidden rounded-lg border bg-white">{items.length ? <div className="overflow-x-auto"><table className="w-full text-left"><thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Time</th><th className="px-4 py-3">Actor</th><th className="px-4 py-3">Action</th><th className="px-4 py-3">Entity</th><th className="px-4 py-3">Entity ID</th><th className="px-4 py-3">Detail</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className="border-t"><td className="whitespace-nowrap px-4 py-3 text-[11px]">{formatDate(item.createdAt)}</td><td className="px-4 py-3 font-medium">{item.actor}</td><td className="px-4 py-3"><Badge tone={item.action === "delete" ? "rose" : item.action === "create" ? "emerald" : item.action === "restore" ? "amber" : "blue"}>{item.action}</Badge></td><td className="px-4 py-3">{item.entity}</td><td className="max-w-40 truncate px-4 py-3 font-mono text-[10px] text-slate-500">{item.entityId}</td><td className="max-w-md truncate px-4 py-3 font-mono text-[10px] text-slate-400">{JSON.stringify(item.details)}</td></tr>)}</tbody></table></div> : <EmptyState title="No audit entries yet" description="Every operational mutation will appear here." />}</div></>; }

@@ -1,0 +1,22 @@
+{
+  "supportdesk": {
+    "customerAliases": {
+      "FWD": "FWD Life",
+      "PTTDG": "PTT Digital",
+      "ฺBEE": "BEE"
+    }
+  },
+  "snow": {
+    "issueId": "Number",
+    "date": "Opened",
+    "customer": "Company",
+    "issueTitle": "Short description",
+    "issueType": "Category",
+    "severity": "Priority",
+    "owner": "Assigned to",
+    "status": "State",
+    "mdUsed": "MD Used",
+    "chargeable": "Chargeable",
+    "remark": "Work notes"
+  }
+}

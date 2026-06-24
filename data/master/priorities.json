@@ -1,0 +1,22 @@
+[
+  {
+    "id": "382766d5-bfe6-48fd-bd21-b5d4f7b22058",
+    "name": "Critical",
+    "active": true
+  },
+  {
+    "id": "ffc7b089-9c4c-4635-8bd6-a3ced380678d",
+    "name": "High",
+    "active": true
+  },
+  {
+    "id": "75bb5e41-a5a1-49fd-ab41-c885c676f942",
+    "name": "Medium",
+    "active": true
+  },
+  {
+    "id": "34751a21-ab34-43fe-960a-27843dd773c7",
+    "name": "Low",
+    "active": true
+  }
+]

@@ -1,0 +1,6 @@
+"use client";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { X } from "lucide-react";
+export const Dialog = DialogPrimitive.Root;
+export const DialogTrigger = DialogPrimitive.Trigger;
+export function DialogContent({ title, description, children, className = "" }: { title: string; description?: string; children: React.ReactNode; className?: string }) { return <DialogPrimitive.Portal><DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-slate-950/25 backdrop-blur-sm" /><DialogPrimitive.Content className={`lux-surface fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-white shadow-[0_28px_80px_rgba(15,52,82,.18)] ${className}`}><div className="sticky top-0 z-10 flex items-start justify-between border-b border-sky-100/80 bg-white/80 px-5 py-4 backdrop-blur"><div><DialogPrimitive.Title className="text-[15px] font-semibold text-[#173b57]">{title}</DialogPrimitive.Title>{description && <DialogPrimitive.Description className="mt-1 text-[12px] text-slate-500">{description}</DialogPrimitive.Description>}</div><DialogPrimitive.Close className="rounded-lg p-1 text-slate-400 hover:bg-sky-50 hover:text-slate-700"><X size={17} /></DialogPrimitive.Close></div><div className="p-5">{children}</div></DialogPrimitive.Content></DialogPrimitive.Portal>; }

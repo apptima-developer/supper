@@ -1,0 +1,74 @@
+[
+  {
+    "id": "00",
+    "label": "00 - Open",
+    "kanban": "open",
+    "color": "slate"
+  },
+  {
+    "id": "01",
+    "label": "01 - Cancel",
+    "kanban": "cancelled",
+    "color": "slate"
+  },
+  {
+    "id": "02",
+    "label": "02 - Closed",
+    "kanban": "closed",
+    "color": "slate"
+  },
+  {
+    "id": "03",
+    "label": "03 - Dev Inprogress",
+    "kanban": "in_progress",
+    "color": "slate"
+  },
+  {
+    "id": "04",
+    "label": "04 - Func Inprogress",
+    "kanban": "in_progress",
+    "color": "slate"
+  },
+  {
+    "id": "05",
+    "label": "05 - Monitor",
+    "kanban": "monitor",
+    "color": "slate"
+  },
+  {
+    "id": "06",
+    "label": "06 - Technical Inprogress",
+    "kanban": "in_progress",
+    "color": "slate"
+  },
+  {
+    "id": "07",
+    "label": "07 - Waiting user",
+    "kanban": "waiting",
+    "color": "slate"
+  },
+  {
+    "id": "08",
+    "label": "08 - Resolved",
+    "kanban": "resolved",
+    "color": "slate"
+  },
+  {
+    "id": "09",
+    "label": "09 - Re-Open",
+    "kanban": "open",
+    "color": "slate"
+  },
+  {
+    "id": "10",
+    "label": "10 - Re-Assign",
+    "kanban": "in_progress",
+    "color": "slate"
+  },
+  {
+    "id": "11",
+    "label": "11 - Pending",
+    "kanban": "waiting",
+    "color": "slate"
+  }
+]

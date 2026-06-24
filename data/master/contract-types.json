@@ -1,0 +1,17 @@
+[
+  {
+    "id": "1e9576e3-51ad-42dd-9298-86942321ee2c",
+    "name": "Support",
+    "active": true
+  },
+  {
+    "id": "3751abc3-3e7b-4a8e-a049-41a96c5a2eef",
+    "name": "Fixed-Fee",
+    "active": true
+  },
+  {
+    "id": "7c66eee3-4305-400a-878d-a23d2a1b9685",
+    "name": "Subscription",
+    "active": true
+  }
+]
