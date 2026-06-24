@@ -8,6 +8,7 @@ import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
 import { Dialog, DialogContent } from "./ui/dialog";
 import { Input, Label, Select, Textarea } from "./ui/input";
+import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { hoursFromMd, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
@@ -44,6 +45,15 @@ const severityOptions = [
   { value: "Medium", label: "P3 - Medium" },
   { value: "Low", label: "P4 - Low" },
 ] as const;
+const kanbanStatusOptions = [
+  { value: "open", label: "Open" },
+  { value: "in_progress", label: "In progress" },
+  { value: "waiting", label: "Waiting" },
+  { value: "monitor", label: "Monitor" },
+  { value: "resolved", label: "Resolved" },
+  { value: "closed", label: "Closed" },
+  { value: "cancelled", label: "Cancelled" },
+];
 
 function ticketSortTime(ticket: Ticket) {
   const value = ticket.startDate || ticket.date || ticket.updatedAt;
@@ -245,10 +255,10 @@ export function TicketManager({
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [customerFilter, setCustomerFilter] = useState("all");
-  const [chargeableFilter, setChargeableFilter] = useState("all");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [typeFilters, setTypeFilters] = useState<string[]>([]);
+  const [customerFilters, setCustomerFilters] = useState<string[]>([]);
+  const [chargeableFilters, setChargeableFilters] = useState<string[]>([]);
   const [startDateFrom, setStartDateFrom] = useState("");
   const [startDateTo, setStartDateTo] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -258,20 +268,54 @@ export function TicketManager({
   const [busy, setBusy] = useState(false);
   const manage = role === "admin" || role === "lead" || role === "support";
   const holidayDates = useMemo(() => new Set(holidays.map((holiday) => holiday.date.slice(0, 10))), [holidays]);
+  const statusOptions = useMemo(() => {
+    const counts = tickets.reduce<Record<string, number>>((acc, ticket) => {
+      acc[ticket.kanbanStatus] = (acc[ticket.kanbanStatus] || 0) + 1;
+      return acc;
+    }, {});
+    return kanbanStatusOptions.map((option) => ({ ...option, count: counts[option.value] || 0 }));
+  }, [tickets]);
   const typeOptions = useMemo(() => {
-    const optionMap = new Map<string, string>();
+    const labelMap = new Map<string, string>();
+    const counts = new Map<string, number>();
     [...issueTypes.map((item) => item.name), ...tickets.map((ticket) => ticket.issueType)]
       .filter(Boolean)
-      .forEach((type) => optionMap.set(filterKey(formatIssueType(type)), formatIssueType(type)));
-    return [...optionMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+      .forEach((type) => labelMap.set(filterKey(formatIssueType(type)), formatIssueType(type)));
+    tickets
+      .map((ticket) => ticket.issueType)
+      .filter(Boolean)
+      .forEach((type) => {
+        const key = filterKey(formatIssueType(type));
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+    return [...labelMap.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([value, label]) => ({ value, label, count: counts.get(value) || 0 }));
   }, [issueTypes, tickets]);
   const customerOptions = useMemo(() => {
-    const optionMap = new Map<string, string>();
+    const labelMap = new Map<string, string>();
+    const counts = new Map<string, number>();
     [...customers.map((customer) => customer.customerName), ...tickets.map((ticket) => ticket.customerName)]
       .filter(Boolean)
-      .forEach((customerName) => optionMap.set(filterKey(customerName), customerName));
-    return [...optionMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+      .forEach((customerName) => labelMap.set(filterKey(customerName), customerName));
+    tickets
+      .map((ticket) => ticket.customerName)
+      .filter(Boolean)
+      .forEach((customerName) => {
+        const key = filterKey(customerName);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+    return [...labelMap.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([value, label]) => ({ value, label, count: counts.get(value) || 0 }));
   }, [customers, tickets]);
+  const chargeableOptions = useMemo(() => {
+    const chargeableCount = tickets.filter((ticket) => ticket.chargeable).length;
+    return [
+      { value: "yes", label: "Chargeable", count: chargeableCount },
+      { value: "no", label: "Non-charge", count: tickets.length - chargeableCount },
+    ];
+  }, [tickets]);
   const sortedCustomers = useMemo(
     () => [...customers].sort((a, b) =>
       a.customerName.localeCompare(b.customerName, undefined, { sensitivity: "base", numeric: true }) ||
@@ -282,13 +326,13 @@ export function TicketManager({
     () => tickets
       .filter((t) =>
         `${t.issueId} ${t.issueTitle} ${t.customerName} ${ticketOwnerLabel(t)}`.toLowerCase().includes(query.toLowerCase()) &&
-        (filter === "all" || t.kanbanStatus === filter) &&
-        (typeFilter === "all" || filterKey(formatIssueType(t.issueType)) === typeFilter) &&
-        (customerFilter === "all" || filterKey(t.customerName) === customerFilter) &&
+        (statusFilters.length === 0 || statusFilters.includes(t.kanbanStatus)) &&
+        (typeFilters.length === 0 || typeFilters.includes(filterKey(formatIssueType(t.issueType)))) &&
+        (customerFilters.length === 0 || customerFilters.includes(filterKey(t.customerName))) &&
         dateInRange(ticketStartDateKey(t), startDateFrom, startDateTo) &&
-        (chargeableFilter === "all" || (chargeableFilter === "yes" ? t.chargeable : !t.chargeable)))
+        (chargeableFilters.length === 0 || chargeableFilters.includes(t.chargeable ? "yes" : "no")))
       .sort(compareTickets),
-    [tickets, query, filter, typeFilter, customerFilter, startDateFrom, startDateTo, chargeableFilter],
+    [tickets, query, statusFilters, typeFilters, customerFilters, startDateFrom, startDateTo, chargeableFilters],
   );
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const activePage = Math.min(currentPage, totalPages);
@@ -365,24 +409,30 @@ export function TicketManager({
           <Search className="absolute left-3 top-2.5 text-slate-400" size={15} />
           <Input className="pl-9" value={query} onChange={(event) => { setQuery(event.target.value); setCurrentPage(1); }} placeholder="Search issue ID, title, customer, owner..." />
         </div>
-        <Select className="w-44" value={filter} onChange={(event) => { setFilter(event.target.value); setCurrentPage(1); }}>
-          <option value="all">All statuses</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In progress</option>
-          <option value="waiting">Waiting</option>
-          <option value="monitor">Monitor</option>
-          <option value="resolved">Resolved</option>
-          <option value="closed">Closed</option>
-          <option value="cancelled">Cancelled</option>
-        </Select>
-        <Select className="w-44" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setCurrentPage(1); }}>
-          <option value="all">All types</option>
-          {typeOptions.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-        </Select>
-        <Select className="w-48" value={customerFilter} onChange={(event) => { setCustomerFilter(event.target.value); setCurrentPage(1); }}>
-          <option value="all">All customers</option>
-          {customerOptions.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-        </Select>
+        <MultiSelectFilter
+          className="w-44"
+          label="Status"
+          allLabel="All statuses"
+          options={statusOptions}
+          selected={statusFilters}
+          onChange={(values) => { setStatusFilters(values); setCurrentPage(1); }}
+        />
+        <MultiSelectFilter
+          className="w-44"
+          label="Type"
+          allLabel="All types"
+          options={typeOptions}
+          selected={typeFilters}
+          onChange={(values) => { setTypeFilters(values); setCurrentPage(1); }}
+        />
+        <MultiSelectFilter
+          className="w-48"
+          label="Customer"
+          allLabel="All customers"
+          options={customerOptions}
+          selected={customerFilters}
+          onChange={(values) => { setCustomerFilters(values); setCurrentPage(1); }}
+        />
         <div className="flex items-center gap-2 rounded-lg border border-sky-100/90 bg-white/70 px-2 py-1">
           <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wide text-slate-400">Start</span>
           <Input
@@ -401,11 +451,14 @@ export function TicketManager({
             onChange={(event) => { setStartDateTo(event.target.value); setCurrentPage(1); }}
           />
         </div>
-        <Select className="w-40" value={chargeableFilter} onChange={(event) => { setChargeableFilter(event.target.value); setCurrentPage(1); }}>
-          <option value="all">All charge</option>
-          <option value="yes">Chargeable</option>
-          <option value="no">Non-charge</option>
-        </Select>
+        <MultiSelectFilter
+          className="w-40"
+          label="Charge"
+          allLabel="All charge"
+          options={chargeableOptions}
+          selected={chargeableFilters}
+          onChange={(values) => { setChargeableFilters(values); setCurrentPage(1); }}
+        />
         {manage && (
           <Button onClick={() => openEditor(null)}>
             <Plus size={15} />Add ticket

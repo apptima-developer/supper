@@ -8,6 +8,7 @@ import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
 import { Dialog, DialogContent } from "./ui/dialog";
 import { Input, Label, Select, Textarea } from "./ui/input";
+import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { Progress } from "./ui/progress";
@@ -90,7 +91,7 @@ function compareCustomers(a: Customer, b: Customer) {
 export function CustomerManager({ customers, contractTypes, role }: { customers: Customer[]; contractTypes: NamedMaster[]; role: Role }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [contractStatus, setContractStatus] = useState("all");
+  const [contractStatuses, setContractStatuses] = useState<string[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [open, setOpen] = useState(false);
@@ -99,25 +100,33 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
   const manage = role === "admin" || role === "lead";
   const aeOnly = role === "sales";
   const showFinancials = manage || aeOnly;
+  const contractStatusOptions = useMemo(() => {
+    const counts = customers.reduce<Record<string, number>>((acc, customer) => {
+      const status = manualContractStatus(customer.contractStatus);
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+    return ["Active", "Suspended", "Pre-sales", "Done"].map((status) => ({ value: status, label: status, count: counts[status] || 0 }));
+  }, [customers]);
   const filtered = useMemo(
     () => customers
       .filter((c) => (
         c.active &&
         `${c.projectCode} ${c.customerName} ${c.contractType}`.toLowerCase().includes(query.toLowerCase()) &&
-        (contractStatus === "all" || manualContractStatus(c.contractStatus) === contractStatus)
+        (contractStatuses.length === 0 || contractStatuses.includes(manualContractStatus(c.contractStatus)))
       ))
       .sort(compareCustomers),
-    [contractStatus, customers, query],
+    [contractStatuses, customers, query],
   );
   const archivedCustomers = useMemo(
     () => customers
       .filter((c) => (
         !c.active &&
         `${c.projectCode} ${c.customerName} ${c.contractType}`.toLowerCase().includes(query.toLowerCase()) &&
-        (contractStatus === "all" || manualContractStatus(c.contractStatus) === contractStatus)
+        (contractStatuses.length === 0 || contractStatuses.includes(manualContractStatus(c.contractStatus)))
       ))
       .sort(compareCustomers),
-    [contractStatus, customers, query],
+    [contractStatuses, customers, query],
   );
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const activePage = Math.min(currentPage, totalPages);
@@ -189,13 +198,14 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
           <Search className="absolute left-3 top-2.5 text-slate-400" size={15} />
           <Input className="pl-9" value={query} onChange={(e) => { setQuery(e.target.value); setCurrentPage(1); }} placeholder="Search customer, project, contract..." />
         </div>
-        <Select className="w-44" value={contractStatus} onChange={(e) => { setContractStatus(e.target.value); setCurrentPage(1); }}>
-          <option value="all">All contract statuses</option>
-          <option value="Active">Active</option>
-          <option value="Suspended">Suspended</option>
-          <option value="Pre-sales">Pre-sales</option>
-          <option value="Done">Done</option>
-        </Select>
+        <MultiSelectFilter
+          className="w-56"
+          label="Status"
+          allLabel="All contract statuses"
+          options={contractStatusOptions}
+          selected={contractStatuses}
+          onChange={(values) => { setContractStatuses(values); setCurrentPage(1); }}
+        />
         <Button variant={showArchived ? "default" : "outline"} onClick={() => setShowArchived((current) => !current)}>
           Archived
           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${showArchived ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{archivedCustomers.length}</span>
