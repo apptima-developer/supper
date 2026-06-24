@@ -419,6 +419,7 @@ export function TicketManager({
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr>
+                  <th className="w-24 px-4 py-2.5">Action</th>
                   <th className="px-4 py-2.5">Issue</th>
                   <th className="px-4 py-2.5">Customer</th>
                   <th className="px-4 py-2.5">Type / Severity</th>
@@ -428,7 +429,6 @@ export function TicketManager({
                   <th className="px-4 py-2.5">Chargeable</th>
                   <th className="px-4 py-2.5">SLA</th>
                   <th className="px-4 py-2.5">Status</th>
-                  <th className="w-20 px-4 py-2.5" />
                 </tr>
               </thead>
               <tbody>
@@ -436,6 +436,20 @@ export function TicketManager({
                   const sla = slaState(ticket, slaRules, holidayDates);
                   return (
                     <tr key={ticket.id} className="border-t hover:bg-slate-50/70">
+                      <td className="px-4 py-2">
+                        <div className="flex justify-start gap-1">
+                          {manage && (
+                            <Button variant="ghost" size="icon" onClick={() => openEditor(ticket)}>
+                              <SquarePen size={14} />
+                            </Button>
+                          )}
+                          {manage && (
+                            <Button variant="ghost" size="icon" onClick={() => remove(ticket)}>
+                              <Trash2 size={14} className="text-rose-500" />
+                            </Button>
+                          )}
+                        </div>
+                      </td>
                       <td className="max-w-[34rem] px-4 py-2">
                         <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                           <Link href={`/tickets/${ticket.id}`} className="shrink-0 font-medium text-slate-900 hover:text-[#0a84ff]">{ticket.issueId}</Link>
@@ -467,20 +481,6 @@ export function TicketManager({
                       </td>
                       <td className="whitespace-nowrap px-4 py-2">
                         <Badge tone={statusTone(ticket.status)}>{ticket.status.replace(/^\d{2}\s*-\s*/, "")}</Badge>
-                      </td>
-                      <td className="px-4 py-2">
-                        <div className="flex justify-end gap-1">
-                          {manage && (
-                            <Button variant="ghost" size="icon" onClick={() => openEditor(ticket)}>
-                              <SquarePen size={14} />
-                            </Button>
-                          )}
-                          {manage && (
-                            <Button variant="ghost" size="icon" onClick={() => remove(ticket)}>
-                              <Trash2 size={14} className="text-rose-500" />
-                            </Button>
-                          )}
-                        </div>
                       </td>
                     </tr>
                   );

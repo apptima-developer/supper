@@ -15,10 +15,12 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/empty-state";
 import { Progress } from "@/components/ui/progress";
 import { AgingChart, MdChart, OwnerTicketChart, StatusChart } from "@/components/dashboard-charts";
+import { requireSession } from "@/lib/auth";
 import { loadDashboardData } from "@/lib/repositories";
 import {
   hoursFromMd,
   isKanbanArchiveCandidate,
+  normalize,
   normalizeOwnerEfforts,
   ticketAgeDays,
   ticketEffortHours,
@@ -91,6 +93,10 @@ function prettyStatus(value: string) {
   return value.replace("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function ownerMatchesSession(owner: string, sessionNames: Set<string>) {
+  return sessionNames.has(normalize(owner));
+}
+
 function PulseStat({
   label,
   value,
@@ -121,7 +127,7 @@ function PulseStat({
 }
 
 export default async function DashboardPage() {
-  const { customers, tickets } = await loadDashboardData();
+  const [session, { customers, tickets }] = await Promise.all([requireSession(), loadDashboardData()]);
   const now = new Date();
   const openTickets = tickets.filter((ticket) => !closedStatuses.has(ticket.kanbanStatus));
   const overdueTickets = openTickets.filter((ticket) => {
@@ -170,13 +176,17 @@ export default async function DashboardPage() {
   const ownerWorkload = [...ownerMap.values()]
     .sort((a, b) => b.overdue - a.overdue || b.dueSoon - a.dueSoon || b.tickets - a.tickets || b.hours - a.hours)
     .slice(0, 10);
-  const maxOwnerTickets = Math.max(1, ...ownerWorkload.map((item) => item.tickets));
   const allOwnerWorkload = [...ownerMap.values()];
+  const sessionOwnerNames = new Set([session.username, session.name].map(normalize).filter(Boolean));
+  const visibleOwnerWorkload = session.role === "support"
+    ? allOwnerWorkload.filter((item) => ownerMatchesSession(item.owner, sessionOwnerNames))
+    : ownerWorkload;
+  const maxOwnerTickets = Math.max(1, ...visibleOwnerWorkload.map((item) => item.tickets));
   const totalAssigned = allOwnerWorkload.reduce((sum, item) => sum + item.tickets, 0);
   const totalOpenHours = allOwnerWorkload.reduce((sum, item) => sum + item.hours, 0);
   const unassigned = ownerMap.get("Unassigned")?.tickets || 0;
 
-  const ownerTicketData = ownerWorkload.slice(0, 8).map((item) => ({
+  const ownerTicketData = visibleOwnerWorkload.slice(0, 8).map((item) => ({
     name: item.owner,
     onTrack: Math.max(0, item.tickets - item.overdue - item.dueSoon),
     dueSoon: item.dueSoon,
@@ -223,9 +233,9 @@ export default async function DashboardPage() {
               <div className="max-w-2xl">
                 <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-sky-600/70">Assignment signal</p>
                 <h2 className="mt-2 text-[26px] font-semibold tracking-tight text-[#132f46]">
-                  {overdueTickets.length
-                    ? `${overdueTickets.length} overdue tickets need owner action`
-                    : "No overdue assigned work right now"}
+              {overdueTickets.length
+                ? `${overdueTickets.length} overdue tickets need owner action`
+                : "No overdue assigned work right now"}
                 </h2>
                 <p className="mt-2 text-[12px] leading-5 text-slate-500">
                   Tracking {openTickets.length} open tickets across {ownerMap.size} owners, with {formatHours(totalOpenHours)} open effort hours currently on assignment.
@@ -260,11 +270,11 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle>On assignment by owner</CardTitle>
-            <span className="text-[10px] text-slate-400">account = owner</span>
+            <span className="text-[10px] text-slate-400">{session.role === "support" ? "your assigned work" : "account = owner"}</span>
           </CardHeader>
-          {ownerWorkload.length ? (
+          {visibleOwnerWorkload.length ? (
             <CardContent className="space-y-3">
-              {ownerWorkload.map((item, index) => {
+              {visibleOwnerWorkload.map((item, index) => {
                 const riskTone: "rose" | "amber" | "blue" | "slate" = item.overdue ? "rose" : item.dueSoon ? "amber" : item.tickets ? "blue" : "slate";
                 return (
                   <div key={item.owner} className="rounded-2xl border border-sky-100/80 bg-white/76 p-3">
@@ -291,14 +301,14 @@ export default async function DashboardPage() {
               })}
             </CardContent>
           ) : (
-            <EmptyState title="No open assignments" description="Open ticket assignment will appear here once tickets have owners." />
+            <EmptyState title="No open assignments" description={session.role === "support" ? "No open tickets are assigned to your account/owner name." : "Open ticket assignment will appear here once tickets have owners."} />
           )}
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Ticket load comparison</CardTitle>
-            <span className="text-[10px] text-slate-400">Open / due soon / overdue</span>
+            <span className="text-[10px] text-slate-400">{session.role === "support" ? "Your open / due soon / overdue" : "Open / due soon / overdue"}</span>
           </CardHeader>
           <CardContent>
             {ownerTicketData.length ? <OwnerTicketChart data={ownerTicketData} /> : <EmptyState title="No owner ticket data" />}
@@ -368,8 +378,8 @@ export default async function DashboardPage() {
             <div className="rounded-2xl bg-white/74 p-4 ring-1 ring-sky-100/80">
               <div className="flex items-center gap-2 text-rose-700"><AlertTriangle size={16} /><p className="font-semibold">Highest risk</p></div>
               <p className="mt-2 text-[12px] leading-5 text-slate-500">
-                {ownerWorkload[0]
-                  ? `${ownerWorkload[0].owner} carries ${ownerWorkload[0].tickets} open assignments and ${ownerWorkload[0].overdue} overdue items.`
+                {visibleOwnerWorkload[0]
+                  ? `${visibleOwnerWorkload[0].owner} carries ${visibleOwnerWorkload[0].tickets} open assignments and ${visibleOwnerWorkload[0].overdue} overdue items.`
                   : "No owner currently carries open work."}
               </p>
             </div>
