@@ -80,3 +80,95 @@ main tbody tr {
 
 @keyframes enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 .page-enter { animation: enter .22s ease-out; }
+
+html.theme-dark {
+  color-scheme: dark;
+  --background: #07111f;
+  --foreground: #e5edf7;
+  --card: rgba(15, 23, 42, .84);
+  --border: #1e3a5f;
+  --muted: #94a3b8;
+  --primary-soft: rgba(14, 165, 233, .16);
+  --sidebar: rgba(15, 23, 42, .78);
+}
+
+html.theme-dark body {
+  background:
+    radial-gradient(circle at 14% -10%, rgba(14, 165, 233, .18), transparent 34%),
+    radial-gradient(circle at 88% -6%, rgba(124, 58, 237, .18), transparent 30%),
+    linear-gradient(180deg, #07111f 0%, #0b1727 50%, #07111f 100%);
+  color: var(--foreground);
+}
+
+html.theme-dark .app-shell {
+  background:
+    radial-gradient(circle at 18% -10%, rgba(56, 189, 248, .14), transparent 34%),
+    radial-gradient(circle at 92% 2%, rgba(167, 139, 250, .16), transparent 30%),
+    linear-gradient(180deg, #07111f 0%, #0b1727 52%, #07111f 100%);
+}
+
+html.theme-dark aside,
+html.theme-dark header {
+  background-color: rgba(15, 23, 42, .78);
+  border-color: rgba(56, 189, 248, .18);
+}
+
+html.theme-dark .lux-surface,
+html.theme-dark main .rounded-lg.border.bg-white,
+html.theme-dark main .rounded-xl.border.bg-white,
+html.theme-dark main .rounded-2xl.border.bg-white,
+html.theme-dark [class*="bg-white"] {
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, .9), rgba(15, 23, 42, .72)),
+    var(--card);
+  border-color: rgba(56, 189, 248, .18);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .22), 0 1px 0 rgba(148, 163, 184, .12) inset;
+}
+
+html.theme-dark main thead.bg-slate-50,
+html.theme-dark main .bg-slate-50,
+html.theme-dark main .bg-slate-100 {
+  background-color: rgba(30, 41, 59, .72);
+}
+
+html.theme-dark main tbody tr.border-t,
+html.theme-dark main .divide-y > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(51, 65, 85, .86);
+}
+
+html.theme-dark main tbody tr.hover\:bg-slate-50\/70:hover,
+html.theme-dark main a.hover\:bg-slate-50:hover,
+html.theme-dark .hover\:bg-sky-50:hover,
+html.theme-dark .hover\:bg-white\/65:hover {
+  background-color: rgba(30, 41, 59, .82);
+}
+
+html.theme-dark input,
+html.theme-dark select,
+html.theme-dark textarea {
+  background-color: rgba(15, 23, 42, .82);
+  color: #e5edf7;
+  border-color: rgba(56, 189, 248, .22);
+}
+
+html.theme-dark input::placeholder,
+html.theme-dark textarea::placeholder {
+  color: #64748b;
+}
+
+html.theme-dark [class*="text-slate-900"],
+html.theme-dark [class*="text-slate-800"],
+html.theme-dark [class*="text-[#173b57]"],
+html.theme-dark [class*="text-[#132f46]"] {
+  color: #e5edf7;
+}
+
+html.theme-dark [class*="text-slate-700"],
+html.theme-dark [class*="text-slate-600"],
+html.theme-dark [class*="text-slate-500"] {
+  color: #cbd5e1;
+}
+
+html.theme-dark [class*="text-slate-400"] {
+  color: #94a3b8;
+}
