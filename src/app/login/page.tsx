@@ -3,6 +3,9 @@ import { Button } from "@/components/ui/button";
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const { error } = await searchParams;
+  const errorMessage = error === "setup"
+    ? "Storage setup is incomplete. Verify Supabase environment variables, app_store SQL permissions, and seed data before signing in."
+    : error ? "Invalid username or password." : "";
 
   return (
     <main className="grid min-h-screen bg-[radial-gradient(circle_at_18%_-8%,rgba(125,211,252,.42),transparent_34%),radial-gradient(circle_at_86%_0%,rgba(196,181,253,.24),transparent_30%),linear-gradient(180deg,#fbfdff,#eef8ff_52%,#f8fbff)] lg:grid-cols-[1.08fr_.92fr]">
@@ -68,7 +71,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
                 <input required name="password" type="password" autoComplete="current-password" className="h-10 w-full rounded-xl border border-sky-100/90 bg-white/80 pl-10 pr-3 text-[13px] outline-none transition-all placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-200/35" placeholder="Enter password" />
               </div>
             </div>
-            {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-700">Invalid username or password.</div>}
+            {errorMessage && <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-700">{errorMessage}</div>}
             <Button className="h-10 w-full">Sign in</Button>
           </form>
 
