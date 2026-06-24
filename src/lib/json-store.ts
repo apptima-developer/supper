@@ -13,6 +13,13 @@ async function store(): Promise<StoreModule> {
   return import("./store");
 }
 
+function supabaseRequiredError(action: string, relativePath = "data") {
+  return new Error(
+    `Supabase storage is required to ${action} ${relativePath}. ` +
+    "Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, run scripts/supabase-app-store.sql, then run npm run supabase:seed.",
+  );
+}
+
 export function dataPath(relativePath: string) {
   const resolved = path.resolve(DATA_ROOT, relativePath);
   if (!resolved.startsWith(DATA_ROOT + path.sep)) throw new Error("Invalid data path");
@@ -34,6 +41,7 @@ export async function readJson<T>(relativePath: string, schema: ZodType<T>): Pro
       console.warn(`Supabase read failed for ${relativePath}; falling back to local data/.`);
     }
   }
+  if (strictSupabase) throw supabaseRequiredError("read", relativePath);
   return readFileJson(relativePath, schema);
 }
 
@@ -55,6 +63,7 @@ export async function writeJsonAtomic<T>(relativePath: string, value: T, schema:
       console.warn(`Supabase write failed for ${relativePath}; falling back to local data/.`);
     }
   }
+  if (strictSupabase) throw supabaseRequiredError("write", relativePath);
 
   const target = dataPath(relativePath);
   const directory = path.dirname(target);
@@ -96,6 +105,7 @@ export async function listBackups() {
       console.warn("Supabase backup listing failed; falling back to local data/backups.");
     }
   }
+  if (strictSupabase) throw supabaseRequiredError("list backups from", "backups/");
 
   const root = path.join(DATA_ROOT, "backups");
   const results: string[] = [];
@@ -143,6 +153,7 @@ export async function restoreBackup(relativeBackupPath: string) {
       console.warn(`Supabase restore failed for ${relativeBackupPath}; falling back to local data/backups.`);
     }
   }
+  if (strictSupabase) throw supabaseRequiredError("restore backup", relativeBackupPath);
 
   const source = dataPath(relativeBackupPath);
   const raw = JSON.parse(await fs.readFile(source, "utf8"));
