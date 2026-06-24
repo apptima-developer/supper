@@ -4,6 +4,14 @@ import type { ZodType } from "zod";
 
 const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
+const supabaseEnabled = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+const strictSupabase = process.env.DATA_BACKEND === "supabase" || process.env.NODE_ENV === "production";
+
+type StoreModule = typeof import("./store");
+
+async function store(): Promise<StoreModule> {
+  return import("./store");
+}
 
 export function dataPath(relativePath: string) {
   const resolved = path.resolve(DATA_ROOT, relativePath);
@@ -11,20 +19,49 @@ export function dataPath(relativePath: string) {
   return resolved;
 }
 
-export async function readJson<T>(relativePath: string, schema: ZodType<T>): Promise<T> {
+async function readFileJson<T>(relativePath: string, schema: ZodType<T>): Promise<T> {
   const raw = await fs.readFile(dataPath(relativePath), "utf8");
   return schema.parse(JSON.parse(raw));
 }
 
+export async function readJson<T>(relativePath: string, schema: ZodType<T>): Promise<T> {
+  if (supabaseEnabled) {
+    try {
+      const value = await (await store()).getStore<T>(relativePath);
+      if (value !== undefined) return schema.parse(value);
+    } catch (error) {
+      if (strictSupabase) throw error;
+      console.warn(`Supabase read failed for ${relativePath}; falling back to local data/.`);
+    }
+  }
+  return readFileJson(relativePath, schema);
+}
+
 export async function writeJsonAtomic<T>(relativePath: string, value: T, schema: ZodType<T>) {
   const parsed = schema.parse(value);
+  const suffix = `${Date.now()}-${crypto.randomUUID()}`;
+
+  if (supabaseEnabled) {
+    try {
+      const current = await (await store()).getStore<T>(relativePath);
+      if (current !== undefined) {
+        const backupName = `backups/${path.dirname(relativePath)}/${path.basename(relativePath, ".json")}-${suffix}.json`;
+        await (await store()).setStore(backupName, current);
+      }
+      await (await store()).setStore(relativePath, parsed);
+      return parsed;
+    } catch (error) {
+      if (strictSupabase) throw error;
+      console.warn(`Supabase write failed for ${relativePath}; falling back to local data/.`);
+    }
+  }
+
   const target = dataPath(relativePath);
   const directory = path.dirname(target);
   const backupDirectory = path.join(DATA_ROOT, "backups", path.dirname(relativePath));
   await fs.mkdir(directory, { recursive: true });
   await fs.mkdir(backupDirectory, { recursive: true });
 
-  const suffix = `${Date.now()}-${crypto.randomUUID()}`;
   const tempPath = `${target}.${suffix}.tmp`;
   try {
     await fs.access(target);
@@ -50,6 +87,16 @@ export function updateJson<T>(relativePath: string, schema: ZodType<T>, updater:
 }
 
 export async function listBackups() {
+  if (supabaseEnabled) {
+    try {
+      const keys = await (await store()).listStoreKeys("backups/");
+      return keys.filter((key) => key.endsWith(".json")).sort().reverse();
+    } catch (error) {
+      if (strictSupabase) throw error;
+      console.warn("Supabase backup listing failed; falling back to local data/backups.");
+    }
+  }
+
   const root = path.join(DATA_ROOT, "backups");
   const results: string[] = [];
   async function walk(directory: string) {
@@ -77,8 +124,27 @@ function backupTarget(relativeBackupPath: string) {
 }
 
 export async function restoreBackup(relativeBackupPath: string) {
-  const source = dataPath(relativeBackupPath);
   const { target } = backupTarget(relativeBackupPath);
+
+  if (supabaseEnabled) {
+    try {
+      const raw = await (await store()).getStore<unknown>(relativeBackupPath);
+      if (raw === undefined) throw new Error("Backup not found");
+      const current = await (await store()).getStore<unknown>(target);
+      if (current !== undefined) {
+        const suffix = `${Date.now()}-${crypto.randomUUID()}`;
+        const preRestoreBackup = `backups/${path.dirname(target)}/${path.basename(target, ".json")}-${suffix}.json`;
+        await (await store()).setStore(preRestoreBackup, current);
+      }
+      await (await store()).setStore(target, raw);
+      return target;
+    } catch (error) {
+      if (strictSupabase) throw error;
+      console.warn(`Supabase restore failed for ${relativeBackupPath}; falling back to local data/backups.`);
+    }
+  }
+
+  const source = dataPath(relativeBackupPath);
   const raw = JSON.parse(await fs.readFile(source, "utf8"));
   const targetPath = dataPath(target);
   const temporary = `${targetPath}.${crypto.randomUUID()}.restore.tmp`;
