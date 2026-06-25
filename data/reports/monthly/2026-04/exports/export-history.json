@@ -1,0 +1,15 @@
+[
+  {
+    "id": "fd0cacd9-49c4-4e3f-a8d9-405b27ab3c0e",
+    "batchId": "d077de6c-2d73-4568-951e-a3362ccdc823",
+    "year": 2026,
+    "month": 4,
+    "projectCode": "10-25-142-02-1",
+    "generatedBy": "admin",
+    "generatedAt": "2026-06-25T04:39:49.068Z",
+    "mandaySummaryPath": "reports/monthly/2026-04/exports/10-25-142-02-1/1782362389067/10-25-142-02-1_OT_2026_Manday_Summary_04.xlsx",
+    "monthlyReportWorkbookPath": "reports/monthly/2026-04/exports/10-25-142-02-1/1782362389067/10-25-142-02-1_Support_Service_Monthly_Report_04.xlsx",
+    "monthlyReportPdfPath": "reports/monthly/2026-04/exports/10-25-142-02-1/1782362389067/10-25-142-02-1_Support_Service_Monthly_Report_04.pdf",
+    "status": "generated"
+  }
+]

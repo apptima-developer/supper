@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -174,23 +174,33 @@ function UploadField({
   disabled?: boolean;
   onFileChange: (name: UploadFieldName, file?: File) => void;
 }) {
-  const inputId = useId();
+  const inputId = `monthly-report-${name}`;
 
   return (
-    <div>
-      <label htmlFor={inputId} className="mb-1.5 block cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+    <div className="space-y-2">
+      <label htmlFor={inputId} className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
         {label}<span className="ml-1 text-rose-500">*</span>
       </label>
-      <input
-        id={inputId}
-        name={name}
-        type="file"
-        accept=".xlsx"
-        disabled={disabled}
-        className="block w-full cursor-pointer text-[13px] text-slate-800 disabled:cursor-not-allowed disabled:opacity-55"
-        onChange={(event) => onFileChange(name, event.target.files?.[0])}
-      />
-      {file ? <p className="mt-1 text-[10px] text-slate-400">{file.name}</p> : null}
+      <label
+        htmlFor={inputId}
+        className="flex min-h-12 cursor-pointer items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-white/75 px-3 py-2 transition-colors hover:border-sky-300 hover:bg-sky-50/70"
+      >
+        <input
+          id={inputId}
+          name={name}
+          type="file"
+          accept=".xlsx"
+          disabled={disabled}
+          className="sr-only"
+          onChange={(event) => onFileChange(name, event.target.files?.[0])}
+        />
+        <span className={cn("min-w-0 flex-1 truncate text-[13px]", file ? "font-medium text-slate-800" : "text-slate-400")}>
+          {file?.name || "Choose .xlsx file"}
+        </span>
+        <span className="rounded-full border border-sky-100 bg-sky-50 px-3 py-1 text-[11px] font-semibold text-sky-700">
+          Browse
+        </span>
+      </label>
     </div>
   );
 }

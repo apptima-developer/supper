@@ -1,0 +1,59 @@
+{
+  "id": "4ecb4987-6bc3-4e59-adc3-7b0c489d536a",
+  "year": 2026,
+  "month": 5,
+  "periodStart": "2026-05-01T00:00:00.000Z",
+  "periodEnd": "2026-05-31T23:59:59.999Z",
+  "status": "validated",
+  "sourceFiles": [
+    {
+      "id": "81b1d434-79af-4181-accc-920cce572c2a",
+      "batchId": "4ecb4987-6bc3-4e59-adc3-7b0c489d536a",
+      "fileType": "monthly_review",
+      "originalFileName": "Monthly Review by project code owner (Thanapong ECM)[24].xlsx",
+      "sheetName": "Page 1",
+      "headerHash": "76135c2d213c7fe9",
+      "rowCount": 10972,
+      "storagePath": "reports/monthly/2026-05/source/monthly-review.xlsx",
+      "importedAt": "2026-06-25T04:38:30.242Z"
+    },
+    {
+      "id": "4e0c5a60-4098-489e-84d3-161772b5db2a",
+      "batchId": "4ecb4987-6bc3-4e59-adc3-7b0c489d536a",
+      "fileType": "cr",
+      "originalFileName": "(Old) Thanapong ECM  Change Request summary ticket[1].xlsx",
+      "sheetName": "Page 1",
+      "headerHash": "7dc08a07a43f3b12",
+      "rowCount": 10,
+      "storagePath": "reports/monthly/2026-05/source/cr.xlsx",
+      "importedAt": "2026-06-25T04:38:30.242Z"
+    },
+    {
+      "id": "3cbc9d9d-9b63-440f-aeb9-8db8ccdc935c",
+      "batchId": "4ecb4987-6bc3-4e59-adc3-7b0c489d536a",
+      "fileType": "inc",
+      "originalFileName": "(Old) Thanapong ECM  Incident summary ticket[57].xlsx",
+      "sheetName": "Page 1",
+      "headerHash": "b9affba0ec31da9d",
+      "rowCount": 1104,
+      "storagePath": "reports/monthly/2026-05/source/inc.xlsx",
+      "importedAt": "2026-06-25T04:38:30.242Z"
+    },
+    {
+      "id": "45151d8a-c79e-467c-b7db-beae03556e76",
+      "batchId": "4ecb4987-6bc3-4e59-adc3-7b0c489d536a",
+      "fileType": "sr",
+      "originalFileName": "(Old) Thanapong ECM  Service Request summary ticket[4].xlsx",
+      "sheetName": "Page 1",
+      "headerHash": "eee6cc76dacb3a36",
+      "rowCount": 2326,
+      "storagePath": "reports/monthly/2026-05/source/sr.xlsx",
+      "importedAt": "2026-06-25T04:38:30.242Z"
+    }
+  ],
+  "projectSummaries": [],
+  "errors": [],
+  "createdBy": "admin",
+  "createdAt": "2026-06-25T04:38:30.242Z",
+  "updatedAt": "2026-06-25T04:38:30.242Z"
+}
