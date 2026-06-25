@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -174,32 +174,28 @@ function UploadField({
   disabled?: boolean;
   onFileChange: (name: UploadFieldName, file?: File) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-
   return (
     <div>
       <Label required>{label}</Label>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => inputRef.current?.click()}
-        className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-sky-100/90 bg-white/80 px-3 text-left text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] transition-all hover:border-sky-200 hover:bg-sky-50/80 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-200/35 disabled:cursor-not-allowed disabled:opacity-55"
-      >
+      <label className={cn(
+        "relative flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 overflow-hidden rounded-lg border border-sky-100/90 bg-white/80 px-3 text-left text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] transition-all hover:border-sky-200 hover:bg-sky-50/80 focus-within:ring-4 focus-within:ring-sky-200/35",
+        disabled && "cursor-not-allowed opacity-55"
+      )}>
         <span className={cn("truncate", !fileName && "text-slate-400")}>
           {fileName || "Choose .xlsx file"}
         </span>
         <span className="shrink-0 rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-100/80">
           Browse
         </span>
-      </button>
-      <input
-        ref={inputRef}
-        name={name}
-        type="file"
-        accept=".xlsx"
-        hidden
-        onChange={(event) => onFileChange(name, event.target.files?.[0])}
-      />
+        <input
+          name={name}
+          type="file"
+          accept=".xlsx"
+          disabled={disabled}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+          onChange={(event) => onFileChange(name, event.target.files?.[0])}
+        />
+      </label>
     </div>
   );
 }
