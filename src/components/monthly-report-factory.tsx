@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Download, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -174,15 +174,20 @@ function UploadField({
   disabled?: boolean;
   onFileChange: (name: UploadFieldName, file?: File) => void;
 }) {
+  const inputId = useId();
+
   return (
     <div>
-      <Label required>{label}</Label>
+      <label htmlFor={inputId} className="mb-1.5 block cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+        {label}<span className="ml-1 text-rose-500">*</span>
+      </label>
       <input
+        id={inputId}
         name={name}
         type="file"
         accept=".xlsx"
         disabled={disabled}
-        className="block w-full cursor-pointer rounded-lg border border-sky-100/90 bg-white/80 px-3 py-2 text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] outline-none transition-all file:mr-4 file:cursor-pointer file:rounded-full file:border-0 file:bg-sky-50 file:px-3 file:py-1.5 file:text-[12px] file:font-semibold file:text-sky-700 hover:border-sky-200 hover:bg-sky-50/80 focus:border-sky-300 focus:ring-4 focus:ring-sky-200/35 disabled:cursor-not-allowed disabled:opacity-55"
+        className="block w-full cursor-pointer text-[13px] text-slate-800 disabled:cursor-not-allowed disabled:opacity-55"
         onChange={(event) => onFileChange(name, event.target.files?.[0])}
       />
       {file ? <p className="mt-1 text-[10px] text-slate-400">{file.name}</p> : null}
