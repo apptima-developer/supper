@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -23,6 +23,15 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "issue", label: "Issue List Preview" },
   { key: "exports", label: "Export History" },
 ];
+
+const uploadFields = [
+  { name: "monthlyReview", label: "Monthly Review" },
+  { name: "cr", label: "Change Request" },
+  { name: "inc", label: "Incident" },
+  { name: "sr", label: "Service Request" },
+] as const;
+
+type UploadFieldName = (typeof uploadFields)[number]["name"];
 
 function periodLabel(batch: MonthlyReportBatch) {
   return `${batch.year}-${String(batch.month).padStart(2, "0")}`;
@@ -152,6 +161,49 @@ function SummaryGrid({ summary }: { summary?: MonthlyProjectSummary }) {
   );
 }
 
+function UploadField({
+  name,
+  label,
+  fileName,
+  disabled,
+  onFileChange,
+}: {
+  name: UploadFieldName;
+  label: string;
+  fileName?: string;
+  disabled?: boolean;
+  onFileChange: (name: UploadFieldName, file?: File) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div>
+      <Label required>{label}</Label>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => inputRef.current?.click()}
+        className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-sky-100/90 bg-white/80 px-3 text-left text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] transition-all hover:border-sky-200 hover:bg-sky-50/80 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-200/35 disabled:cursor-not-allowed disabled:opacity-55"
+      >
+        <span className={cn("truncate", !fileName && "text-slate-400")}>
+          {fileName || "Choose .xlsx file"}
+        </span>
+        <span className="shrink-0 rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-100/80">
+          Browse
+        </span>
+      </button>
+      <input
+        ref={inputRef}
+        name={name}
+        type="file"
+        accept=".xlsx"
+        hidden
+        onChange={(event) => onFileChange(name, event.target.files?.[0])}
+      />
+    </div>
+  );
+}
+
 export function MonthlyReportFactory({ initialBatches, role }: { initialBatches: MonthlyReportBatch[]; role: Role }) {
   const current = new Date();
   const [year, setYear] = useState(current.getFullYear());
@@ -162,8 +214,10 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
   const [preview, setPreview] = useState<MonthlyReportPreview | null>(null);
   const [tab, setTab] = useState<TabKey>("summary");
   const [busy, setBusy] = useState("");
+  const [fileNames, setFileNames] = useState<Partial<Record<UploadFieldName, string>>>({});
   const canManage = role === "admin" || role === "lead";
   const selectedBatch = useMemo(() => batches.find((batch) => periodLabel(batch) === selectedPeriod), [batches, selectedPeriod]);
+  const allFilesSelected = uploadFields.every((field) => fileNames[field.name]);
 
   useEffect(() => {
     if (!selectedPeriod) return;
@@ -191,8 +245,16 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
 
   async function createBatch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy("upload");
     const formData = new FormData(event.currentTarget);
+    const missing = uploadFields.filter((field) => {
+      const file = formData.get(field.name);
+      return !(file instanceof File) || file.size === 0;
+    });
+    if (missing.length) {
+      toast.error(`Choose all required workbooks first: ${missing.map((field) => field.label).join(", ")}`);
+      return;
+    }
+    setBusy("upload");
     formData.set("year", String(year));
     formData.set("month", String(month));
     try {
@@ -211,6 +273,10 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
     } finally {
       setBusy("");
     }
+  }
+
+  function handleFileChange(name: UploadFieldName, file?: File) {
+    setFileNames((current) => ({ ...current, [name]: file?.name || "" }));
   }
 
   async function exportProject(force = false) {
@@ -268,12 +334,18 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
                   <div><Label>Month</Label><Select value={String(month)} onChange={(event) => setMonth(Number(event.target.value))}>{Array.from({ length: 12 }, (_, index) => index + 1).map((item) => <option key={item} value={item}>{String(item).padStart(2, "0")}</option>)}</Select></div>
                 </div>
                 <div className="grid gap-3">
-                  <div><Label required>Monthly Review</Label><Input name="monthlyReview" type="file" accept=".xlsx" required /></div>
-                  <div><Label required>Change Request</Label><Input name="cr" type="file" accept=".xlsx" required /></div>
-                  <div><Label required>Incident</Label><Input name="inc" type="file" accept=".xlsx" required /></div>
-                  <div><Label required>Service Request</Label><Input name="sr" type="file" accept=".xlsx" required /></div>
+                  {uploadFields.map((field) => (
+                    <UploadField
+                      key={field.name}
+                      name={field.name}
+                      label={field.label}
+                      fileName={fileNames[field.name]}
+                      disabled={Boolean(busy)}
+                      onFileChange={handleFileChange}
+                    />
+                  ))}
                 </div>
-                <Button className="w-full" disabled={Boolean(busy)}>
+                <Button className="w-full" disabled={Boolean(busy) || !allFilesSelected}>
                   {busy === "upload" ? <><LoaderCircle size={15} className="animate-spin" />Validating...</> : <><FileSpreadsheet size={15} />Validate and store batch</>}
                 </Button>
               </form>
