@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Download, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -13,6 +13,13 @@ import type { MonthlyIssueListRow, MonthlyProjectSummary, MonthlyReportBatch, Mo
 import type { Role } from "@/lib/types";
 
 type TabKey = "summary" | "monthly" | "cr" | "inc" | "sr" | "issue" | "exports";
+type FilePickerWindow = Window & {
+  showOpenFilePicker?: (options?: {
+    multiple?: boolean;
+    excludeAcceptAllOption?: boolean;
+    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  }) => Promise<Array<{ getFile: () => Promise<File> }>>;
+};
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "summary", label: "Summary" },
@@ -164,38 +171,82 @@ function SummaryGrid({ summary }: { summary?: MonthlyProjectSummary }) {
 function UploadField({
   name,
   label,
-  fileName,
+  file,
   disabled,
   onFileChange,
 }: {
   name: UploadFieldName;
   label: string;
-  fileName?: string;
+  file?: File;
   disabled?: boolean;
   onFileChange: (name: UploadFieldName, file?: File) => void;
 }) {
+  const inputId = useId();
+
+  async function openPicker(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    if (disabled) return;
+    const nativePicker = (window as FilePickerWindow).showOpenFilePicker;
+    if (typeof nativePicker === "function") {
+      try {
+        const [handle] = await nativePicker({
+          multiple: false,
+          excludeAcceptAllOption: false,
+          types: [{ description: "Excel workbook", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
+        });
+        const pickedFile = await handle?.getFile();
+        if (pickedFile) onFileChange(name, pickedFile);
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    const input = document.getElementById(inputId) as HTMLInputElement | null;
+    if (!input) return;
+    try {
+      if (typeof input.showPicker === "function") input.showPicker();
+      else input.click();
+    } catch {
+      input.click();
+    }
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    if (disabled) return;
+    const dropped = Array.from(event.dataTransfer.files).find((item) => item.name.toLowerCase().endsWith(".xlsx"));
+    onFileChange(name, dropped);
+  }
+
   return (
     <div>
       <Label required>{label}</Label>
-      <label className={cn(
-        "relative flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 overflow-hidden rounded-lg border border-sky-100/90 bg-white/80 px-3 text-left text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] transition-all hover:border-sky-200 hover:bg-sky-50/80 focus-within:ring-4 focus-within:ring-sky-200/35",
+      <input
+        id={inputId}
+        name={name}
+        type="file"
+        accept=".xlsx"
+        disabled={disabled}
+        className="sr-only"
+        onChange={(event) => onFileChange(name, event.target.files?.[0])}
+      />
+      <button
+        type="button"
+        onClick={openPicker}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleDrop}
+        disabled={disabled}
+        className={cn(
+        "flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 rounded-lg border border-sky-100/90 bg-white/80 px-3 text-left text-[13px] text-slate-800 shadow-[0_1px_0_rgba(255,255,255,.9)_inset] transition-all hover:border-sky-200 hover:bg-sky-50/80 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-200/35 disabled:cursor-not-allowed disabled:opacity-55",
         disabled && "cursor-not-allowed opacity-55"
       )}>
-        <span className={cn("truncate", !fileName && "text-slate-400")}>
-          {fileName || "Choose .xlsx file"}
+        <span className={cn("truncate", !file && "text-slate-400")}>
+          {file?.name || "Choose or drop .xlsx file"}
         </span>
         <span className="shrink-0 rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-100/80">
           Browse
         </span>
-        <input
-          name={name}
-          type="file"
-          accept=".xlsx"
-          disabled={disabled}
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
-          onChange={(event) => onFileChange(name, event.target.files?.[0])}
-        />
-      </label>
+      </button>
     </div>
   );
 }
@@ -210,10 +261,10 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
   const [preview, setPreview] = useState<MonthlyReportPreview | null>(null);
   const [tab, setTab] = useState<TabKey>("summary");
   const [busy, setBusy] = useState("");
-  const [fileNames, setFileNames] = useState<Partial<Record<UploadFieldName, string>>>({});
+  const [selectedFiles, setSelectedFiles] = useState<Partial<Record<UploadFieldName, File>>>({});
   const canManage = role === "admin" || role === "lead";
   const selectedBatch = useMemo(() => batches.find((batch) => periodLabel(batch) === selectedPeriod), [batches, selectedPeriod]);
-  const allFilesSelected = uploadFields.every((field) => fileNames[field.name]);
+  const allFilesSelected = uploadFields.every((field) => selectedFiles[field.name]);
 
   useEffect(() => {
     if (!selectedPeriod) return;
@@ -241,18 +292,16 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
 
   async function createBatch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const missing = uploadFields.filter((field) => {
-      const file = formData.get(field.name);
-      return !(file instanceof File) || file.size === 0;
-    });
+    const missing = uploadFields.filter((field) => !selectedFiles[field.name]);
     if (missing.length) {
       toast.error(`Choose all required workbooks first: ${missing.map((field) => field.label).join(", ")}`);
       return;
     }
     setBusy("upload");
+    const formData = new FormData();
     formData.set("year", String(year));
     formData.set("month", String(month));
+    for (const field of uploadFields) formData.set(field.name, selectedFiles[field.name] as File);
     try {
       const response = await fetch("/api/monthly-reports/batches", { method: "POST", body: formData });
       const result = await response.json();
@@ -272,7 +321,7 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
   }
 
   function handleFileChange(name: UploadFieldName, file?: File) {
-    setFileNames((current) => ({ ...current, [name]: file?.name || "" }));
+    setSelectedFiles((current) => ({ ...current, [name]: file }));
   }
 
   async function exportProject(force = false) {
@@ -335,7 +384,7 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
                       key={field.name}
                       name={field.name}
                       label={field.label}
-                      fileName={fileNames[field.name]}
+                      file={selectedFiles[field.name]}
                       disabled={Boolean(busy)}
                       onFileChange={handleFileChange}
                     />
