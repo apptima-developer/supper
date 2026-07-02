@@ -3,12 +3,14 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
-import { CalendarClock, GripVertical, UserRound } from "lucide-react";
+import { CalendarClock, GripVertical, Search, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import type { Role, Ticket } from "@/lib/types";
-import { KANBAN_ARCHIVE_AGE_DAYS, isKanbanArchiveCandidate, isTicketOwner, ticketAgeAnchorDate, ticketAgeDays, ticketOwnerLabel } from "@/lib/domain";
+import { KANBAN_ARCHIVE_AGE_DAYS, isKanbanArchiveCandidate, isTicketOwner, normalize, ticketAgeAnchorDate, ticketAgeDays, ticketOwnerLabel } from "@/lib/domain";
 import { Badge, statusTone } from "./ui/badge";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { cn, formatDate } from "@/lib/utils";
 
 const columns = [
@@ -101,15 +103,40 @@ function Column({ column, tickets, role, userName, username }: { column: typeof 
 export function KanbanBoard({ initialTickets, role, userName, username }: { initialTickets: Ticket[]; role: Role; userName: string; username: string }) {
   const [tickets, setTickets] = useState(initialTickets.filter((ticket) => !isTicketClosed(ticket)));
   const [showArchived, setShowArchived] = useState(false);
+  const [mineOnly, setMineOnly] = useState(false);
+  const [issueQuery, setIssueQuery] = useState("");
+  const [customerFilters, setCustomerFilters] = useState<string[]>([]);
   const now = useMemo(() => new Date(), []);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const customerOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    const labels = new Map<string, string>();
+    for (const ticket of tickets) {
+      if (!ticket.customerName) continue;
+      const key = normalize(ticket.customerName);
+      labels.set(key, ticket.customerName);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...labels.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1], undefined, { sensitivity: "base", numeric: true }))
+      .map(([value, label]) => ({ value, label, count: counts.get(value) || 0 }));
+  }, [tickets]);
+  const filteredTickets = useMemo(() => {
+    const issue = issueQuery.trim().toLowerCase();
+    return tickets.filter((ticket) => {
+      const matchesMine = !mineOnly || isTicketOwner(ticket, [userName, username]);
+      const matchesIssue = !issue || `${ticket.issueId} ${ticket.issueTitle}`.toLowerCase().includes(issue);
+      const matchesCustomer = customerFilters.length === 0 || customerFilters.includes(normalize(ticket.customerName));
+      return matchesMine && matchesIssue && matchesCustomer;
+    });
+  }, [customerFilters, issueQuery, mineOnly, tickets, userName, username]);
   const archivedTickets = useMemo(
-    () => tickets
+    () => filteredTickets
       .filter((ticket) => isKanbanArchiveCandidate(ticket, now))
       .sort((a, b) => (ticketAgeAnchorDate(a)?.getTime() || 0) - (ticketAgeAnchorDate(b)?.getTime() || 0)),
-    [now, tickets],
+    [filteredTickets, now],
   );
-  const boardTickets = useMemo(() => tickets.filter((ticket) => !isKanbanArchiveCandidate(ticket, now)), [now, tickets]);
+  const boardTickets = useMemo(() => filteredTickets.filter((ticket) => !isKanbanArchiveCandidate(ticket, now)), [filteredTickets, now]);
   const grouped = useMemo(() => Object.fromEntries(columns.map((c) => [c.id, boardTickets.filter((t) => t.kanbanStatus === c.id)])), [boardTickets]);
 
   async function onDragEnd(event: DragEndEvent) {
@@ -128,7 +155,34 @@ export function KanbanBoard({ initialTickets, role, userName, username }: { init
 
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant={mineOnly ? "default" : "outline"}
+            size="sm"
+            onClick={() => setMineOnly((current) => !current)}
+          >
+            My tickets
+          </Button>
+          <div className="relative min-w-60 flex-1">
+            <Search className="absolute left-3 top-2.5 text-slate-400" size={14} />
+            <Input
+              className="h-8 pl-9"
+              value={issueQuery}
+              onChange={(event) => setIssueQuery(event.target.value)}
+              placeholder="Filter issue no. or title..."
+            />
+          </div>
+          <MultiSelectFilter
+            className="w-56"
+            label="Customer"
+            allLabel="All customers"
+            options={customerOptions}
+            selected={customerFilters}
+            onChange={setCustomerFilters}
+          />
+        </div>
         <Button variant={showArchived ? "default" : "outline"} size="sm" onClick={() => setShowArchived((current) => !current)}>
           Archived
           <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", showArchived ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600")}>{archivedTickets.length}</span>

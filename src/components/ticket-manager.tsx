@@ -11,7 +11,7 @@ import { Input, Label, Select, Textarea } from "./ui/input";
 import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
-import { hoursFromMd, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
+import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
 import { formatDate, formatIssueType } from "@/lib/utils";
 import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket } from "@/lib/types";
 
@@ -55,6 +55,19 @@ const kanbanStatusOptions = [
   { value: "cancelled", label: "Cancelled" },
 ];
 
+export type InitialTicketFilters = {
+  query?: string;
+  owner?: string;
+  issue?: string;
+  customer?: string;
+  statuses?: string[];
+  types?: string[];
+  chargeable?: string[];
+  startDateFrom?: string;
+  startDateTo?: string;
+  editTicketId?: string;
+};
+
 function ticketSortTime(ticket: Ticket) {
   const value = ticket.startDate || ticket.date || ticket.updatedAt;
   const time = new Date(value).getTime();
@@ -67,6 +80,12 @@ function compareTickets(a: Ticket, b: Ticket) {
 
 function filterKey(value: string) {
   return value.trim().toLowerCase();
+}
+
+function matchesOwnerFilter(ticket: Ticket, ownerFilter: string) {
+  if (!ownerFilter) return true;
+  if (ownerFilter === filterKey("Unassigned")) return !ticketOwnerLabel(ticket);
+  return isTicketOwner(ticket, [ownerFilter]);
 }
 
 type EffortRow = { id: string; owner: string; hours: string };
@@ -241,6 +260,7 @@ export function TicketManager({
   issueTypes,
   teams,
   role,
+  initialFilters = {},
 }: {
   tickets: Ticket[];
   customers: Customer[];
@@ -252,21 +272,28 @@ export function TicketManager({
   role: Role;
   userName: string;
   username: string;
+  initialFilters?: InitialTicketFilters;
 }) {
   const router = useRouter();
-  const [query, setQuery] = useState("");
-  const [statusFilters, setStatusFilters] = useState<string[]>([]);
-  const [typeFilters, setTypeFilters] = useState<string[]>([]);
-  const [customerFilters, setCustomerFilters] = useState<string[]>([]);
-  const [chargeableFilters, setChargeableFilters] = useState<string[]>([]);
-  const [startDateFrom, setStartDateFrom] = useState("");
-  const [startDateTo, setStartDateTo] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState<Ticket | null>(null);
-  const [effortRows, setEffortRows] = useState<EffortRow[]>(() => effortRowsForTicket(null));
-  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState(initialFilters.query || initialFilters.issue || "");
+  const [statusFilters, setStatusFilters] = useState<string[]>(initialFilters.statuses || []);
+  const [typeFilters, setTypeFilters] = useState<string[]>(initialFilters.types || []);
+  const [customerFilters, setCustomerFilters] = useState<string[]>(initialFilters.customer ? [filterKey(initialFilters.customer)] : []);
+  const [chargeableFilters, setChargeableFilters] = useState<string[]>(initialFilters.chargeable || []);
+  const [startDateFrom, setStartDateFrom] = useState(initialFilters.startDateFrom || "");
+  const [startDateTo, setStartDateTo] = useState(initialFilters.startDateTo || "");
   const manage = role === "admin" || role === "lead" || role === "support";
+  const ownerFilter = filterKey(initialFilters.owner || "");
+  const issueFilter = filterKey(initialFilters.issue || "");
+  const initialEditTicket = useMemo(
+    () => manage && initialFilters.editTicketId ? tickets.find((ticket) => ticket.id === initialFilters.editTicketId || ticket.issueId === initialFilters.editTicketId) || null : null,
+    [initialFilters.editTicketId, manage, tickets],
+  );
+  const [currentPage, setCurrentPage] = useState(1);
+  const [open, setOpen] = useState(Boolean(initialEditTicket));
+  const [editing, setEditing] = useState<Ticket | null>(initialEditTicket);
+  const [effortRows, setEffortRows] = useState<EffortRow[]>(() => effortRowsForTicket(initialEditTicket));
+  const [busy, setBusy] = useState(false);
   const holidayDates = useMemo(() => new Set(holidays.map((holiday) => holiday.date.slice(0, 10))), [holidays]);
   const statusOptions = useMemo(() => {
     const counts = tickets.reduce<Record<string, number>>((acc, ticket) => {
@@ -326,13 +353,15 @@ export function TicketManager({
     () => tickets
       .filter((t) =>
         `${t.issueId} ${t.issueTitle} ${t.customerName} ${ticketOwnerLabel(t)}`.toLowerCase().includes(query.toLowerCase()) &&
+        matchesOwnerFilter(t, ownerFilter) &&
+        (!issueFilter || filterKey(t.issueId) === issueFilter) &&
         (statusFilters.length === 0 || statusFilters.includes(t.kanbanStatus)) &&
         (typeFilters.length === 0 || typeFilters.includes(filterKey(formatIssueType(t.issueType)))) &&
         (customerFilters.length === 0 || customerFilters.includes(filterKey(t.customerName))) &&
         dateInRange(ticketStartDateKey(t), startDateFrom, startDateTo) &&
         (chargeableFilters.length === 0 || chargeableFilters.includes(t.chargeable ? "yes" : "no")))
       .sort(compareTickets),
-    [tickets, query, statusFilters, typeFilters, customerFilters, startDateFrom, startDateTo, chargeableFilters],
+    [tickets, query, ownerFilter, issueFilter, statusFilters, typeFilters, customerFilters, startDateFrom, startDateTo, chargeableFilters],
   );
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const activePage = Math.min(currentPage, totalPages);
@@ -402,6 +431,11 @@ export function TicketManager({
 
   const currentLog = editing ? ticketLogText(editing) : "";
 
+  const routeFilterLabels = [
+    initialFilters.owner ? `Owner: ${initialFilters.owner}` : "",
+    initialFilters.issue ? `Issue: ${initialFilters.issue}` : "",
+  ].filter(Boolean);
+
   return (
     <>
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -465,6 +499,12 @@ export function TicketManager({
           </Button>
         )}
       </div>
+      {routeFilterLabels.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] text-slate-600">
+          <span>Showing linked filter: <span className="font-semibold text-slate-800">{routeFilterLabels.join(" · ")}</span></span>
+          <Link href="/tickets" className="font-semibold text-sky-700 hover:text-sky-900">Clear linked filter</Link>
+        </div>
+      )}
 
       <div className="overflow-hidden rounded-lg border bg-white">
         {filtered.length ? (

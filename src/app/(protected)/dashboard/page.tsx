@@ -9,6 +9,7 @@ import {
   TimerOff,
   UsersRound,
 } from "lucide-react";
+import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +34,7 @@ import type { Ticket } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 const closedStatuses = new Set(["closed", "cancelled", "resolved"]);
+const openKanbanStatuses = ["open", "in_progress", "waiting", "monitor"];
 const weekMs = 7 * 24 * 60 * 60 * 1000;
 
 type OwnerSlice = { owner: string; hours: number };
@@ -95,6 +97,14 @@ function prettyStatus(value: string) {
 
 function ownerMatchesSession(owner: string, sessionNames: Set<string>) {
   return sessionNames.has(normalize(owner));
+}
+
+function ownerTicketHref(owner: string) {
+  const params = new URLSearchParams({
+    owner,
+    status: openKanbanStatuses.join(","),
+  });
+  return `/tickets?${params.toString()}`;
 }
 
 function PulseStat({
@@ -286,7 +296,9 @@ export default async function DashboardPage() {
                         </div>
                         <p className="mt-1 text-[10px] text-slate-400">{formatHours(item.hours)} hrs · {item.waiting} waiting · {item.highPriority} high priority</p>
                       </div>
-                      <Badge tone={riskTone}>{item.tickets} open</Badge>
+                      <Link href={ownerTicketHref(item.owner)} className="shrink-0">
+                        <Badge tone={riskTone} className="transition hover:ring-sky-400">{item.tickets} open</Badge>
+                      </Link>
                     </div>
                     <div className="mt-3">
                       <Progress value={(item.tickets / maxOwnerTickets) * 100} tone={item.overdue ? "bg-rose-500" : item.dueSoon ? "bg-amber-500" : undefined} />

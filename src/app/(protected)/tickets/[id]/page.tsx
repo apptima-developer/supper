@@ -1,10 +1,13 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, CalendarClock, CircleUserRound, History, Timer } from "lucide-react";
+import { ArrowLeft, CalendarClock, CircleUserRound, History, SquarePen, Timer } from "lucide-react";
+import { requireSession } from "@/lib/auth";
 import { loadTicketDetailData } from "@/lib/repositories";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, statusTone } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel } from "@/lib/domain";
+import { can } from "@/lib/rbac";
 import { formatDate, formatIssueType } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -15,16 +18,26 @@ function formatHours(value: number) {
 
 export default async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const { ticket, history } = await loadTicketDetailData(id);
+  const [session, { ticket, history }] = await Promise.all([requireSession(), loadTicketDetailData(id)]);
   if (!ticket) notFound();
   const ownerEfforts = normalizeOwnerEfforts(ticket.ownerEfforts, ticket.owner, hoursFromMd(ticket.mdUsed));
   const logText = ticketLogText(ticket);
+  const canEdit = can(session.role, "tickets:manage");
 
   return (
     <>
-      <Link href="/tickets" className="mb-4 inline-flex items-center gap-2 text-[12px] text-slate-500 hover:text-slate-900">
-        <ArrowLeft size={14} />Back to tickets
-      </Link>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <Link href="/tickets" className="inline-flex items-center gap-2 text-[12px] text-slate-500 hover:text-slate-900">
+          <ArrowLeft size={14} />Back to tickets
+        </Link>
+        {canEdit && (
+          <Button asChild size="sm">
+            <Link href={`/tickets?edit=${encodeURIComponent(ticket.id)}`}>
+              <SquarePen size={14} />Edit ticket
+            </Link>
+          </Button>
+        )}
+      </div>
       <div className="mb-5 flex items-start justify-between gap-4">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-[#0a84ff]">{ticket.issueId}</p>

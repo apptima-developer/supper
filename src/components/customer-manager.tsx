@@ -2,7 +2,7 @@
 import { useMemo, useState, type FocusEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { MoreHorizontal, Plus, Search, SquarePen, Trash2 } from "lucide-react";
+import { Plus, Search, SquarePen, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
@@ -100,6 +100,7 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
   const manage = role === "admin" || role === "lead";
   const aeOnly = role === "sales";
   const showFinancials = manage || aeOnly;
+  const showActions = manage || aeOnly;
   const contractStatusOptions = useMemo(() => {
     const counts = customers.reduce<Record<string, number>>((acc, customer) => {
       const status = manualContractStatus(customer.contractStatus);
@@ -227,7 +228,7 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
               <table className="w-full text-left">
                 <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                   <tr>
-                    <th className="w-20 px-4 py-2.5" />
+                    {showActions && <th className="w-20 px-4 py-2.5" />}
                     <th className="px-4 py-2.5">Customer</th>
                     <th className="px-4 py-2.5">Contract</th>
                     <th className="px-4 py-2.5">Period</th>
@@ -240,12 +241,14 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                     const lifecycle = contractLifecycle(c);
                     return (
                       <tr key={c.id} className={rowClass(c)}>
-                        <td className="px-4 py-2">
-                          <div className="flex justify-start gap-1">
-                            {(manage || aeOnly) && <Button variant="ghost" size="icon" onClick={() => show(c)} title="Edit"><SquarePen size={14} /></Button>}
-                            {manage && <Button variant="ghost" size="icon" onClick={() => remove(c)} title="Delete"><Trash2 size={14} className="text-rose-500" /></Button>}
-                          </div>
-                        </td>
+                        {showActions && (
+                          <td className="px-4 py-2">
+                            <div className="flex justify-start gap-1">
+                              <Button variant="ghost" size="icon" onClick={() => show(c)} title="Edit"><SquarePen size={14} /></Button>
+                              {manage && <Button variant="ghost" size="icon" onClick={() => remove(c)} title="Delete"><Trash2 size={14} className="text-rose-500" /></Button>}
+                            </div>
+                          </td>
+                        )}
                         <td className="min-w-72 px-4 py-2">
                           <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                             <Link href={`/customers/${c.id}`} className="shrink-0 font-medium text-slate-900 hover:text-[#0a84ff]">{c.customerName}</Link>
@@ -284,7 +287,7 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr>
-                  <th className="w-24 px-4 py-2.5">Action</th>
+                  {showActions && <th className="w-24 px-4 py-2.5">Action</th>}
                   <th className="px-4 py-2.5">Customer</th>
                   <th className="px-4 py-2.5">Contract</th>
                   <th className="px-4 py-2.5">Period</th>
@@ -304,13 +307,14 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                   const lifecycle = contractLifecycle(c);
                   return (
                     <tr key={c.id} className={rowClass(c)}>
-                      <td className="px-4 py-2">
-                        <div className="flex justify-start gap-1">
-                          {(manage || aeOnly) && <Button variant="ghost" size="icon" onClick={() => show(c)} title="Edit"><SquarePen size={14} /></Button>}
-                          {manage && <Button variant="ghost" size="icon" onClick={() => remove(c)} title="Delete"><Trash2 size={14} className="text-rose-500" /></Button>}
-                          {!manage && !aeOnly && <MoreHorizontal size={15} className="text-slate-400" />}
-                        </div>
-                      </td>
+                      {showActions && (
+                        <td className="px-4 py-2">
+                          <div className="flex justify-start gap-1">
+                            <Button variant="ghost" size="icon" onClick={() => show(c)} title="Edit"><SquarePen size={14} /></Button>
+                            {manage && <Button variant="ghost" size="icon" onClick={() => remove(c)} title="Delete"><Trash2 size={14} className="text-rose-500" /></Button>}
+                          </div>
+                        </td>
+                      )}
                       <td className="min-w-72 px-4 py-2">
                         <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                           <Link href={`/customers/${c.id}`} className="shrink-0 font-medium text-slate-900 hover:text-[#0a84ff]">{c.customerName}</Link>
