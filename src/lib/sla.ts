@@ -1,5 +1,6 @@
 import { ticketSeverityCode, type TicketSeverityCode } from "./domain";
 import type { Holiday, Sla, Ticket } from "./types";
+import { formatDateTime } from "./utils";
 
 const hourMs = 60 * 60 * 1000;
 const workingHoursPerDay = 8;
@@ -18,9 +19,12 @@ function dateKey(date: Date) {
 
 function dateValue(value: string, fallbackHour = workStartHour) {
   if (!value) return null;
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? new Date(`${value}T${pad2(fallbackHour)}:00:00`)
-    : new Date(value);
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? `${value}T${pad2(fallbackHour)}:00:00+07:00`
+    : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(value)
+      ? `${value.length === 16 ? `${value}:00` : value}+07:00`
+      : value;
+  const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -116,7 +120,7 @@ export function ticketSlaState(ticket: Ticket, slaRules: Sla[], holidays: Holida
   return {
     label: `${percent}%`,
     tone,
-    title: `${configuredHours} business hour SLA, due ${dueDate.toISOString().slice(0, 10)}`,
+    title: `${configuredHours} business hour SLA, due ${formatDateTime(dueDate)}`,
     dueDate,
     overdue,
     percent,

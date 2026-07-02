@@ -11,8 +11,9 @@ import { Input, Label, Select, Textarea } from "./ui/input";
 import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
+import { TicketLogBubbles } from "./ticket-log-bubbles";
 import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
-import { formatDate, formatIssueType } from "@/lib/utils";
+import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
 import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket } from "@/lib/types";
 
 const blank = {
@@ -139,9 +140,12 @@ function dateKey(date: Date) {
 
 function dateValue(value: string, fallbackHour = workStartHour) {
   if (!value) return null;
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? new Date(`${value}T${pad2(fallbackHour)}:00:00`)
-    : new Date(value);
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? `${value}T${pad2(fallbackHour)}:00:00+07:00`
+    : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(value)
+      ? `${value.length === 16 ? `${value}:00` : value}+07:00`
+      : value;
+  const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -245,7 +249,7 @@ function slaState(ticket: Ticket, slaRules: Sla[], holidayDates: Set<string>) {
   return {
     label: `${percent}%`,
     tone,
-    title: `${configuredHours} business hour SLA, due ${formatDate(dueDate.toISOString())}`,
+    title: `${configuredHours} business hour SLA, due ${formatDateTime(dueDate)}`,
     dueDate,
     overdue,
   };
@@ -292,6 +296,10 @@ export function TicketManager({
   const [currentPage, setCurrentPage] = useState(1);
   const [open, setOpen] = useState(Boolean(initialEditTicket));
   const [editing, setEditing] = useState<Ticket | null>(initialEditTicket);
+  const [formCustomerKey, setFormCustomerKey] = useState(initialEditTicket?.customerKey || "");
+  const [formSeverity, setFormSeverity] = useState(ticketSeverityLabel(initialEditTicket?.severity || blank.severity));
+  const [formStartDate, setFormStartDate] = useState(dateTimeInputValue(initialEditTicket?.startDate || ""));
+  const [formCloseDate, setFormCloseDate] = useState(dateTimeInputValue(initialEditTicket?.closeDate || "", 17));
   const [effortRows, setEffortRows] = useState<EffortRow[]>(() => effortRowsForTicket(initialEditTicket));
   const [busy, setBusy] = useState(false);
   const holidayDates = useMemo(() => new Set(holidays.map((holiday) => holiday.date.slice(0, 10))), [holidays]);
@@ -366,6 +374,25 @@ export function TicketManager({
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const activePage = Math.min(currentPage, totalPages);
   const pageTickets = useMemo(() => filtered.slice((activePage - 1) * pageSize, activePage * pageSize), [activePage, filtered]);
+  const formCustomer = useMemo(() => customers.find((customer) => customer.key === formCustomerKey), [customers, formCustomerKey]);
+  const formDueDate = useMemo(() => {
+    if (!formCustomer || !formStartDate) return editing?.dueDate || "";
+    const ticketForSla = {
+      ...(editing || blank),
+      id: editing?.id || "",
+      createdAt: editing?.createdAt || "",
+      updatedAt: editing?.updatedAt || "",
+      customerKey: formCustomer.key,
+      customerName: formCustomer.customerName,
+      severity: formSeverity,
+      startDate: normalizeDateTime(formStartDate),
+      dueDate: editing?.dueDate || "",
+      closeDate: normalizeDateTime(formCloseDate, 17),
+      date: editing?.date || blank.date,
+      kanbanStatus: editing?.kanbanStatus || "open",
+    } as Ticket;
+    return slaState(ticketForSla, slaRules, holidayDates).dueDate?.toISOString() || "";
+  }, [editing, formCloseDate, formCustomer, formSeverity, formStartDate, holidayDates, slaRules]);
 
   function patchEffortRow(id: string, field: "owner" | "hours", value: string) {
     setEffortRows((rows) => rows.map((row) => row.id === id ? { ...row, [field]: value } : row));
@@ -373,6 +400,10 @@ export function TicketManager({
 
   function openEditor(ticket: Ticket | null) {
     setEditing(ticket);
+    setFormCustomerKey(ticket?.customerKey || "");
+    setFormSeverity(ticketSeverityLabel(ticket?.severity || blank.severity));
+    setFormStartDate(dateTimeInputValue(ticket?.startDate || ""));
+    setFormCloseDate(dateTimeInputValue(ticket?.closeDate || "", 17));
     setEffortRows(effortRowsForTicket(ticket));
     setOpen(true);
   }
@@ -396,9 +427,9 @@ export function TicketManager({
       severity: ticketSeverityLabel(String(formData.get("severity") || "")),
       ...effortPayload(effortRows),
       status: String(formData.get("status")),
-      startDate: String(formData.get("startDate")),
-      dueDate: String(formData.get("dueDate")),
-      closeDate: String(formData.get("closeDate")),
+      startDate: normalizeDateTime(String(formData.get("startDate"))),
+      dueDate: formDueDate,
+      closeDate: normalizeDateTime(String(formData.get("closeDate")), 17),
       chargeable: formData.get("chargeable") === "on",
       logEntry: String(formData.get("logEntry")),
     };
@@ -556,10 +587,10 @@ export function TicketManager({
                           <Badge tone={severityTone(ticket.severity)}>{ticketSeverityLabel(ticket.severity)}</Badge>
                         </div>
                       </td>
-                      <td className="whitespace-nowrap px-4 py-2 text-[11px]">{formatDate(ticket.startDate || ticket.date)}</td>
+                      <td className="whitespace-nowrap px-4 py-2 text-[11px]">{formatDateTime(ticket.startDate || ticket.date)}</td>
                       <td className={`whitespace-nowrap px-4 py-2 text-[11px] ${sla.overdue ? "font-medium text-rose-600" : ""}`}>
                         <div className="flex items-center gap-1.5">
-                          <span>{formatDate(sla.dueDate?.toISOString() || ticket.dueDate)}</span>
+                          <span>{formatDateTime(sla.dueDate?.toISOString() || ticket.dueDate)}</span>
                           {sla.overdue && <Badge tone="rose">Overdue</Badge>}
                         </div>
                       </td>
@@ -596,7 +627,7 @@ export function TicketManager({
             </div>
             <div>
               <Label required>Customer</Label>
-              <Select name="customerKey" required defaultValue={editing?.customerKey}>
+              <Select name="customerKey" required value={formCustomerKey} onChange={(event) => setFormCustomerKey(event.target.value)}>
                 <option value="">Select customer</option>
                 {sortedCustomers.map((c) => <option key={c.id} value={c.key}>{c.customerName} · {c.projectCode}</option>)}
               </Select>
@@ -612,7 +643,7 @@ export function TicketManager({
               </div>
               <div>
                 <Label>Severity</Label>
-                <Select name="severity" defaultValue={ticketSeverityLabel(editing?.severity || blank.severity)}>
+                <Select name="severity" value={formSeverity} onChange={(event) => setFormSeverity(event.target.value)}>
                   {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </Select>
               </div>
@@ -624,9 +655,21 @@ export function TicketManager({
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
-              <div><Label>Start date</Label><Input name="startDate" type="date" defaultValue={editing?.startDate?.slice(0, 10)} /></div>
-              <div><Label>Due date</Label><Input name="dueDate" type="date" defaultValue={editing?.dueDate?.slice(0, 10)} /></div>
-              <div><Label>Close date</Label><Input name="closeDate" type="date" defaultValue={editing?.closeDate?.slice(0, 10)} /></div>
+              <div>
+                <Label>Start date</Label>
+                <Input name="startDate" type="datetime-local" step="1" value={formStartDate} onChange={(event) => setFormStartDate(event.target.value)} />
+              </div>
+              <div>
+                <Label>Due date</Label>
+                <input type="hidden" name="dueDate" value={formDueDate} />
+                <div className="flex h-9 items-center rounded-lg border border-sky-100/90 bg-slate-50/70 px-3 text-[13px] font-medium text-slate-700">
+                  {formDueDate ? formatDateTime(formDueDate) : "Select customer, severity, and start date"}
+                </div>
+              </div>
+              <div>
+                <Label>End date</Label>
+                <Input name="closeDate" type="datetime-local" step="1" value={formCloseDate} onChange={(event) => setFormCloseDate(event.target.value)} />
+              </div>
             </div>
             <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3">
               <div className="mb-3 flex items-center justify-between gap-3">
@@ -660,9 +703,9 @@ export function TicketManager({
             <div>
               <Label>{editing ? "Add log entry" : "Log"}</Label>
               {currentLog && (
-                <div className="mb-3 max-h-52 overflow-y-auto rounded-lg border border-sky-100 bg-slate-50/70 p-3 text-[11px] leading-5 text-slate-600">
+                <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-sky-100 bg-sky-50/45 p-3">
                   <p className="mb-2 font-semibold uppercase tracking-wide text-slate-400">Current log</p>
-                  <p className="whitespace-pre-wrap">{currentLog}</p>
+                  {editing && <TicketLogBubbles ticket={editing} />}
                 </div>
               )}
               <Textarea name="logEntry" placeholder={editing ? "Type the next update. It will be appended with your account." : "Type the first log update. It will be stamped with your account."} />

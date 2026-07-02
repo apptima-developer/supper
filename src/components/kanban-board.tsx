@@ -11,7 +11,7 @@ import { Badge, statusTone } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { MultiSelectFilter } from "./ui/multi-select-filter";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, formatDateTime } from "@/lib/utils";
 
 const columns = [
   { id: "open", label: "Open", dot: "bg-sky-500", status: "00 - Open" },
@@ -49,7 +49,7 @@ function TicketCard({ ticket, disabled }: { ticket: Ticket; disabled: boolean })
           <p className="mt-1 truncate text-[10px] text-slate-400">{ticket.customerName}</p>
           <div className="mt-3 flex items-center justify-between border-t border-sky-100/80 pt-2 text-[10px] text-slate-400">
             <span className="flex min-w-0 items-center gap-1"><UserRound size={11} /><span className="truncate">{ticketOwnerLabel(ticket) || "Unassigned"}</span></span>
-            <span className="flex items-center gap-1"><CalendarClock size={11} />{formatDate(ticket.dueDate)}</span>
+            <span className="flex items-center gap-1"><CalendarClock size={11} />{formatDateTime(ticket.dueDate)}</span>
           </div>
         </div>
       </div>

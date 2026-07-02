@@ -6,9 +6,10 @@ import { loadTicketDetailData } from "@/lib/repositories";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, statusTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel } from "@/lib/domain";
+import { TicketLogBubbles } from "@/components/ticket-log-bubbles";
+import { hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketOwnerLabel } from "@/lib/domain";
 import { can } from "@/lib/rbac";
-import { formatDate, formatIssueType } from "@/lib/utils";
+import { formatDate, formatDateTime, formatIssueType } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,6 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
   const [session, { ticket, history }] = await Promise.all([requireSession(), loadTicketDetailData(id)]);
   if (!ticket) notFound();
   const ownerEfforts = normalizeOwnerEfforts(ticket.ownerEfforts, ticket.owner, hoursFromMd(ticket.mdUsed));
-  const logText = ticketLogText(ticket);
   const canEdit = can(session.role, "tickets:manage");
 
   return (
@@ -50,7 +50,7 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
         {[
           ["Owner", ticketOwnerLabel(ticket) || "Unassigned", CircleUserRound],
           ["Severity", ticket.severity, Timer],
-          ["Due date", formatDate(ticket.dueDate), CalendarClock],
+          ["Due date", formatDateTime(ticket.dueDate), CalendarClock],
           ["Hours used", `${formatHours(ticketEffortHours(ticket))}${ticket.chargeable ? " · Chargeable" : ""}`, History],
         ].map(([label, value, Icon]) => (
           <Card key={String(label)}>
@@ -70,8 +70,8 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-4 text-[12px]">
               <div><p className="text-[10px] uppercase text-slate-400">Opened</p><p className="mt-1">{formatDate(ticket.date)}</p></div>
-              <div><p className="text-[10px] uppercase text-slate-400">Started</p><p className="mt-1">{formatDate(ticket.startDate)}</p></div>
-              <div><p className="text-[10px] uppercase text-slate-400">Closed</p><p className="mt-1">{formatDate(ticket.closeDate)}</p></div>
+              <div><p className="text-[10px] uppercase text-slate-400">Started</p><p className="mt-1">{formatDateTime(ticket.startDate)}</p></div>
+              <div><p className="text-[10px] uppercase text-slate-400">End date</p><p className="mt-1">{formatDateTime(ticket.closeDate)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">Status lane</p><p className="mt-1 capitalize">{ticket.kanbanStatus.replace("_", " ")}</p></div>
             </div>
             <div className="border-t pt-4">
@@ -87,7 +87,7 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
             </div>
             <div className="border-t pt-4">
               <p className="text-[10px] uppercase text-slate-400">Log</p>
-              <p className="mt-2 whitespace-pre-wrap text-[12px] leading-5">{logText || "No log recorded."}</p>
+              <div className="mt-2"><TicketLogBubbles ticket={ticket} /></div>
             </div>
           </CardContent>
         </Card>

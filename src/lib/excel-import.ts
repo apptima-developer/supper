@@ -33,6 +33,7 @@ import {
   type Status,
   type Ticket,
 } from "./types";
+import { normalizeDateTime } from "./utils";
 
 type Row = Record<string, unknown>;
 type CustomerInput = Omit<Customer, "id" | "createdAt" | "updatedAt">;
@@ -158,6 +159,29 @@ function date(value: unknown) {
   }
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? raw : parsed.toISOString().slice(0, 10);
+}
+
+function dateTime(value: unknown, fallbackHour = 9) {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") {
+    const day = Math.floor(value);
+    const fraction = value - day;
+    const baseDate = date(day);
+    const totalSeconds = Math.round(fraction * 24 * 60 * 60);
+    const hour = Math.floor(totalSeconds / 3600);
+    const minute = Math.floor((totalSeconds % 3600) / 60);
+    const second = totalSeconds % 60;
+    return normalizeDateTime(`${baseDate}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`, fallbackHour);
+  }
+  const raw = text(value);
+  const dmyTime = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (dmyTime) {
+    const year = Number(dmyTime[3]) > 2400 ? Number(dmyTime[3]) - 543 : Number(dmyTime[3]);
+    return normalizeDateTime(`${year}-${dmyTime[2].padStart(2, "0")}-${dmyTime[1].padStart(2, "0")}T${dmyTime[4].padStart(2, "0")}:${dmyTime[5]}:${dmyTime[6] || "00"}`, fallbackHour);
+  }
+  if (/[T:]\d{2}/.test(raw)) return normalizeDateTime(raw, fallbackHour);
+  return normalizeDateTime(date(value) || raw, fallbackHour);
 }
 
 function cellValue(value: ExcelJS.CellValue): unknown {
@@ -303,9 +327,9 @@ function parseTickets(
       ownerEfforts: normalizeOwnerEfforts(undefined, owner, hoursFromMd(mdUsed)),
       status,
       kanbanStatus: mapKanbanStatus(status),
-      startDate: date(row[col("startDate", "Start Date")]),
-      dueDate: date(row[col("dueDate", "Due Date")]),
-      closeDate: date(row[col("closeDate", "Close Date")]),
+      startDate: dateTime(row[col("startDate", "Start Date")]),
+      dueDate: dateTime(row[col("dueDate", "Due Date")], 17),
+      closeDate: dateTime(row[col("closeDate", "Close Date")], 17),
       mdUsed,
       chargeable: bool(row[col("chargeable", "Chargeable")]),
       remark: text(row[col("remark", "Remark")]),

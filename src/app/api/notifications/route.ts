@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import { isTicketOwner, ticketOwnerLabel } from "@/lib/domain";
 import { loadTicketManagerData } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
-import { formatDate } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 import type { Ticket } from "@/lib/types";
 
 const closedStatuses = new Set(["closed", "cancelled", "resolved"]);
@@ -34,7 +34,7 @@ export async function GET() {
           issueId: ticket.issueId,
           title: slaAlert ? `SLA ${sla.overdue ? "overdue" : sla.tone === "rose" ? "critical" : "warning"}` : "Assigned ticket",
           message: slaAlert
-            ? `${ticket.issueId} · ${ticket.customerName} is at ${sla.label}${sla.dueDate ? `, due ${formatDate(sla.dueDate.toISOString())}` : ""}.`
+            ? `${ticket.issueId} · ${ticket.customerName} is at ${sla.label}${sla.dueDate ? `, due ${formatDateTime(sla.dueDate)}` : ""}.`
             : `${ticket.issueId} · ${ticket.customerName} is assigned to ${ticketOwnerLabel(ticket) || session.name}.`,
           href: `/tickets/${ticket.id}`,
           tone: slaAlert ? sla.tone : "blue",
