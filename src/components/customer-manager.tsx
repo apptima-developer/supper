@@ -32,7 +32,7 @@ const blank = {
   active: true,
 };
 const mdStep = "0.00001";
-const pageSize = 15;
+const pageSize = 20;
 const contractStatusOrder = { Active: 0, "Pre-sales": 1, Done: 2, Suspended: 3 };
 
 function parseNumber(value: FormDataEntryValue | null) {

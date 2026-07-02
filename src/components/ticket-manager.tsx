@@ -32,7 +32,7 @@ const blank = {
   chargeable: false,
 };
 const hourStep = "0.00001";
-const pageSize = 15;
+const pageSize = 20;
 const hourMs = 60 * 60 * 1000;
 const workingHoursPerDay = 8;
 const workStartHour = 9;
