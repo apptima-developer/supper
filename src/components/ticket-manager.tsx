@@ -619,7 +619,7 @@ export function TicketManager({
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent title={editing ? "Edit ticket" : "New ticket"} description="Ticket effort updates automatically recalculate the customer contract." className="max-w-6xl">
+        <DialogContent title={editing ? "Edit ticket" : "New ticket"} description="Ticket effort updates automatically recalculate the customer contract." className="max-h-[75vh] max-w-6xl">
           <form action={save} className="space-y-4">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
               <div className="space-y-4">
@@ -701,7 +701,7 @@ export function TicketManager({
                   <input name="chargeable" type="checkbox" defaultChecked={editing?.chargeable} /> Chargeable effort
                 </label>
               </div>
-              <aside className="rounded-2xl border border-sky-100 bg-sky-50/45 p-4 lg:sticky lg:top-20 lg:max-h-[calc(90vh-9rem)] lg:overflow-y-auto">
+              <aside className="rounded-2xl border border-sky-100 bg-sky-50/45 p-4 lg:sticky lg:top-20 lg:max-h-[calc(75vh-11rem)] lg:overflow-y-auto">
                 <Label>{editing ? "Add log entry" : "Log"}</Label>
                 <div className="mt-2 min-h-56 rounded-xl border border-white/80 bg-white/70 p-3">
                   {currentLog && editing ? <TicketLogBubbles ticket={editing} /> : <p className="text-[12px] text-slate-400">No log recorded yet.</p>}
@@ -710,7 +710,7 @@ export function TicketManager({
                 <p className="mt-1 text-[10px] text-slate-400">Saved logs are appended; existing log text is not overwritten.</p>
               </aside>
             </div>
-            <div className="flex justify-end gap-2 border-t pt-4">
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 flex justify-end gap-2 border-t border-sky-100/80 bg-white/90 px-5 py-4 backdrop-blur">
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
               <Button disabled={busy}>{busy ? "Saving..." : "Save ticket"}</Button>
             </div>
