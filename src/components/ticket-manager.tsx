@@ -619,97 +619,96 @@ export function TicketManager({
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent title={editing ? "Edit ticket" : "New ticket"} description="Ticket effort updates automatically recalculate the customer contract.">
+        <DialogContent title={editing ? "Edit ticket" : "New ticket"} description="Ticket effort updates automatically recalculate the customer contract." className="max-w-6xl">
           <form action={save} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div><Label required>Issue ID</Label><Input name="issueId" required defaultValue={editing?.issueId} /></div>
-              <div><Label required>Date</Label><Input name="date" type="date" required defaultValue={(editing?.date || blank.date).slice(0, 10)} /></div>
-            </div>
-            <div>
-              <Label required>Customer</Label>
-              <Select name="customerKey" required value={formCustomerKey} onChange={(event) => setFormCustomerKey(event.target.value)}>
-                <option value="">Select customer</option>
-                {sortedCustomers.map((c) => <option key={c.id} value={c.key}>{c.customerName} · {c.projectCode}</option>)}
-              </Select>
-            </div>
-            <div><Label required>Issue title</Label><Input name="issueTitle" required defaultValue={editing?.issueTitle} /></div>
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div>
-                <Label>Issue type</Label>
-                <Select name="issueType" defaultValue={editing?.issueType}>
-                  {issueTypes.map((i) => <option key={i.id} value={i.name}>{formatIssueType(i.name)}</option>)}
-                  {editing?.issueType && !issueTypes.some((i) => i.name === editing.issueType) && <option value={editing.issueType}>{formatIssueType(editing.issueType)}</option>}
-                </Select>
-              </div>
-              <div>
-                <Label>Severity</Label>
-                <Select name="severity" value={formSeverity} onChange={(event) => setFormSeverity(event.target.value)}>
-                  {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </Select>
-              </div>
-              <div>
-                <Label>Status</Label>
-                <Select name="status" defaultValue={editing?.status || blank.status}>
-                  {statuses.map((s) => <option key={s.id}>{s.label}</option>)}
-                </Select>
-              </div>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div>
-                <Label>Start date</Label>
-                <Input name="startDate" type="datetime-local" step="1" value={formStartDate} onChange={(event) => setFormStartDate(event.target.value)} />
-              </div>
-              <div>
-                <Label>Due date</Label>
-                <input type="hidden" name="dueDate" value={formDueDate} />
-                <div className="flex h-9 items-center rounded-lg border border-sky-100/90 bg-slate-50/70 px-3 text-[13px] font-medium text-slate-700">
-                  {formDueDate ? formatDateTime(formDueDate) : "Select customer, severity, and start date"}
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
+              <div className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div><Label required>Issue ID</Label><Input name="issueId" required defaultValue={editing?.issueId} /></div>
+                  <div><Label required>Date</Label><Input name="date" type="date" required defaultValue={(editing?.date || blank.date).slice(0, 10)} /></div>
                 </div>
-              </div>
-              <div>
-                <Label>End date</Label>
-                <Input name="closeDate" type="datetime-local" step="1" value={formCloseDate} onChange={(event) => setFormCloseDate(event.target.value)} />
-              </div>
-            </div>
-            <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3">
-              <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-[12px] font-semibold text-slate-800">Owner effort</p>
-                  <p className="mt-0.5 text-[10px] text-slate-400">Effort is entered in hours. Total is saved back to contract MD automatically.</p>
+                  <Label required>Customer</Label>
+                  <Select name="customerKey" required value={formCustomerKey} onChange={(event) => setFormCustomerKey(event.target.value)}>
+                    <option value="">Select customer</option>
+                    {sortedCustomers.map((c) => <option key={c.id} value={c.key}>{c.customerName} · {c.projectCode}</option>)}
+                  </Select>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Badge tone="blue">{formatHours(totalOwnerEffortHours(effortPayload(effortRows).ownerEfforts))} hrs</Badge>
-                  <Button type="button" variant="outline" size="sm" onClick={addEffortRow}><Plus size={14} />Add owner</Button>
-                </div>
-              </div>
-              <div className="space-y-2">
-                {effortRows.map((row) => (
-                  <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_11rem_2.5rem]">
-                    <Input list="team-list" value={row.owner} onChange={(event) => patchEffortRow(row.id, "owner", event.target.value)} placeholder="Owner name" />
-                    <Input type="number" min="0" step={hourStep} value={row.hours} onChange={(event) => patchEffortRow(row.id, "hours", event.target.value)} placeholder="0.00000" />
-                    <Button type="button" variant="ghost" size="icon" onClick={() => removeEffortRow(row.id)} disabled={effortRows.length === 1}>
-                      <Trash2 size={14} className="text-rose-500" />
-                    </Button>
+                <div><Label required>Issue title</Label><Input name="issueTitle" required defaultValue={editing?.issueTitle} /></div>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div>
+                    <Label>Issue type</Label>
+                    <Select name="issueType" defaultValue={editing?.issueType}>
+                      {issueTypes.map((i) => <option key={i.id} value={i.name}>{formatIssueType(i.name)}</option>)}
+                      {editing?.issueType && !issueTypes.some((i) => i.name === editing.issueType) && <option value={editing.issueType}>{formatIssueType(editing.issueType)}</option>}
+                    </Select>
                   </div>
-                ))}
-              </div>
-              <datalist id="team-list">{teams.map((i) => <option key={i.id}>{i.name}</option>)}</datalist>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="mt-6 flex items-center gap-2 text-[12px] text-slate-700">
-                <input name="chargeable" type="checkbox" defaultChecked={editing?.chargeable} /> Chargeable effort
-              </label>
-            </div>
-            <div>
-              <Label>{editing ? "Add log entry" : "Log"}</Label>
-              {currentLog && (
-                <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-sky-100 bg-sky-50/45 p-3">
-                  <p className="mb-2 font-semibold uppercase tracking-wide text-slate-400">Current log</p>
-                  {editing && <TicketLogBubbles ticket={editing} />}
+                  <div>
+                    <Label>Severity</Label>
+                    <Select name="severity" value={formSeverity} onChange={(event) => setFormSeverity(event.target.value)}>
+                      {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Status</Label>
+                    <Select name="status" defaultValue={editing?.status || blank.status}>
+                      {statuses.map((s) => <option key={s.id}>{s.label}</option>)}
+                    </Select>
+                  </div>
                 </div>
-              )}
-              <Textarea name="logEntry" placeholder={editing ? "Type the next update. It will be appended with your account." : "Type the first log update. It will be stamped with your account."} />
-              <p className="mt-1 text-[10px] text-slate-400">Saved logs are appended; existing log text is not overwritten.</p>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div>
+                    <Label>Start date</Label>
+                    <Input name="startDate" type="datetime-local" step="1" value={formStartDate} onChange={(event) => setFormStartDate(event.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Due date</Label>
+                    <input type="hidden" name="dueDate" value={formDueDate} />
+                    <div className="flex h-9 items-center rounded-lg border border-sky-100/90 bg-slate-50/70 px-3 text-[13px] font-medium text-slate-700">
+                      {formDueDate ? formatDateTime(formDueDate) : "Select customer, severity, and start date"}
+                    </div>
+                  </div>
+                  <div>
+                    <Label>End date</Label>
+                    <Input name="closeDate" type="datetime-local" step="1" value={formCloseDate} onChange={(event) => setFormCloseDate(event.target.value)} />
+                  </div>
+                </div>
+                <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[12px] font-semibold text-slate-800">Owner effort</p>
+                      <p className="mt-0.5 text-[10px] text-slate-400">Effort is entered in hours. Total is saved back to contract MD automatically.</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge tone="blue">{formatHours(totalOwnerEffortHours(effortPayload(effortRows).ownerEfforts))} hrs</Badge>
+                      <Button type="button" variant="outline" size="sm" onClick={addEffortRow}><Plus size={14} />Add owner</Button>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {effortRows.map((row) => (
+                      <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_11rem_2.5rem]">
+                        <Input list="team-list" value={row.owner} onChange={(event) => patchEffortRow(row.id, "owner", event.target.value)} placeholder="Owner name" />
+                        <Input type="number" min="0" step={hourStep} value={row.hours} onChange={(event) => patchEffortRow(row.id, "hours", event.target.value)} placeholder="0.00000" />
+                        <Button type="button" variant="ghost" size="icon" onClick={() => removeEffortRow(row.id)} disabled={effortRows.length === 1}>
+                          <Trash2 size={14} className="text-rose-500" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <datalist id="team-list">{teams.map((i) => <option key={i.id}>{i.name}</option>)}</datalist>
+                </div>
+                <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                  <input name="chargeable" type="checkbox" defaultChecked={editing?.chargeable} /> Chargeable effort
+                </label>
+              </div>
+              <aside className="rounded-2xl border border-sky-100 bg-sky-50/45 p-4 lg:sticky lg:top-20 lg:max-h-[calc(90vh-9rem)] lg:overflow-y-auto">
+                <Label>{editing ? "Add log entry" : "Log"}</Label>
+                <div className="mt-2 min-h-56 rounded-xl border border-white/80 bg-white/70 p-3">
+                  {currentLog && editing ? <TicketLogBubbles ticket={editing} /> : <p className="text-[12px] text-slate-400">No log recorded yet.</p>}
+                </div>
+                <Textarea className="mt-3 min-h-32" name="logEntry" placeholder={editing ? "Type the next update. It will be appended with your account." : "Type the first log update. It will be stamped with your account."} />
+                <p className="mt-1 text-[10px] text-slate-400">Saved logs are appended; existing log text is not overwritten.</p>
+              </aside>
             </div>
             <div className="flex justify-end gap-2 border-t pt-4">
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
