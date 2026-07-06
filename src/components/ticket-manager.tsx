@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import { ImagePlus, Plus, Search, SquarePen, Trash2, X } from "lucide-react";
+import { Clock3, History, ImagePlus, Plus, Search, SquarePen, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
@@ -13,7 +13,7 @@ import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { TicketLogBubbles } from "./ticket-log-bubbles";
-import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
+import { activeSlaPause, hoursFromMd, isTicketOwner, mapKanbanStatus, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
 import { ticketSlaState } from "@/lib/sla";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
 import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
@@ -111,6 +111,10 @@ function fileToLogAttachment(file: File): Promise<TicketLogAttachment> {
 
 function formatHours(value: number) {
   return Math.max(0, Number(value) || 0).toFixed(5);
+}
+
+function clockModeLabel(mode: string) {
+  return mode === "calendar" ? "Calendar hours (24h)" : "Business hours (09:00-17:00)";
 }
 
 function severityTone(severity: string) {
@@ -217,6 +221,7 @@ export function TicketManager({
   const [editing, setEditing] = useState<Ticket | null>(initialEditTicket);
   const [formCustomerKey, setFormCustomerKey] = useState(initialEditTicket?.customerKey || "");
   const [formSeverity, setFormSeverity] = useState(ticketSeverityLabel(initialEditTicket?.severity || blank.severity));
+  const [formStatus, setFormStatus] = useState(initialEditTicket?.status || blank.status);
   const [formStartDate, setFormStartDate] = useState(dateTimeInputValue(initialEditTicket?.startDate || ""));
   const [formCloseDate, setFormCloseDate] = useState(dateTimeInputValue(initialEditTicket?.closeDate || "", 17));
   const [effortRows, setEffortRows] = useState<EffortRow[]>(() => effortRowsForTicket(initialEditTicket));
@@ -295,9 +300,10 @@ export function TicketManager({
   const activePage = Math.min(currentPage, totalPages);
   const pageTickets = useMemo(() => filtered.slice((activePage - 1) * pageSize, activePage * pageSize), [activePage, filtered]);
   const formCustomer = useMemo(() => customers.find((customer) => customer.key === formCustomerKey), [customers, formCustomerKey]);
-  const formDueDate = useMemo(() => {
-    if (!formCustomer || !formStartDate) return editing?.dueDate || "";
-    const ticketForSla = {
+  const formKanbanStatus = useMemo(() => mapKanbanStatus(formStatus), [formStatus]);
+  const formTicketForSla = useMemo(() => {
+    if (!formCustomer || !formStartDate) return null;
+    return {
       ...(editing || blank),
       id: editing?.id || "",
       createdAt: editing?.createdAt || "",
@@ -309,10 +315,30 @@ export function TicketManager({
       dueDate: editing?.dueDate || "",
       closeDate: normalizeDateTime(formCloseDate, 17),
       date: editing?.date || blank.date,
-      kanbanStatus: editing?.kanbanStatus || "open",
+      status: formStatus,
+      kanbanStatus: formKanbanStatus,
+      slaPauses: editing?.slaPauses || [],
     } as Ticket;
-    return ticketSlaState(ticketForSla, slaRules, holidays).dueDate?.toISOString() || "";
-  }, [editing, formCloseDate, formCustomer, formSeverity, formStartDate, holidays, slaRules]);
+  }, [editing, formCloseDate, formCustomer, formKanbanStatus, formSeverity, formStartDate, formStatus]);
+  const formDueDate = useMemo(() => {
+    if (!formTicketForSla) return editing?.dueDate || "";
+    return ticketSlaState(formTicketForSla, slaRules, holidays).dueDate?.toISOString() || "";
+  }, [editing?.dueDate, formTicketForSla, holidays, slaRules]);
+  const modalSla = useMemo(
+    () => formTicketForSla ? ticketSlaState(formTicketForSla, slaRules, holidays) : null,
+    [formTicketForSla, holidays, slaRules],
+  );
+  const activePause = editing ? activeSlaPause(editing) : null;
+  const pauseHistory = editing?.slaPauses || [];
+  const willStartPauseOnSave = formKanbanStatus === "waiting" && !activePause;
+  const willClosePauseOnSave = Boolean(activePause && formKanbanStatus !== "waiting");
+  const slaClockBadge = modalSla?.paused
+    ? { label: "Paused", tone: "slate" as const }
+    : willStartPauseOnSave
+      ? { label: "Will pause on save", tone: "amber" as const }
+      : willClosePauseOnSave
+        ? { label: "Will resume on save", tone: "blue" as const }
+        : { label: "Running", tone: "emerald" as const };
 
   function patchEffortRow(id: string, field: "owner" | "hours", value: string) {
     setEffortRows((rows) => rows.map((row) => row.id === id ? { ...row, [field]: value } : row));
@@ -322,6 +348,7 @@ export function TicketManager({
     setEditing(ticket);
     setFormCustomerKey(ticket?.customerKey || "");
     setFormSeverity(ticketSeverityLabel(ticket?.severity || blank.severity));
+    setFormStatus(ticket?.status || blank.status);
     setFormStartDate(dateTimeInputValue(ticket?.startDate || ""));
     setFormCloseDate(dateTimeInputValue(ticket?.closeDate || "", 17));
     setEffortRows(effortRowsForTicket(ticket));
@@ -370,7 +397,7 @@ export function TicketManager({
       issueType: String(formData.get("issueType")),
       severity: ticketSeverityLabel(String(formData.get("severity") || "")),
       ...effortPayload(effortRows),
-      status: String(formData.get("status")),
+      status: formStatus,
       startDate: normalizeDateTime(String(formData.get("startDate"))),
       dueDate: formDueDate,
       closeDate: normalizeDateTime(String(formData.get("closeDate")), 17),
@@ -599,7 +626,7 @@ export function TicketManager({
                   </div>
                   <div>
                     <Label>Status</Label>
-                    <Select name="status" defaultValue={editing?.status || blank.status}>
+                    <Select name="status" value={formStatus} onChange={(event) => setFormStatus(event.target.value)}>
                       {statuses.map((s) => <option key={s.id}>{s.label}</option>)}
                     </Select>
                   </div>
@@ -620,6 +647,52 @@ export function TicketManager({
                     <Label>End date</Label>
                     <Input name="closeDate" type="datetime-local" step="1" value={formCloseDate} onChange={(event) => setFormCloseDate(event.target.value)} />
                   </div>
+                </div>
+                <div className="rounded-2xl border border-sky-100 bg-gradient-to-br from-sky-50/80 via-white to-cyan-50/60 p-3 shadow-[0_10px_30px_rgba(35,77,112,.05)]">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="rounded-xl bg-white p-2 text-sky-600 ring-1 ring-sky-100">
+                        <Clock3 size={16} />
+                      </div>
+                      <div>
+                        <p className="text-[12px] font-semibold text-slate-800">SLA clock</p>
+                        <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                          {modalSla?.paused && activePause
+                            ? `Paused since ${formatDateTime(activePause.startAt)}`
+                            : willStartPauseOnSave
+                              ? "Waiting is selected. Save this ticket to start pausing the SLA clock."
+                              : willClosePauseOnSave
+                                ? "Status is no longer waiting. Save this ticket to resume the SLA clock."
+                                : "Clock is running against the calculated due date."}
+                        </p>
+                      </div>
+                    </div>
+                    <Badge tone={slaClockBadge.tone}>{slaClockBadge.label}</Badge>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-xl border border-white/80 bg-white/70 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Clock mode</p>
+                      <p className="mt-1 text-[12px] font-medium text-slate-700">{modalSla ? clockModeLabel(modalSla.clockMode) : "-"}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/80 bg-white/70 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Total paused</p>
+                      <p className="mt-1 text-[12px] font-medium text-slate-700">{modalSla ? `${formatHours(modalSla.pausedHours)} hrs` : "0.00000 hrs"}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/80 bg-white/70 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Pause history</p>
+                      <p className="mt-1 text-[12px] font-medium text-slate-700">{pauseHistory.length} {pauseHistory.length === 1 ? "pause" : "pauses"}</p>
+                    </div>
+                  </div>
+                  {pauseHistory.length > 0 && (
+                    <div className="mt-3 space-y-1.5 border-t border-sky-100/80 pt-3">
+                      {pauseHistory.slice(-3).reverse().map((pause) => (
+                        <div key={pause.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/65 px-3 py-2 text-[11px] text-slate-500">
+                          <span className="inline-flex items-center gap-1.5 font-medium text-slate-700"><History size={12} />{pause.reason || "waiting"}</span>
+                          <span>{formatDateTime(pause.startAt)} → {pause.endAt ? formatDateTime(pause.endAt) : "Now"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3">
                   <div className="mb-3 flex items-center justify-between gap-3">
