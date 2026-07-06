@@ -127,10 +127,13 @@ function formatLogTimestamp(value: string) {
   }).format(date);
 }
 
-export function formatTicketLogEntry(entry: Pick<TicketLog, "message" | "actor" | "createdAt">) {
+export function formatTicketLogEntry(entry: Pick<TicketLog, "message" | "actor" | "createdAt"> & Partial<Pick<TicketLog, "attachments">>) {
   const message = entry.message.trim();
-  if (!message) return "";
-  return `${message}\nUpdated by ${entry.actor || "unknown"} · ${formatLogTimestamp(entry.createdAt)}`;
+  const attachments = "attachments" in entry ? entry.attachments || [] : [];
+  const attachmentText = attachments.map((item) => `[Image: ${item.fileName || "attachment"}]`).join("\n");
+  const body = [message, attachmentText].filter(Boolean).join("\n");
+  if (!body) return "";
+  return `${body}\nUpdated by ${entry.actor || "unknown"} · ${formatLogTimestamp(entry.createdAt)}`;
 }
 
 export function ticketLogText(ticket: Pick<Ticket, "remark" | "ticketLogs">) {

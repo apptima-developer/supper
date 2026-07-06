@@ -46,11 +46,20 @@ export const ownerEffortSchema = z.object({
 });
 export type OwnerEffort = z.infer<typeof ownerEffortSchema>;
 
+export const ticketLogAttachmentSchema = z.object({
+  id: z.string(),
+  fileName: z.string(),
+  contentType: z.string(),
+  dataUrl: z.string(),
+});
+export type TicketLogAttachment = z.infer<typeof ticketLogAttachmentSchema>;
+
 export const ticketLogSchema = z.object({
   id: z.string(),
   message: z.string(),
   actor: z.string(),
   createdAt: z.string(),
+  attachments: z.array(ticketLogAttachmentSchema).default([]),
 });
 export type TicketLog = z.infer<typeof ticketLogSchema>;
 

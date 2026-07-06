@@ -2,7 +2,8 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Plus, Search, SquarePen, Trash2 } from "lucide-react";
+import Image from "next/image";
+import { ImagePlus, Plus, Search, SquarePen, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
@@ -14,7 +15,7 @@ import { EmptyState } from "./empty-state";
 import { TicketLogBubbles } from "./ticket-log-bubbles";
 import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
-import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket } from "@/lib/types";
+import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
 
 const blank = {
   issueId: "",
@@ -33,6 +34,8 @@ const blank = {
   chargeable: false,
 };
 const hourStep = "0.00001";
+const maxLogImageCount = 4;
+const maxLogImageBytes = 2 * 1024 * 1024;
 const pageSize = 20;
 const hourMs = 60 * 60 * 1000;
 const workingHoursPerDay = 8;
@@ -93,6 +96,20 @@ type EffortRow = { id: string; owner: string; hours: string };
 
 function rowId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+}
+
+function fileToLogAttachment(file: File): Promise<TicketLogAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      id: rowId(),
+      fileName: file.name,
+      contentType: file.type,
+      dataUrl: String(reader.result || ""),
+    });
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
 }
 
 function formatHours(value: number) {
@@ -301,6 +318,8 @@ export function TicketManager({
   const [formStartDate, setFormStartDate] = useState(dateTimeInputValue(initialEditTicket?.startDate || ""));
   const [formCloseDate, setFormCloseDate] = useState(dateTimeInputValue(initialEditTicket?.closeDate || "", 17));
   const [effortRows, setEffortRows] = useState<EffortRow[]>(() => effortRowsForTicket(initialEditTicket));
+  const [logAttachments, setLogAttachments] = useState<TicketLogAttachment[]>([]);
+  const [logDropActive, setLogDropActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const holidayDates = useMemo(() => new Set(holidays.map((holiday) => holiday.date.slice(0, 10))), [holidays]);
   const statusOptions = useMemo(() => {
@@ -405,7 +424,31 @@ export function TicketManager({
     setFormStartDate(dateTimeInputValue(ticket?.startDate || ""));
     setFormCloseDate(dateTimeInputValue(ticket?.closeDate || "", 17));
     setEffortRows(effortRowsForTicket(ticket));
+    setLogAttachments([]);
+    setLogDropActive(false);
     setOpen(true);
+  }
+
+  async function addLogFiles(fileList: FileList | File[]) {
+    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return toast.error("Drop image files only");
+    const room = maxLogImageCount - logAttachments.length;
+    if (room <= 0) return toast.error(`Attach up to ${maxLogImageCount} images per log`);
+    const selected = files.slice(0, room);
+    const oversized = selected.filter((file) => file.size > maxLogImageBytes);
+    if (oversized.length) toast.error(`Some images are over ${Math.round(maxLogImageBytes / 1024 / 1024)}MB and were skipped`);
+    const valid = selected.filter((file) => file.size <= maxLogImageBytes);
+    if (!valid.length) return;
+    try {
+      const attachments = await Promise.all(valid.map(fileToLogAttachment));
+      setLogAttachments((items) => [...items, ...attachments].slice(0, maxLogImageCount));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not attach image");
+    }
+  }
+
+  function removeLogAttachment(id: string) {
+    setLogAttachments((items) => items.filter((item) => item.id !== id));
   }
 
   function addEffortRow() {
@@ -431,7 +474,10 @@ export function TicketManager({
       dueDate: formDueDate,
       closeDate: normalizeDateTime(String(formData.get("closeDate")), 17),
       chargeable: formData.get("chargeable") === "on",
-      logEntry: String(formData.get("logEntry")),
+      logEntry: {
+        message: String(formData.get("logEntry")),
+        attachments: logAttachments,
+      },
     };
     try {
       const response = await fetch(editing ? `/api/tickets/${editing.id}` : "/api/tickets", {
@@ -442,6 +488,7 @@ export function TicketManager({
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
       toast.success(editing ? "Ticket updated" : "Ticket created");
+      setLogAttachments([]);
       setOpen(false);
       router.refresh();
     } catch (error) {
@@ -705,6 +752,52 @@ export function TicketManager({
                 <Label>{editing ? "Add log entry" : "Log"}</Label>
                 <div className="mt-2 min-h-56 rounded-xl border border-white/80 bg-white/70 p-3">
                   {currentLog && editing ? <TicketLogBubbles ticket={editing} /> : <p className="text-[12px] text-slate-400">No log recorded yet.</p>}
+                </div>
+                <div
+                  className={`mt-3 rounded-xl border border-dashed p-3 transition-colors ${logDropActive ? "border-sky-400 bg-sky-100/70" : "border-sky-200 bg-white/55"}`}
+                  onDragEnter={(event) => { event.preventDefault(); setLogDropActive(true); }}
+                  onDragOver={(event) => { event.preventDefault(); setLogDropActive(true); }}
+                  onDragLeave={(event) => { event.preventDefault(); setLogDropActive(false); }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setLogDropActive(false);
+                    void addLogFiles(event.dataTransfer.files);
+                  }}
+                >
+                  <input
+                    id="ticket-log-images"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="sr-only"
+                    onChange={(event) => {
+                      if (event.target.files) void addLogFiles(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                  <label htmlFor="ticket-log-images" className="flex cursor-pointer flex-col items-center justify-center rounded-lg px-3 py-4 text-center">
+                    <ImagePlus size={22} className="text-[#0a84ff]" />
+                    <span className="mt-2 text-[12px] font-semibold text-slate-700">Drop images here</span>
+                    <span className="mt-1 text-[10px] text-slate-400">or click to browse · up to {maxLogImageCount} images</span>
+                  </label>
+                  {logAttachments.length > 0 && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {logAttachments.map((attachment) => (
+                        <div key={attachment.id} className="group relative overflow-hidden rounded-xl border border-sky-100 bg-white">
+                          <Image src={attachment.dataUrl} alt={attachment.fileName} width={320} height={180} unoptimized className="h-28 w-full object-cover" />
+                          <button
+                            type="button"
+                            className="absolute right-1.5 top-1.5 rounded-full bg-slate-950/70 p-1 text-white opacity-90 transition-opacity hover:opacity-100"
+                            onClick={() => removeLogAttachment(attachment.id)}
+                            title="Remove image"
+                          >
+                            <X size={13} />
+                          </button>
+                          <div className="absolute inset-x-0 bottom-0 truncate bg-slate-950/60 px-2 py-1 text-[10px] text-white">{attachment.fileName}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <Textarea className="mt-3 min-h-32" name="logEntry" placeholder={editing ? "Type the next update. It will be appended with your account." : "Type the first log update. It will be stamped with your account."} />
                 <p className="mt-1 text-[10px] text-slate-400">Saved logs are appended; existing log text is not overwritten.</p>

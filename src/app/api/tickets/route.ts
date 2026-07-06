@@ -5,11 +5,22 @@ import { assertCan } from "@/lib/rbac";
 import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
 import { normalizeDateTime } from "@/lib/utils";
-import { ticketSchema, type Ticket, type TicketLog } from "@/lib/types";
+import { ticketLogAttachmentSchema, ticketSchema, type Ticket, type TicketLog } from "@/lib/types";
 
 function makeTicketLog(raw: unknown, actor: string): TicketLog | null {
-  const message = typeof raw === "string" ? raw.trim() : "";
-  return message ? { id: crypto.randomUUID(), message, actor, createdAt: new Date().toISOString() } : null;
+  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const message = typeof raw === "string" ? raw.trim() : String(record.message ?? "").trim();
+  const attachments = Array.isArray(record.attachments)
+    ? record.attachments.flatMap((item) => {
+        const parsed = ticketLogAttachmentSchema.safeParse(item);
+        return parsed.success && parsed.data.contentType.startsWith("image/") && parsed.data.dataUrl.startsWith("data:image/")
+          ? [parsed.data]
+          : [];
+      }).slice(0, 4)
+    : [];
+  return message || attachments.length
+    ? { id: crypto.randomUUID(), message, attachments, actor, createdAt: new Date().toISOString() }
+    : null;
 }
 
 export async function GET() { const session = await getSession(); if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); return NextResponse.json(await ticketRepository.list()); }
