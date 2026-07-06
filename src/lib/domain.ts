@@ -142,6 +142,36 @@ export function ticketLogText(ticket: Pick<Ticket, "remark" | "ticketLogs">) {
   return [legacyRemark, ...logs].filter(Boolean).join("\n\n");
 }
 
+function pauseId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+}
+
+export function activeSlaPause(ticket: Pick<Ticket, "slaPauses">) {
+  return (ticket.slaPauses || []).find((pause) => !pause.endAt);
+}
+
+export function transitionSlaPauses(
+  currentPauses: Ticket["slaPauses"] | undefined,
+  previousStatus: Ticket["kanbanStatus"],
+  nextStatus: Ticket["kanbanStatus"],
+  actor: string,
+  now = new Date(),
+) {
+  const nowIso = now.toISOString();
+  const pauses = (currentPauses || []).map((pause) => ({ ...pause }));
+  const hasOpenPause = pauses.some((pause) => !pause.endAt);
+  if (nextStatus === "waiting" && !hasOpenPause) {
+    return [...pauses, { id: pauseId(), startAt: nowIso, endAt: "", reason: "waiting", actor }];
+  }
+  if (previousStatus === "waiting" && nextStatus !== "waiting") {
+    return pauses.map((pause) => pause.endAt ? pause : { ...pause, endAt: nowIso });
+  }
+  if (nextStatus !== "waiting" && hasOpenPause) {
+    return pauses.map((pause) => pause.endAt ? pause : { ...pause, endAt: nowIso });
+  }
+  return pauses;
+}
+
 export function normalize(value: string) {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 }

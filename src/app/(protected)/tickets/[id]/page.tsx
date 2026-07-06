@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, statusTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TicketLogBubbles } from "@/components/ticket-log-bubbles";
-import { hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketOwnerLabel } from "@/lib/domain";
+import { activeSlaPause, hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketOwnerLabel } from "@/lib/domain";
 import { can } from "@/lib/rbac";
 import { formatDate, formatDateTime, formatIssueType } from "@/lib/utils";
 
@@ -23,6 +23,8 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
   if (!ticket) notFound();
   const ownerEfforts = normalizeOwnerEfforts(ticket.ownerEfforts, ticket.owner, hoursFromMd(ticket.mdUsed));
   const canEdit = can(session.role, "tickets:manage");
+  const pause = activeSlaPause(ticket);
+  const pauseCount = ticket.slaPauses?.length || 0;
 
   return (
     <>
@@ -73,6 +75,7 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
               <div><p className="text-[10px] uppercase text-slate-400">Started</p><p className="mt-1">{formatDateTime(ticket.startDate)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">End date</p><p className="mt-1">{formatDateTime(ticket.closeDate)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">Status lane</p><p className="mt-1 capitalize">{ticket.kanbanStatus.replace("_", " ")}</p></div>
+              <div><p className="text-[10px] uppercase text-slate-400">SLA clock</p><p className="mt-1">{pause ? `Paused since ${formatDateTime(pause.startAt)}` : `Running${pauseCount ? ` · ${pauseCount} pause${pauseCount > 1 ? "s" : ""}` : ""}`}</p></div>
             </div>
             <div className="border-t pt-4">
               <p className="text-[10px] uppercase text-slate-400">Owner effort</p>

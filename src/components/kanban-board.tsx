@@ -5,8 +5,9 @@ import { DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSe
 import { CSS } from "@dnd-kit/utilities";
 import { CalendarClock, GripVertical, Search, UserRound } from "lucide-react";
 import { toast } from "sonner";
-import type { Role, Ticket } from "@/lib/types";
+import type { Holiday, Role, Sla, Ticket } from "@/lib/types";
 import { KANBAN_ARCHIVE_AGE_DAYS, isKanbanArchiveCandidate, isTicketOwner, normalize, ticketAgeAnchorDate, ticketAgeDays, ticketOwnerLabel } from "@/lib/domain";
+import { ticketSlaState } from "@/lib/sla";
 import { Badge, statusTone } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -31,8 +32,9 @@ function canMoveTicket(ticket: Ticket, role: Role, userName: string, username: s
   return isTicketOwner(ticket, [userName, username]);
 }
 
-function TicketCard({ ticket, disabled }: { ticket: Ticket; disabled: boolean }) {
+function TicketCard({ ticket, disabled, slaRules, holidays }: { ticket: Ticket; disabled: boolean; slaRules: Sla[]; holidays: Holiday[] }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: ticket.id, disabled, data: { ticket } });
+  const sla = ticketSlaState(ticket, slaRules, holidays);
 
   return (
     <article ref={setNodeRef} style={{ transform: CSS.Translate.toString(transform) }} className={cn("lux-surface rounded-xl border bg-white/85 p-3 shadow-sm transition-shadow hover:shadow-[0_14px_34px_rgba(35,77,112,.10)]", isDragging && "z-50 opacity-75 shadow-xl")}>
@@ -43,13 +45,16 @@ function TicketCard({ ticket, disabled }: { ticket: Ticket; disabled: boolean })
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <Link href={`/tickets/${ticket.id}`} className="text-[11px] font-semibold text-[#0a84ff] hover:underline">{ticket.issueId}</Link>
-            <Badge tone={ticket.severity === "P1" ? "rose" : ticket.severity === "P2" ? "amber" : "slate"}>{ticket.severity}</Badge>
+            <div className="flex shrink-0 items-center gap-1">
+              {sla.paused && <Badge tone="slate">Paused</Badge>}
+              <Badge tone={ticket.severity === "P1" ? "rose" : ticket.severity === "P2" ? "amber" : "slate"}>{ticket.severity}</Badge>
+            </div>
           </div>
           <p className="mt-1.5 line-clamp-2 text-[12px] font-medium leading-5 text-slate-800">{ticket.issueTitle}</p>
           <p className="mt-1 truncate text-[10px] text-slate-400">{ticket.customerName}</p>
           <div className="mt-3 flex items-center justify-between border-t border-sky-100/80 pt-2 text-[10px] text-slate-400">
             <span className="flex min-w-0 items-center gap-1"><UserRound size={11} /><span className="truncate">{ticketOwnerLabel(ticket) || "Unassigned"}</span></span>
-            <span className="flex items-center gap-1"><CalendarClock size={11} />{formatDateTime(ticket.dueDate)}</span>
+            <span className="flex items-center gap-1"><CalendarClock size={11} />{formatDateTime(sla.dueDate?.toISOString() || ticket.dueDate)}</span>
           </div>
         </div>
       </div>
@@ -79,7 +84,7 @@ function ArchivedTicketCard({ ticket, now }: { ticket: Ticket; now: Date }) {
   );
 }
 
-function Column({ column, tickets, role, userName, username }: { column: typeof columns[number]; tickets: Ticket[]; role: Role; userName: string; username: string }) {
+function Column({ column, tickets, role, userName, username, slaRules, holidays }: { column: typeof columns[number]; tickets: Ticket[]; role: Role; userName: string; username: string; slaRules: Sla[]; holidays: Holiday[] }) {
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
 
   return (
@@ -93,14 +98,14 @@ function Column({ column, tickets, role, userName, username }: { column: typeof 
       </header>
       <div className="space-y-2">
         {tickets.map((ticket) => (
-          <TicketCard key={ticket.id} ticket={ticket} disabled={!canMoveTicket(ticket, role, userName, username)} />
+          <TicketCard key={ticket.id} ticket={ticket} disabled={!canMoveTicket(ticket, role, userName, username)} slaRules={slaRules} holidays={holidays} />
         ))}
       </div>
     </section>
   );
 }
 
-export function KanbanBoard({ initialTickets, role, userName, username }: { initialTickets: Ticket[]; role: Role; userName: string; username: string }) {
+export function KanbanBoard({ initialTickets, role, userName, username, slaRules, holidays }: { initialTickets: Ticket[]; role: Role; userName: string; username: string; slaRules: Sla[]; holidays: Holiday[] }) {
   const [tickets, setTickets] = useState(initialTickets.filter((ticket) => !isTicketClosed(ticket)));
   const [showArchived, setShowArchived] = useState(false);
   const [mineOnly, setMineOnly] = useState(false);
@@ -146,11 +151,14 @@ export function KanbanBoard({ initialTickets, role, userName, username }: { init
     const previous = ticket;
     setTickets((items) => items.map((item) => item.id === ticket.id ? { ...item, status: target.status, kanbanStatus: target.id } : item));
     const response = await fetch(`/api/tickets/${ticket.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: target.status }) });
+    const result = await response.json();
     if (!response.ok) {
-      const result = await response.json();
       setTickets((items) => items.map((item) => item.id === ticket.id ? previous : item));
       toast.error(result.error || "Could not update status");
-    } else toast.success(`${ticket.issueId} moved to ${target.label}`);
+    } else {
+      setTickets((items) => items.map((item) => item.id === ticket.id ? result : item));
+      toast.success(`${ticket.issueId} moved to ${target.label}`);
+    }
   }
 
   return (
@@ -210,7 +218,7 @@ export function KanbanBoard({ initialTickets, role, userName, username }: { init
 
       <DndContext sensors={sensors} onDragEnd={onDragEnd}>
         <div className="overflow-x-auto pb-3">
-          <div className="grid min-w-[1050px] grid-cols-5 gap-3">{columns.map((column) => <Column key={column.id} column={column} tickets={grouped[column.id] || []} role={role} userName={userName} username={username} />)}</div>
+          <div className="grid min-w-[1050px] grid-cols-5 gap-3">{columns.map((column) => <Column key={column.id} column={column} tickets={grouped[column.id] || []} role={role} userName={userName} username={username} slaRules={slaRules} holidays={holidays} />)}</div>
         </div>
       </DndContext>
     </div>

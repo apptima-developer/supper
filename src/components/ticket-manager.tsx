@@ -13,7 +13,8 @@ import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { TicketLogBubbles } from "./ticket-log-bubbles";
-import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours, type TicketSeverityCode } from "@/lib/domain";
+import { hoursFromMd, isTicketOwner, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
+import { ticketSlaState } from "@/lib/sla";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
 import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
 
@@ -32,17 +33,13 @@ const blank = {
   mdUsed: 0,
   ownerEfforts: [],
   chargeable: false,
+  slaPauses: [],
 };
 const hourStep = "0.00001";
 const maxLogImageCount = 4;
 const maxLogImageBytes = 2 * 1024 * 1024;
 const pageSize = 20;
-const hourMs = 60 * 60 * 1000;
-const workingHoursPerDay = 8;
 const workStartHour = 9;
-const workEndHour = workStartHour + workingHoursPerDay;
-const closedKanbanStatuses = new Set(["resolved", "closed", "cancelled"]);
-const slaSeverityFields: Record<TicketSeverityCode, keyof Pick<Sla, "p1" | "p2" | "p3" | "p4">> = { P1: "p1", P2: "p2", P3: "p3", P4: "p4" };
 const severityOptions = [
   { value: "Critical", label: "P1 - Critical" },
   { value: "High", label: "P2 - High" },
@@ -177,101 +174,6 @@ function dateInRange(value: string, from: string, to: string) {
   return (!from || value >= from) && (!to || value <= to);
 }
 
-function isBusinessDay(date: Date, holidayDates: Set<string>) {
-  const day = date.getDay();
-  return day !== 0 && day !== 6 && !holidayDates.has(dateKey(date));
-}
-
-function nextBusinessStart(date: Date, holidayDates: Set<string>) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + 1);
-  next.setHours(workStartHour, 0, 0, 0);
-  while (!isBusinessDay(next, holidayDates)) next.setDate(next.getDate() + 1);
-  return next;
-}
-
-function alignToBusinessTime(date: Date, holidayDates: Set<string>) {
-  const aligned = new Date(date);
-  while (!isBusinessDay(aligned, holidayDates)) {
-    aligned.setDate(aligned.getDate() + 1);
-    aligned.setHours(workStartHour, 0, 0, 0);
-  }
-  if (aligned.getHours() < workStartHour) aligned.setHours(workStartHour, 0, 0, 0);
-  if (aligned.getHours() >= workEndHour) return nextBusinessStart(aligned, holidayDates);
-  return aligned;
-}
-
-function addBusinessHours(start: Date, hours: number, holidayDates: Set<string>) {
-  let current = alignToBusinessTime(start, holidayDates);
-  let remaining = Math.max(0, hours);
-  let guard = 0;
-  while (remaining > 0 && guard < 10000) {
-    guard += 1;
-    current = alignToBusinessTime(current, holidayDates);
-    const endOfWorkday = new Date(current);
-    endOfWorkday.setHours(workEndHour, 0, 0, 0);
-    const available = Math.max(0, (endOfWorkday.getTime() - current.getTime()) / hourMs);
-    if (remaining <= available) return new Date(current.getTime() + remaining * hourMs);
-    remaining -= available;
-    current = nextBusinessStart(current, holidayDates);
-  }
-  return current;
-}
-
-function businessHoursBetween(start: Date, end: Date, holidayDates: Set<string>) {
-  let current = alignToBusinessTime(start, holidayDates);
-  let total = 0;
-  let guard = 0;
-  if (end.getTime() <= current.getTime()) return total;
-  while (current.getTime() < end.getTime() && guard < 10000) {
-    guard += 1;
-    current = alignToBusinessTime(current, holidayDates);
-    if (current.getTime() >= end.getTime()) break;
-    const endOfWorkday = new Date(current);
-    endOfWorkday.setHours(workEndHour, 0, 0, 0);
-    const sliceEnd = end.getTime() < endOfWorkday.getTime() ? end : endOfWorkday;
-    if (sliceEnd.getTime() > current.getTime()) total += (sliceEnd.getTime() - current.getTime()) / hourMs;
-    current = nextBusinessStart(current, holidayDates);
-  }
-  return total;
-}
-
-function slaField(severity: string) {
-  return slaSeverityFields[ticketSeverityCode(severity)];
-}
-
-function slaHours(customerName: string, severity: string, slaRules: Sla[]) {
-  const field = slaField(severity);
-  const rule = slaRules.find((item) => item.customerName.toLowerCase() === customerName.toLowerCase());
-  return field && rule ? rule[field] : null;
-}
-
-function slaState(ticket: Ticket, slaRules: Sla[], holidayDates: Set<string>) {
-  const start = dateValue(ticket.startDate || ticket.date);
-  const configuredHours = slaHours(ticket.customerName, ticket.severity, slaRules);
-  if (!start || !configuredHours) {
-    return { label: "N/A", tone: "slate" as const, title: "No start date or matching SLA rule.", dueDate: dateValue(ticket.dueDate, workEndHour), overdue: false };
-  }
-
-  const totalHours = configuredHours;
-  const businessStart = alignToBusinessTime(start, holidayDates);
-  const dueDate = addBusinessHours(businessStart, totalHours, holidayDates);
-  const measuredAt = closedKanbanStatuses.has(ticket.kanbanStatus)
-    ? dateValue(ticket.closeDate, workEndHour) || new Date()
-    : new Date();
-  const elapsedHours = businessHoursBetween(businessStart, measuredAt, holidayDates);
-  const percent = Math.min(100, Math.max(0, Math.round((elapsedHours / totalHours) * 100)));
-  const tone = percent >= 90 ? "rose" as const : percent >= 50 ? "amber" as const : "emerald" as const;
-  const overdue = !closedKanbanStatuses.has(ticket.kanbanStatus) && measuredAt.getTime() >= dueDate.getTime();
-  return {
-    label: `${percent}%`,
-    tone,
-    title: `${configuredHours} business hour SLA, due ${formatDateTime(dueDate)}`,
-    dueDate,
-    overdue,
-  };
-}
-
 export function TicketManager({
   tickets,
   customers,
@@ -321,7 +223,6 @@ export function TicketManager({
   const [logAttachments, setLogAttachments] = useState<TicketLogAttachment[]>([]);
   const [logDropActive, setLogDropActive] = useState(false);
   const [busy, setBusy] = useState(false);
-  const holidayDates = useMemo(() => new Set(holidays.map((holiday) => holiday.date.slice(0, 10))), [holidays]);
   const statusOptions = useMemo(() => {
     const counts = tickets.reduce<Record<string, number>>((acc, ticket) => {
       acc[ticket.kanbanStatus] = (acc[ticket.kanbanStatus] || 0) + 1;
@@ -410,8 +311,8 @@ export function TicketManager({
       date: editing?.date || blank.date,
       kanbanStatus: editing?.kanbanStatus || "open",
     } as Ticket;
-    return slaState(ticketForSla, slaRules, holidayDates).dueDate?.toISOString() || "";
-  }, [editing, formCloseDate, formCustomer, formSeverity, formStartDate, holidayDates, slaRules]);
+    return ticketSlaState(ticketForSla, slaRules, holidays).dueDate?.toISOString() || "";
+  }, [editing, formCloseDate, formCustomer, formSeverity, formStartDate, holidays, slaRules]);
 
   function patchEffortRow(id: string, field: "owner" | "hours", value: string) {
     setEffortRows((rows) => rows.map((row) => row.id === id ? { ...row, [field]: value } : row));
@@ -604,7 +505,7 @@ export function TicketManager({
               </thead>
               <tbody>
                 {pageTickets.map((ticket) => {
-                  const sla = slaState(ticket, slaRules, holidayDates);
+                  const sla = ticketSlaState(ticket, slaRules, holidays);
                   return (
                     <tr key={ticket.id} className="border-t hover:bg-slate-50/70">
                       <td className="px-4 py-2">

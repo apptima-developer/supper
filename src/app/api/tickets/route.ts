@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { mapKanbanStatus, ticketEffortFields, ticketSeverityLabel } from "@/lib/domain";
+import { mapKanbanStatus, ticketEffortFields, ticketSeverityLabel, transitionSlaPauses } from "@/lib/domain";
 import { assertCan } from "@/lib/rbac";
 import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
@@ -47,6 +47,7 @@ async function normalizeTicketDates(raw: Record<string, unknown>, ticket: Partia
     closeDate,
     createdAt: "",
     updatedAt: "",
+    slaPauses: ticket.slaPauses || [],
   } as Ticket;
   const computedDueDate = ticketSlaState(slaTicket, sla, holidays).dueDate?.toISOString();
   return { startDate, dueDate: computedDueDate || fallbackDueDate, closeDate };
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
 
     const severity = ticketSeverityLabel(String(raw.severity || ""));
     const kanbanStatus = mapKanbanStatus(String(raw.status || ""));
+    const slaPauses = transitionSlaPauses([], "open", kanbanStatus, session.username);
     const effort = ticketEffortFields(raw);
     const log = makeTicketLog(raw.logEntry, session.username);
     const dates = await normalizeTicketDates(raw, {
@@ -72,6 +74,7 @@ export async function POST(request: Request) {
       severity,
       status: String(raw.status || ""),
       kanbanStatus,
+      slaPauses,
     });
     const input = ticketSchema.omit({ id: true, createdAt: true, updatedAt: true }).parse({
       ...raw,
@@ -83,6 +86,7 @@ export async function POST(request: Request) {
       customerKey: customer.key,
       customerName: customer.customerName,
       kanbanStatus,
+      slaPauses,
     });
 
     return NextResponse.json(await ticketRepository.create(input, session.username), { status: 201 });

@@ -4,13 +4,12 @@ import { isTicketOwner, ticketOwnerLabel } from "@/lib/domain";
 import { loadTicketManagerData } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
 import { formatDateTime } from "@/lib/utils";
-import type { Ticket } from "@/lib/types";
 
 const closedStatuses = new Set(["closed", "cancelled", "resolved"]);
 
-function dueTime(ticket: Ticket) {
-  if (!ticket.dueDate) return Number.MAX_SAFE_INTEGER;
-  const time = new Date(ticket.dueDate).getTime();
+function dueTime(date: Date | null | undefined) {
+  if (!date) return Number.MAX_SAFE_INTEGER;
+  const time = date.getTime();
   return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
 }
 
@@ -40,7 +39,7 @@ export async function GET() {
           tone: slaAlert ? sla.tone : "blue",
           kind: slaAlert ? "sla" : "assigned",
           priority: sla.overdue ? 0 : sla.tone === "rose" ? 1 : sla.tone === "amber" ? 2 : 3,
-          dueAt: dueTime(ticket),
+          dueAt: dueTime(sla.dueDate),
           updatedAt: ticket.updatedAt,
         };
       })

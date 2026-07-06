@@ -63,6 +63,15 @@ export const ticketLogSchema = z.object({
 });
 export type TicketLog = z.infer<typeof ticketLogSchema>;
 
+export const ticketSlaPauseSchema = z.object({
+  id: z.string(),
+  startAt: z.string(),
+  endAt: z.string().default(""),
+  reason: z.string().default("waiting"),
+  actor: z.string().default(""),
+});
+export type TicketSlaPause = z.infer<typeof ticketSlaPauseSchema>;
+
 export const ticketSchema = z.object({
   id: z.string(),
   issueId: z.string(),
@@ -83,6 +92,7 @@ export const ticketSchema = z.object({
   chargeable: z.boolean(),
   remark: z.string(),
   ticketLogs: z.array(ticketLogSchema).default([]),
+  slaPauses: z.array(ticketSlaPauseSchema).default([]),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

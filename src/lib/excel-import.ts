@@ -334,6 +334,7 @@ function parseTickets(
       chargeable: bool(row[col("chargeable", "Chargeable")]),
       remark: text(row[col("remark", "Remark")]),
       ticketLogs: [],
+      slaPauses: [],
     });
   });
 
@@ -540,7 +541,13 @@ export async function commitImport(
     const index = tickets.findIndex((ticket) => ticket.issueId === incoming.issueId);
     if (index >= 0) {
       const previous = tickets[index];
-      const candidate: Ticket = { ...previous, ...incoming, id: previous.id, updatedAt: previous.updatedAt };
+      const candidate: Ticket = {
+        ...previous,
+        ...incoming,
+        id: previous.id,
+        slaPauses: previous.slaPauses || [],
+        updatedAt: previous.updatedAt,
+      };
       const changes = ticketDiff(previous, candidate);
       if (!changes.length) continue;
       const next: Ticket = { ...candidate, updatedAt: now };

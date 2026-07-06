@@ -375,8 +375,13 @@ export async function restoreImportSnapshot(id: string) {
 }
 
 export async function loadDashboardData() {
-  const [customers, tickets] = await Promise.all([listCustomers(), listTickets()]);
-  return { customers, tickets };
+  const [customers, tickets, sla, holidays] = await Promise.all([
+    listCustomers(),
+    listTickets(),
+    listMaster("sla", slaListSchema),
+    listMaster("holidays", z.array(z.object({ id: z.string(), date: z.string(), name: z.string() }))),
+  ]);
+  return { customers, tickets, sla, holidays };
 }
 
 export async function loadTicketManagerData() {

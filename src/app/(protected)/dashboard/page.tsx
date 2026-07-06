@@ -18,6 +18,7 @@ import { Progress } from "@/components/ui/progress";
 import { AgingChart, MdChart, OwnerTicketChart, StatusChart } from "@/components/dashboard-charts";
 import { requireSession } from "@/lib/auth";
 import { loadDashboardData } from "@/lib/repositories";
+import { ticketSlaState } from "@/lib/sla";
 import {
   hoursFromMd,
   isKanbanArchiveCandidate,
@@ -52,9 +53,9 @@ function formatHours(value: number) {
   return Math.max(0, Number(value) || 0).toFixed(5);
 }
 
-function dueTime(ticket: Ticket) {
-  if (!ticket.dueDate) return null;
-  const time = new Date(ticket.dueDate).getTime();
+function dueTime(date: Date | null | undefined) {
+  if (!date) return null;
+  const time = date.getTime();
   return Number.isNaN(time) ? null : time;
 }
 
@@ -137,16 +138,17 @@ function PulseStat({
 }
 
 export default async function DashboardPage() {
-  const [session, { customers, tickets }] = await Promise.all([requireSession(), loadDashboardData()]);
+  const [session, { customers, tickets, sla, holidays }] = await Promise.all([requireSession(), loadDashboardData()]);
   const now = new Date();
   const openTickets = tickets.filter((ticket) => !closedStatuses.has(ticket.kanbanStatus));
+  const slaByTicket = new Map(openTickets.map((ticket) => [ticket.id, ticketSlaState(ticket, sla, holidays, now)]));
   const overdueTickets = openTickets.filter((ticket) => {
-    const due = dueTime(ticket);
-    return due !== null && due < now.getTime();
+    return slaByTicket.get(ticket.id)?.overdue;
   });
   const dueSoonTickets = openTickets.filter((ticket) => {
-    const due = dueTime(ticket);
-    return due !== null && due >= now.getTime() && due <= now.getTime() + weekMs;
+    const state = slaByTicket.get(ticket.id);
+    const due = dueTime(state?.dueDate);
+    return Boolean(state && !state.paused && !state.overdue && due !== null && due >= now.getTime() && due <= now.getTime() + weekMs);
   });
   const waitingTickets = openTickets.filter((ticket) => ticket.kanbanStatus === "waiting");
   const agedTickets = openTickets.filter((ticket) => isKanbanArchiveCandidate(ticket, now));

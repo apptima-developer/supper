@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { mapKanbanStatus, ticketEffortFields, ticketSeverityLabel } from "@/lib/domain";
+import { mapKanbanStatus, ticketEffortFields, ticketSeverityLabel, transitionSlaPauses } from "@/lib/domain";
 import { assertCan } from "@/lib/rbac";
 import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
@@ -30,7 +30,10 @@ async function applyComputedDates(current: Ticket, patch: Partial<Ticket>) {
     "closeDate" in patch ||
     "severity" in patch ||
     "customerKey" in patch ||
-    "customerName" in patch;
+    "customerName" in patch ||
+    "kanbanStatus" in patch ||
+    "status" in patch ||
+    "slaPauses" in patch;
   if (!shouldCompute) return patch;
 
   const next = { ...current, ...patch };
@@ -58,9 +61,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!current) throw new Error("Ticket not found");
 
     const raw = await request.json() as Record<string, unknown>;
-    const { logEntry: _logEntry, ticketLogs: _ticketLogs, ...rawPatch } = raw;
+    const { logEntry: _logEntry, ticketLogs: _ticketLogs, slaPauses: _slaPauses, ...rawPatch } = raw;
     void _logEntry;
     void _ticketLogs;
+    void _slaPauses;
     let patch = rawPatch as Partial<Ticket>;
     const log = makeTicketLog(raw.logEntry, session.username);
     if (log) patch.ticketLogs = [...(current.ticketLogs || []), log];
@@ -72,6 +76,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (!customer) throw new Error("Customer not found");
       patch.customerKey = customer.key;
       patch.customerName = customer.customerName;
+    }
+    if (patch.kanbanStatus && patch.kanbanStatus !== current.kanbanStatus) {
+      patch.slaPauses = transitionSlaPauses(current.slaPauses, current.kanbanStatus, patch.kanbanStatus, session.username);
     }
     patch = await applyComputedDates(current, patch);
 

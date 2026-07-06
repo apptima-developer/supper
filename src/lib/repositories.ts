@@ -49,6 +49,8 @@ export const loadDashboardData = cache(async () => relationalEnabled()
   : readJsonBatch({
       customers: specs.customers,
       tickets: specs.tickets,
+      sla: specs.sla,
+      holidays: specs.holidays,
     }));
 
 export const loadCustomerManagerData = cache(async () => {
