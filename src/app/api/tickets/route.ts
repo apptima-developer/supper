@@ -68,7 +68,9 @@ export async function POST(request: Request) {
     const slaPauses = transitionSlaPauses([], "open", kanbanStatus, session.username);
     const effort = ticketEffortFields(raw);
     const log = makeTicketLog(raw.logEntry, session.username);
-    const dates = await normalizeTicketDates(raw, {
+    const ticketCreateDate = new Date().toISOString();
+    const protectedRaw = { ...raw, date: ticketCreateDate };
+    const dates = await normalizeTicketDates(protectedRaw, {
       customerName: customer.customerName,
       customerKey: customer.key,
       severity,
@@ -80,6 +82,7 @@ export async function POST(request: Request) {
       ...raw,
       ...effort,
       ...dates,
+      date: ticketCreateDate,
       category: String(raw.category ?? ""),
       severity,
       remark: String(raw.remark ?? ""),

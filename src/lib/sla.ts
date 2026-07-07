@@ -216,3 +216,29 @@ export function ticketSlaState(ticket: Ticket, slaRules: Sla[], holidays: Holida
     clockMode: mode,
   };
 }
+
+export function ticketResponseSlaState(ticket: Pick<Ticket, "date" | "startDate">, limitMinutes = 30) {
+  const created = dateValue(ticket.date);
+  const started = dateValue(ticket.startDate);
+  if (!created || !started) {
+    return {
+      label: "N/A",
+      tone: "slate" as const,
+      title: "Create ticket date or start date is missing.",
+      overdue: false,
+      elapsedMinutes: null,
+      limitMinutes,
+    };
+  }
+
+  const elapsedMinutes = Math.max(0, Math.round((started.getTime() - created.getTime()) / (60 * 1000)));
+  const overdue = elapsedMinutes > limitMinutes;
+  return {
+    label: `${elapsedMinutes}m`,
+    tone: overdue ? "rose" as const : "emerald" as const,
+    title: `Response ${elapsedMinutes} minutes from create ticket date to start date. Target is ${limitMinutes} minutes.`,
+    overdue,
+    elapsedMinutes,
+    limitMinutes,
+  };
+}

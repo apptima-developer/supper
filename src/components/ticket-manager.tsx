@@ -14,13 +14,13 @@ import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { TicketLogBubbles } from "./ticket-log-bubbles";
 import { activeSlaPause, hoursFromMd, isTicketOwner, mapKanbanStatus, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
-import { ticketSlaState } from "@/lib/sla";
+import { ticketResponseSlaState, ticketSlaState } from "@/lib/sla";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
 import type { Category, Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
 
 const blank = {
   issueId: "",
-  date: new Date().toISOString().slice(0, 10),
+  date: "",
   customerKey: "",
   issueTitle: "",
   issueType: "",
@@ -144,6 +144,10 @@ function effortRowsForTicket(ticket: Ticket | null): EffortRow[] {
   return rows.map((item) => ({ id: rowId(), owner: item.owner, hours: formatHours(item.hours) }));
 }
 
+function createTicketDateValue(ticket: Ticket | null) {
+  return ticket?.date || new Date().toISOString();
+}
+
 function effortPayload(rows: EffortRow[]) {
   const ownerEfforts = normalizeOwnerEfforts(
     rows.map((row) => ({ owner: row.owner, hours: Number(row.hours) })),
@@ -231,6 +235,7 @@ export function TicketManager({
   const [currentPage, setCurrentPage] = useState(1);
   const [open, setOpen] = useState(Boolean(initialEditTicket));
   const [editing, setEditing] = useState<Ticket | null>(initialEditTicket);
+  const [formCreateDate, setFormCreateDate] = useState(createTicketDateValue(initialEditTicket));
   const [formCustomerKey, setFormCustomerKey] = useState(initialEditTicket?.customerKey || "");
   const [formSeverity, setFormSeverity] = useState(ticketSeverityLabel(initialEditTicket?.severity || blank.severity));
   const [formCategory, setFormCategory] = useState(initialEditTicket?.category || "");
@@ -349,12 +354,12 @@ export function TicketManager({
       startDate: normalizeDateTime(formStartDate),
       dueDate: editing?.dueDate || "",
       closeDate: normalizeDateTime(formCloseDate, 17),
-      date: editing?.date || blank.date,
+      date: formCreateDate,
       status: formStatus,
       kanbanStatus: formKanbanStatus,
       slaPauses: editing?.slaPauses || [],
     } as Ticket;
-  }, [editing, formCategory, formCloseDate, formCustomer, formKanbanStatus, formSeverity, formStartDate, formStatus]);
+  }, [editing, formCategory, formCloseDate, formCreateDate, formCustomer, formKanbanStatus, formSeverity, formStartDate, formStatus]);
   const formDueDate = useMemo(() => {
     if (!formTicketForSla) return editing?.dueDate || "";
     return ticketSlaState(formTicketForSla, slaRules, holidays).dueDate?.toISOString() || "";
@@ -362,6 +367,10 @@ export function TicketManager({
   const modalSla = useMemo(
     () => formTicketForSla ? ticketSlaState(formTicketForSla, slaRules, holidays) : null,
     [formTicketForSla, holidays, slaRules],
+  );
+  const modalResponseSla = useMemo(
+    () => formTicketForSla ? ticketResponseSlaState(formTicketForSla) : null,
+    [formTicketForSla],
   );
   const activePause = editing ? activeSlaPause(editing) : null;
   const pauseHistory = editing?.slaPauses || [];
@@ -381,6 +390,7 @@ export function TicketManager({
 
   function openEditor(ticket: Ticket | null) {
     setEditing(ticket);
+    setFormCreateDate(createTicketDateValue(ticket));
     setFormCustomerKey(ticket?.customerKey || "");
     setFormSeverity(ticketSeverityLabel(ticket?.severity || blank.severity));
     setFormCategory(ticket?.category || "");
@@ -568,18 +578,21 @@ export function TicketManager({
                   <th className="w-24 px-4 py-2.5">Action</th>
                   <th className="px-4 py-2.5">Issue</th>
                   <th className="px-4 py-2.5">Customer</th>
+                  <th className="px-4 py-2.5">Category</th>
                   <th className="px-4 py-2.5">Type / Severity</th>
                   <th className="px-4 py-2.5">Start</th>
                   <th className="px-4 py-2.5">Due</th>
                   <th className="px-4 py-2.5">Hours</th>
                   <th className="px-4 py-2.5">Chargeable</th>
-                  <th className="px-4 py-2.5">SLA</th>
+                  <th className="px-4 py-2.5">Response SLA</th>
+                  <th className="px-4 py-2.5">Resolution SLA</th>
                   <th className="px-4 py-2.5">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {pageTickets.map((ticket) => {
                   const sla = ticketSlaState(ticket, slaRules, holidays);
+                  const responseSla = ticketResponseSlaState(ticket);
                   return (
                     <tr key={ticket.id} className="border-t hover:bg-slate-50/70">
                       <td className="px-4 py-2">
@@ -596,13 +609,14 @@ export function TicketManager({
                           )}
                         </div>
                       </td>
-                      <td className="max-w-[34rem] px-4 py-2">
+                      <td className="max-w-[24rem] px-4 py-2">
                         <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                           <Link href={`/tickets/${ticket.id}`} className="shrink-0 font-medium text-slate-900 hover:text-[#0a84ff]">{ticket.issueId}</Link>
                           <span className="truncate text-[11px] text-slate-500" title={ticket.issueTitle}>{ticket.issueTitle}</span>
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2">{ticket.customerName}</td>
+                      <td className="whitespace-nowrap px-4 py-2 text-[11px] text-slate-600">{ticket.category || "-"}</td>
                       <td className="whitespace-nowrap px-4 py-2">
                         <div className="flex items-center gap-1.5">
                           <span>{formatIssueType(ticket.issueType)}</span>
@@ -621,6 +635,9 @@ export function TicketManager({
                       </td>
                       <td className="whitespace-nowrap px-4 py-2">
                         <Badge tone={ticket.chargeable ? "emerald" : "slate"}>{ticket.chargeable ? "Yes" : "No"}</Badge>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2">
+                        <Badge tone={responseSla.tone} title={responseSla.title}>{responseSla.label}</Badge>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2">
                         <Badge tone={sla.tone} title={sla.title}>{sla.label}</Badge>
@@ -647,7 +664,13 @@ export function TicketManager({
               <div className="space-y-4">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div><Label required>Issue ID</Label><Input name="issueId" required defaultValue={editing?.issueId} /></div>
-                  <div><Label required>Date</Label><Input name="date" type="date" required defaultValue={(editing?.date || blank.date).slice(0, 10)} /></div>
+                  <div>
+                    <Label required>Create ticket date</Label>
+                    <input type="hidden" name="date" value={formCreateDate} />
+                    <div className="flex h-9 items-center rounded-lg border border-sky-100/90 bg-slate-50/70 px-3 text-[13px] font-medium text-slate-700">
+                      {formatDateTime(formCreateDate)}
+                    </div>
+                  </div>
                 </div>
                 <div>
                   <Label required>Customer</Label>
@@ -726,7 +749,13 @@ export function TicketManager({
                     </div>
                     <Badge tone={slaClockBadge.tone}>{slaClockBadge.label}</Badge>
                   </div>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                    <div className="rounded-xl border border-white/80 bg-white/70 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Response</p>
+                      <p className={`mt-1 text-[12px] font-medium ${modalResponseSla?.overdue ? "text-rose-600" : "text-slate-700"}`}>
+                        {modalResponseSla ? modalResponseSla.label : "N/A"}
+                      </p>
+                    </div>
                     <div className="rounded-xl border border-white/80 bg-white/70 px-3 py-2">
                       <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Clock mode</p>
                       <p className="mt-1 text-[12px] font-medium text-slate-700">{modalSla ? clockModeLabel(modalSla.clockMode) : "-"}</p>

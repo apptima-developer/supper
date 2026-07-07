@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { TicketLogBubbles } from "@/components/ticket-log-bubbles";
 import { activeSlaPause, hoursFromMd, normalizeOwnerEfforts, ticketEffortHours, ticketOwnerLabel } from "@/lib/domain";
 import { can } from "@/lib/rbac";
+import { ticketResponseSlaState } from "@/lib/sla";
 import { formatDate, formatDateTime, formatIssueType } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,7 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
   const canEdit = can(session.role, "tickets:manage");
   const pause = activeSlaPause(ticket);
   const pauseCount = ticket.slaPauses?.length || 0;
+  const responseSla = ticketResponseSlaState(ticket);
 
   return (
     <>
@@ -44,7 +46,7 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-[#0a84ff]">{ticket.issueId}</p>
           <h1 className="mt-1 text-[21px] font-semibold text-slate-900">{ticket.issueTitle}</h1>
-          <p className="mt-1 text-[12px] text-slate-500">{ticket.customerName} · {formatIssueType(ticket.issueType)}</p>
+          <p className="mt-1 text-[12px] text-slate-500">{ticket.customerName} · {ticket.category ? `${ticket.category} · ` : ""}{formatIssueType(ticket.issueType)}</p>
         </div>
         <Badge tone={statusTone(ticket.status)}>{ticket.status}</Badge>
       </div>
@@ -71,10 +73,11 @@ export default async function TicketDetail({ params }: { params: Promise<{ id: s
           <CardHeader><CardTitle>Ticket detail</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-4 text-[12px]">
-              <div><p className="text-[10px] uppercase text-slate-400">Opened</p><p className="mt-1">{formatDate(ticket.date)}</p></div>
+              <div><p className="text-[10px] uppercase text-slate-400">Create ticket date</p><p className="mt-1">{formatDateTime(ticket.date)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">Started</p><p className="mt-1">{formatDateTime(ticket.startDate)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">End date</p><p className="mt-1">{formatDateTime(ticket.closeDate)}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">Status lane</p><p className="mt-1 capitalize">{ticket.kanbanStatus.replace("_", " ")}</p></div>
+              <div><p className="text-[10px] uppercase text-slate-400">Response SLA</p><p className={`mt-1 ${responseSla.overdue ? "font-medium text-rose-600" : ""}`}>{responseSla.label}</p></div>
               <div><p className="text-[10px] uppercase text-slate-400">SLA clock</p><p className="mt-1">{pause ? `Paused since ${formatDateTime(pause.startAt)}` : `Running${pauseCount ? ` · ${pauseCount} pause${pauseCount > 1 ? "s" : ""}` : ""}`}</p></div>
             </div>
             <div className="border-t pt-4">

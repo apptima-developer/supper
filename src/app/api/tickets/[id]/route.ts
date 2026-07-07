@@ -61,7 +61,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!current) throw new Error("Ticket not found");
 
     const raw = await request.json() as Record<string, unknown>;
-    const { logEntry: _logEntry, ticketLogs: _ticketLogs, slaPauses: _slaPauses, ...rawPatch } = raw;
+    const { date: _date, logEntry: _logEntry, ticketLogs: _ticketLogs, slaPauses: _slaPauses, ...rawPatch } = raw;
+    void _date;
     void _logEntry;
     void _ticketLogs;
     void _slaPauses;

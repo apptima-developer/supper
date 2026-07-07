@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { transitionSlaPauses } from "./domain";
-import { ticketSlaState } from "./sla";
+import { ticketResponseSlaState, ticketSlaState } from "./sla";
 import type { Sla, Ticket } from "./types";
 
 const slaRules: Sla[] = [
@@ -36,6 +36,20 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
 }
 
 describe("SLA pauses", () => {
+  it("checks response SLA from create ticket date to start date", () => {
+    const withinTarget = ticketResponseSlaState(ticket({
+      date: "2026-06-01T08:45:00+07:00",
+      startDate: "2026-06-01T09:10:00+07:00",
+    }));
+    expect(withinTarget).toMatchObject({ label: "25m", overdue: false, tone: "emerald" });
+
+    const breached = ticketResponseSlaState(ticket({
+      date: "2026-06-01T08:45:00+07:00",
+      startDate: "2026-06-01T09:16:00+07:00",
+    }));
+    expect(breached).toMatchObject({ label: "31m", overdue: true, tone: "rose" });
+  });
+
   it("opens and closes a waiting pause on status transitions", () => {
     const opened = transitionSlaPauses([], "open", "waiting", "admin", new Date("2026-06-01T10:00:00+07:00"));
     expect(opened).toHaveLength(1);
