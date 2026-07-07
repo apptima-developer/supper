@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Plus, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Input, Select } from "./ui/input";
-import type { Holiday, NamedMaster, Sla, Status } from "@/lib/types";
+import type { Category, Customer, Holiday, NamedMaster, Sla, Status } from "@/lib/types";
 
-type Tab = "sla" | "holidays" | "teams" | "statuses" | "priorities" | "issueTypes" | "contractTypes";
+type Tab = "sla" | "holidays" | "teams" | "statuses" | "priorities" | "issueTypes" | "contractTypes" | "categories";
 type DataMap = {
   sla: Sla[];
   holidays: Holiday[];
@@ -16,6 +16,7 @@ type DataMap = {
   priorities: NamedMaster[];
   issueTypes: NamedMaster[];
   contractTypes: NamedMaster[];
+  categories: Category[];
 };
 
 const labels: Record<Tab, string> = {
@@ -26,16 +27,27 @@ const labels: Record<Tab, string> = {
   priorities: "Priorities",
   issueTypes: "Issue types",
   contractTypes: "Contract types",
+  categories: "Categories",
 };
 
-export function MasterDataManager({ initial }: { initial: DataMap }) {
+export function MasterDataManager({ initial, customers }: { initial: DataMap; customers: Customer[] }) {
   const [tab, setTab] = useState<Tab>("sla");
   const [data, setData] = useState(initial);
   const [busy, setBusy] = useState(false);
   const items = data[tab];
+  const sortedCustomers = useMemo(
+    () => [...customers].sort((a, b) =>
+      a.customerName.localeCompare(b.customerName, undefined, { sensitivity: "base", numeric: true }) ||
+      a.projectCode.localeCompare(b.projectCode, undefined, { sensitivity: "base", numeric: true })),
+    [customers],
+  );
 
   function setItems(value: DataMap[Tab]) {
     setData((current) => ({ ...current, [tab]: value }));
+  }
+
+  function customerLabel(customer: Customer) {
+    return `${customer.customerName} · ${customer.projectCode}`;
   }
 
   function add() {
@@ -44,11 +56,30 @@ export function MasterDataManager({ initial }: { initial: DataMap }) {
     else if (tab === "holidays") setItems([...(items as Holiday[]), { id, date: "", name: "" }]);
     else if (tab === "statuses") setItems([...(items as Status[]), { id, label: "", kanban: "open", color: "slate" }]);
     else if (tab === "teams") setItems([...(items as NamedMaster[]), { id, name: "", lob: "", email: "", phone: "", active: true }]);
+    else if (tab === "categories") {
+      const customer = sortedCustomers[0];
+      setItems([...(items as Category[]), {
+        id,
+        customerKey: customer?.key || "",
+        customerName: customer?.customerName || "",
+        category: "",
+        active: true,
+      }]);
+    }
     else setItems([...(items as NamedMaster[]), { id, name: "", active: true }]);
   }
 
   function patch(id: string, field: string, value: string | number | boolean) {
     setItems(items.map((item) => item.id === id ? { ...item, [field]: value } : item) as DataMap[Tab]);
+  }
+
+  function patchCategoryCustomer(id: string, customerKey: string) {
+    const customer = customers.find((item) => item.key === customerKey);
+    setItems((items as Category[]).map((item) => item.id === id ? {
+      ...item,
+      customerKey,
+      customerName: customer?.customerName || item.customerName,
+    } : item) as DataMap[Tab]);
   }
 
   async function save() {
@@ -147,6 +178,32 @@ export function MasterDataManager({ initial }: { initial: DataMap }) {
                     </Select>
                   </td>
                   <td className="w-32 py-1 pr-2"><Input value={item.color} onChange={(e) => patch(item.id, "color", e.target.value)} /></td>
+                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : tab === "categories" ? (
+          <table className="w-full text-left">
+            <thead className="text-[10px] uppercase text-slate-400">
+              <tr><th className="pb-2">Customer</th><th className="pb-2">Category</th><th className="w-40 pb-2">State</th><th /></tr>
+            </thead>
+            <tbody>
+              {(items as Category[]).map((item) => (
+                <tr key={item.id}>
+                  <td className="min-w-72 py-1 pr-2">
+                    <Select value={item.customerKey} onChange={(e) => patchCategoryCustomer(item.id, e.target.value)}>
+                      <option value="">Select customer</option>
+                      {sortedCustomers.map((customer) => <option key={customer.id} value={customer.key}>{customerLabel(customer)}</option>)}
+                    </Select>
+                  </td>
+                  <td className="min-w-64 py-1 pr-2"><Input value={item.category} onChange={(e) => patch(item.id, "category", e.target.value)} placeholder="Category" /></td>
+                  <td className="py-1 pr-2">
+                    <Select value={item.active ? "active" : "inactive"} onChange={(e) => patch(item.id, "active", e.target.value === "active")}>
+                      <option value="active">Active</option>
+                      <option value="inactive">Inactive</option>
+                    </Select>
+                  </td>
                   <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}

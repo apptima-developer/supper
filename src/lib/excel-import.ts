@@ -322,6 +322,7 @@ function parseTickets(
       customerName: resolved.customer?.customerName || sourceCustomerName,
       issueTitle,
       issueType: canonicalIssueType(text(row[col("issueType", "Issue Type")]), references.issueTypes),
+      category: "",
       severity: canonicalSeverity(text(row[col("severity", "Severity")]), references.priorities),
       owner,
       ownerEfforts: normalizeOwnerEfforts(undefined, owner, hoursFromMd(mdUsed)),
@@ -545,6 +546,7 @@ export async function commitImport(
         ...previous,
         ...incoming,
         id: previous.id,
+        category: previous.category || "",
         slaPauses: previous.slaPauses || [],
         updatedAt: previous.updatedAt,
       };

@@ -80,6 +80,7 @@ export async function POST(request: Request) {
       ...raw,
       ...effort,
       ...dates,
+      category: String(raw.category ?? ""),
       severity,
       remark: String(raw.remark ?? ""),
       ticketLogs: log ? [log] : [],

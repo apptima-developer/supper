@@ -4,6 +4,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   auditListSchema,
   auditSchema,
+  categoryListSchema,
   customerListSchema,
   customerSchema,
   historyListSchema,
@@ -19,7 +20,9 @@ import {
   userListSchema,
   userSchema,
   type Audit,
+  type Category,
   type Customer,
+  type Holiday,
   type ImportBatch,
   type NamedMaster,
   type ReportJob,
@@ -30,7 +33,7 @@ import {
   type User,
 } from "./types";
 
-type MasterKind = "statuses" | "sla" | "holidays" | "teams" | "priorities" | "issueTypes" | "contractTypes";
+type MasterKind = "statuses" | "sla" | "holidays" | "teams" | "priorities" | "issueTypes" | "contractTypes" | "categories";
 type JsonRow = { data: unknown };
 
 const masterSchemas: Record<MasterKind, ZodType> = {
@@ -41,6 +44,7 @@ const masterSchemas: Record<MasterKind, ZodType> = {
   priorities: namedMasterListSchema,
   issueTypes: namedMasterListSchema,
   contractTypes: namedMasterListSchema,
+  categories: categoryListSchema,
 };
 
 const importCoreSnapshotSchema = z.object({
@@ -289,7 +293,7 @@ export async function listMaster<T>(kind: MasterKind, schema: ZodType<T[]>) {
   return data ? schema.parse(data.data) : [];
 }
 
-export async function saveMaster<T extends Sla | Status | NamedMaster | { id: string; date: string; name: string }>(kind: MasterKind, items: T[]) {
+export async function saveMaster<T extends Sla | Status | NamedMaster | Holiday | Category>(kind: MasterKind, items: T[]) {
   const schema = masterSchemas[kind];
   const parsed = schema.parse(items);
   await must(`Failed to save master ${kind}`, supabaseAdmin.from("support_master_data").upsert({
@@ -385,7 +389,7 @@ export async function loadDashboardData() {
 }
 
 export async function loadTicketManagerData() {
-  const [tickets, customers, statuses, sla, holidays, issueTypes, teams] = await Promise.all([
+  const [tickets, customers, statuses, sla, holidays, issueTypes, teams, categories] = await Promise.all([
     listTickets(),
     listCustomers(),
     listMaster("statuses", statusListSchema),
@@ -393,12 +397,14 @@ export async function loadTicketManagerData() {
     listMaster("holidays", z.array(z.object({ id: z.string(), date: z.string(), name: z.string() }))),
     listMaster("issueTypes", namedMasterListSchema),
     listMaster("teams", namedMasterListSchema),
+    listMaster("categories", categoryListSchema),
   ]);
-  return { tickets, customers, statuses, sla, holidays, issueTypes, teams };
+  return { tickets, customers, statuses, sla, holidays, issueTypes, teams, categories };
 }
 
 export async function loadMasterData() {
-  const [sla, holidays, teams, statuses, priorities, issueTypes, contractTypes] = await Promise.all([
+  const [customers, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes, categories] = await Promise.all([
+    listCustomers(),
     listMaster("sla", slaListSchema),
     listMaster("holidays", z.array(z.object({ id: z.string(), date: z.string(), name: z.string() }))),
     listMaster("teams", namedMasterListSchema),
@@ -406,12 +412,13 @@ export async function loadMasterData() {
     listMaster("priorities", namedMasterListSchema),
     listMaster("issueTypes", namedMasterListSchema),
     listMaster("contractTypes", namedMasterListSchema),
+    listMaster("categories", categoryListSchema),
   ]);
-  return { sla, holidays, teams, statuses, priorities, issueTypes, contractTypes };
+  return { customers, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes, categories };
 }
 
 export async function loadExportData() {
-  const [customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes] = await Promise.all([
+  const [customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes, categories] = await Promise.all([
     listCustomers(),
     listTickets(),
     listMaster("sla", slaListSchema),
@@ -421,8 +428,9 @@ export async function loadExportData() {
     listMaster("priorities", namedMasterListSchema),
     listMaster("issueTypes", namedMasterListSchema),
     listMaster("contractTypes", namedMasterListSchema),
+    listMaster("categories", categoryListSchema),
   ]);
-  return { customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes };
+  return { customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes, categories };
 }
 
 export const schemas = {

@@ -16,7 +16,7 @@ import { TicketLogBubbles } from "./ticket-log-bubbles";
 import { activeSlaPause, hoursFromMd, isTicketOwner, mapKanbanStatus, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
 import { ticketSlaState } from "@/lib/sla";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
-import type { Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
+import type { Category, Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
 
 const blank = {
   issueId: "",
@@ -24,6 +24,7 @@ const blank = {
   customerKey: "",
   issueTitle: "",
   issueType: "",
+  category: "",
   severity: "Medium",
   owner: "",
   status: "00 - Open",
@@ -81,6 +82,12 @@ function compareTickets(a: Ticket, b: Ticket) {
 
 function filterKey(value: string) {
   return value.trim().toLowerCase();
+}
+
+function categoryMatchesCustomer(category: Category, customerKey: string, customerName: string) {
+  if (!customerKey) return false;
+  if (category.customerKey) return category.customerKey === customerKey;
+  return filterKey(category.customerName) === filterKey(customerName);
 }
 
 function matchesOwnerFilter(ticket: Ticket, ownerFilter: string) {
@@ -186,6 +193,7 @@ export function TicketManager({
   holidays,
   issueTypes,
   teams,
+  categories,
   role,
   initialFilters = {},
 }: {
@@ -196,6 +204,7 @@ export function TicketManager({
   holidays: Holiday[];
   issueTypes: NamedMaster[];
   teams: NamedMaster[];
+  categories: Category[];
   role: Role;
   userName: string;
   username: string;
@@ -221,6 +230,7 @@ export function TicketManager({
   const [editing, setEditing] = useState<Ticket | null>(initialEditTicket);
   const [formCustomerKey, setFormCustomerKey] = useState(initialEditTicket?.customerKey || "");
   const [formSeverity, setFormSeverity] = useState(ticketSeverityLabel(initialEditTicket?.severity || blank.severity));
+  const [formCategory, setFormCategory] = useState(initialEditTicket?.category || "");
   const [formStatus, setFormStatus] = useState(initialEditTicket?.status || blank.status);
   const [formStartDate, setFormStartDate] = useState(dateTimeInputValue(initialEditTicket?.startDate || ""));
   const [formCloseDate, setFormCloseDate] = useState(dateTimeInputValue(initialEditTicket?.closeDate || "", 17));
@@ -300,6 +310,14 @@ export function TicketManager({
   const activePage = Math.min(currentPage, totalPages);
   const pageTickets = useMemo(() => filtered.slice((activePage - 1) * pageSize, activePage * pageSize), [activePage, filtered]);
   const formCustomer = useMemo(() => customers.find((customer) => customer.key === formCustomerKey), [customers, formCustomerKey]);
+  const categoryOptions = useMemo(() => {
+    const customerName = formCustomer?.customerName || "";
+    return categories
+      .filter((category) => category.category)
+      .filter((category) => category.active || category.category === formCategory)
+      .filter((category) => categoryMatchesCustomer(category, formCustomerKey, customerName))
+      .sort((a, b) => a.category.localeCompare(b.category, undefined, { sensitivity: "base", numeric: true }));
+  }, [categories, formCategory, formCustomer?.customerName, formCustomerKey]);
   const formKanbanStatus = useMemo(() => mapKanbanStatus(formStatus), [formStatus]);
   const formTicketForSla = useMemo(() => {
     if (!formCustomer || !formStartDate) return null;
@@ -310,6 +328,7 @@ export function TicketManager({
       updatedAt: editing?.updatedAt || "",
       customerKey: formCustomer.key,
       customerName: formCustomer.customerName,
+      category: formCategory,
       severity: formSeverity,
       startDate: normalizeDateTime(formStartDate),
       dueDate: editing?.dueDate || "",
@@ -319,7 +338,7 @@ export function TicketManager({
       kanbanStatus: formKanbanStatus,
       slaPauses: editing?.slaPauses || [],
     } as Ticket;
-  }, [editing, formCloseDate, formCustomer, formKanbanStatus, formSeverity, formStartDate, formStatus]);
+  }, [editing, formCategory, formCloseDate, formCustomer, formKanbanStatus, formSeverity, formStartDate, formStatus]);
   const formDueDate = useMemo(() => {
     if (!formTicketForSla) return editing?.dueDate || "";
     return ticketSlaState(formTicketForSla, slaRules, holidays).dueDate?.toISOString() || "";
@@ -348,6 +367,7 @@ export function TicketManager({
     setEditing(ticket);
     setFormCustomerKey(ticket?.customerKey || "");
     setFormSeverity(ticketSeverityLabel(ticket?.severity || blank.severity));
+    setFormCategory(ticket?.category || "");
     setFormStatus(ticket?.status || blank.status);
     setFormStartDate(dateTimeInputValue(ticket?.startDate || ""));
     setFormCloseDate(dateTimeInputValue(ticket?.closeDate || "", 17));
@@ -355,6 +375,16 @@ export function TicketManager({
     setLogAttachments([]);
     setLogDropActive(false);
     setOpen(true);
+  }
+
+  function changeFormCustomer(customerKey: string) {
+    const customer = customers.find((item) => item.key === customerKey);
+    setFormCustomerKey(customerKey);
+    if (formCategory && !categories.some((category) =>
+      category.category === formCategory && categoryMatchesCustomer(category, customerKey, customer?.customerName || "")
+    )) {
+      setFormCategory("");
+    }
   }
 
   async function addLogFiles(fileList: FileList | File[]) {
@@ -395,6 +425,7 @@ export function TicketManager({
       customerKey: String(formData.get("customerKey")),
       issueTitle: String(formData.get("issueTitle")),
       issueType: String(formData.get("issueType")),
+      category: formCategory,
       severity: ticketSeverityLabel(String(formData.get("severity") || "")),
       ...effortPayload(effortRows),
       status: formStatus,
@@ -604,12 +635,20 @@ export function TicketManager({
                 </div>
                 <div>
                   <Label required>Customer</Label>
-                  <Select name="customerKey" required value={formCustomerKey} onChange={(event) => setFormCustomerKey(event.target.value)}>
+                  <Select name="customerKey" required value={formCustomerKey} onChange={(event) => changeFormCustomer(event.target.value)}>
                     <option value="">Select customer</option>
                     {sortedCustomers.map((c) => <option key={c.id} value={c.key}>{c.customerName} · {c.projectCode}</option>)}
                   </Select>
                 </div>
                 <div><Label required>Issue title</Label><Input name="issueTitle" required defaultValue={editing?.issueTitle} /></div>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div>
+                    <Label>Severity</Label>
+                    <Select name="severity" value={formSeverity} onChange={(event) => setFormSeverity(event.target.value)}>
+                      {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </Select>
+                  </div>
+                </div>
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div>
                     <Label>Issue type</Label>
@@ -619,9 +658,11 @@ export function TicketManager({
                     </Select>
                   </div>
                   <div>
-                    <Label>Severity</Label>
-                    <Select name="severity" value={formSeverity} onChange={(event) => setFormSeverity(event.target.value)}>
-                      {severityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    <Label>Category</Label>
+                    <Select name="category" value={formCategory} onChange={(event) => setFormCategory(event.target.value)}>
+                      <option value="">No category</option>
+                      {categoryOptions.map((category) => <option key={category.id} value={category.category}>{category.category}</option>)}
+                      {formCategory && !categoryOptions.some((category) => category.category === formCategory) && <option value={formCategory}>{formCategory}</option>}
                     </Select>
                   </div>
                   <div>

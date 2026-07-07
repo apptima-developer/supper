@@ -1,5 +1,5 @@
 import { cache } from "react";
-import { customerListSchema, ticketListSchema, historyListSchema, auditListSchema, statusListSchema, slaListSchema, namedMasterListSchema, holidayListSchema, importBatchListSchema, reportJobListSchema, userListSchema, type Customer, type Ticket, type TicketHistory, type Audit, type Status, type Sla, type NamedMaster, type Holiday, type ImportBatch, type ReportJob, type User } from "./types";
+import { customerListSchema, ticketListSchema, historyListSchema, auditListSchema, statusListSchema, slaListSchema, namedMasterListSchema, categoryListSchema, holidayListSchema, importBatchListSchema, reportJobListSchema, userListSchema, type Customer, type Ticket, type TicketHistory, type Audit, type Status, type Sla, type NamedMaster, type Category, type Holiday, type ImportBatch, type ReportJob, type User } from "./types";
 import { readJson, readJsonBatch, restoreBackupSet, updateJson } from "./json-store";
 import { recalculateCustomer, ticketDiff } from "./domain";
 
@@ -12,6 +12,7 @@ const paths = {
   sla: "master/sla.json",
   holidays: "master/holidays.json",
   teams: "master/teams.json",
+  categories: "master/categories.json",
   issueTypes: "master/issue-types.json",
   contractTypes: "master/contract-types.json",
   priorities: "master/priorities.json",
@@ -28,6 +29,7 @@ const specs = {
   sla: { path: paths.sla, schema: slaListSchema },
   holidays: { path: paths.holidays, schema: holidayListSchema },
   teams: { path: paths.teams, schema: namedMasterListSchema },
+  categories: { path: paths.categories, schema: categoryListSchema },
   priorities: { path: paths.priorities, schema: namedMasterListSchema },
   issueTypes: { path: paths.issueTypes, schema: namedMasterListSchema },
   contractTypes: { path: paths.contractTypes, schema: namedMasterListSchema },
@@ -95,6 +97,7 @@ export const loadTicketManagerData = cache(async () => relationalEnabled()
       holidays: specs.holidays,
       issueTypes: specs.issueTypes,
       teams: specs.teams,
+      categories: specs.categories,
     }));
 
 export const loadTicketDetailData = cache(async (id: string) => {
@@ -121,8 +124,10 @@ export const loadMasterData = cache(async () => relationalEnabled()
   ? (await relational()).loadMasterData()
   : readJsonBatch({
       sla: specs.sla,
+      customers: specs.customers,
       holidays: specs.holidays,
       teams: specs.teams,
+      categories: specs.categories,
       statuses: specs.statuses,
       priorities: specs.priorities,
       issueTypes: specs.issueTypes,
@@ -171,6 +176,7 @@ export const loadExportData = cache(async () => relationalEnabled()
       sla: specs.sla,
       holidays: specs.holidays,
       teams: specs.teams,
+      categories: specs.categories,
       statuses: specs.statuses,
       priorities: specs.priorities,
       issueTypes: specs.issueTypes,
@@ -382,6 +388,14 @@ export const masterRepositories = {
   priorities: namedRepository("priorities"),
   issueTypes: namedRepository("issueTypes"),
   contractTypes: namedRepository("contractTypes"),
+  categories: {
+    list: async () => relationalEnabled() ? (await relational()).listMaster("categories", categoryListSchema) : readJson(paths.categories, categoryListSchema),
+    save: async (items: Category[], actor: string) => {
+      if (relationalEnabled()) await (await relational()).saveMaster("categories", items);
+      else await updateJson(paths.categories, categoryListSchema, () => items);
+      await writeAudit({ action: "update", entity: "categories", entityId: "all", actor, details: { count: items.length } });
+    },
+  },
 };
 
 export const importRepository = {

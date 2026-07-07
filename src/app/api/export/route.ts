@@ -8,12 +8,12 @@ export const runtime = "nodejs";
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes } = await loadExportData();
+  const { customers, tickets, sla, holidays, teams, statuses, priorities, issueTypes, contractTypes, categories } = await loadExportData();
   const workbook = new ExcelJS.Workbook();
   for (const [name, rows] of [
     ["Customer_MD_Control", customers], ["Issues_Log", tickets], ["SLA", sla],
     ["Holidays", holidays], ["Teams", teams], ["Statuses", statuses],
-    ["Priorities", priorities], ["Issue_Types", issueTypes], ["Contract_Types", contractTypes],
+    ["Priorities", priorities], ["Issue_Types", issueTypes], ["Contract_Types", contractTypes], ["Categories", categories],
   ] as const) {
     const sheet = workbook.addWorksheet(name);
     const keys = rows.length ? Object.keys(rows[0]) : ["No data"];

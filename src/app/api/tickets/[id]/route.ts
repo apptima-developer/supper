@@ -68,6 +68,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     let patch = rawPatch as Partial<Ticket>;
     const log = makeTicketLog(raw.logEntry, session.username);
     if (log) patch.ticketLogs = [...(current.ticketLogs || []), log];
+    if ("category" in patch) patch.category = String(patch.category || "");
     if ("severity" in patch) patch.severity = ticketSeverityLabel(String(patch.severity || ""));
     if ("ownerEfforts" in patch || "mdUsed" in patch || "owner" in patch) Object.assign(patch, ticketEffortFields(patch, current));
     if (patch.status) patch.kanbanStatus = mapKanbanStatus(patch.status);

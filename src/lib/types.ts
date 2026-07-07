@@ -80,6 +80,7 @@ export const ticketSchema = z.object({
   customerName: z.string(),
   issueTitle: z.string(),
   issueType: z.string(),
+  category: z.string().default(""),
   severity: z.string(),
   owner: z.string(),
   ownerEfforts: z.array(ownerEffortSchema).default([]),
@@ -150,6 +151,15 @@ export const namedMasterSchema = z.object({
 });
 export type NamedMaster = z.infer<typeof namedMasterSchema>;
 
+export const categorySchema = z.object({
+  id: z.string(),
+  customerKey: z.string().default(""),
+  customerName: z.string().default(""),
+  category: z.string(),
+  active: z.boolean().default(true),
+});
+export type Category = z.infer<typeof categorySchema>;
+
 export const holidaySchema = z.object({ id: z.string(), date: z.string(), name: z.string() });
 export type Holiday = z.infer<typeof holidaySchema>;
 
@@ -184,6 +194,7 @@ export const auditListSchema = z.array(auditSchema);
 export const statusListSchema = z.array(statusSchema);
 export const slaListSchema = z.array(slaSchema);
 export const namedMasterListSchema = z.array(namedMasterSchema);
+export const categoryListSchema = z.array(categorySchema);
 export const holidayListSchema = z.array(holidaySchema);
 export const importBatchListSchema = z.array(importBatchSchema);
 export const reportJobListSchema = z.array(reportJobSchema);

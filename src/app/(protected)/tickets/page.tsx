@@ -46,6 +46,7 @@ export default async function TicketsPage({ searchParams }: { searchParams: Prom
         holidays={data.holidays}
         issueTypes={data.issueTypes}
         teams={data.teams}
+        categories={data.categories}
         role={session.role}
         userName={session.name}
         username={session.username}
