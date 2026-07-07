@@ -40,6 +40,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     linear-gradient(180deg, #fbfdff 0%, #eef8ff 52%, #f8fbff 100%);
 }
 
+.brand-logo-card {
+  background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(239,248,255,.90));
+  border-color: rgba(188, 216, 239, .72);
+}
+
 .lux-surface,
 main .rounded-lg.border.bg-white,
 main .rounded-xl.border.bg-white,
@@ -105,6 +110,11 @@ html.theme-dark .app-shell {
     radial-gradient(circle at 18% -10%, rgba(56, 189, 248, .14), transparent 34%),
     radial-gradient(circle at 92% 2%, rgba(167, 139, 250, .16), transparent 30%),
     linear-gradient(180deg, #07111f 0%, #0b1727 52%, #07111f 100%);
+}
+
+html.theme-dark .brand-logo-card {
+  background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(235,247,255,.94));
+  border-color: rgba(125, 211, 252, .30);
 }
 
 html.theme-dark aside,

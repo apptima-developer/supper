@@ -1,7 +1,8 @@
 "use client";
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Bell, Headphones, LogOut, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun } from "lucide-react";
+import { Bell, LogOut, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun } from "lucide-react";
 import { AppNav } from "./app-nav";
 import type { Session } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -97,13 +98,27 @@ export function AppShell({ session, children }: { session: Session; children: Re
         collapsed ? "w-[76px]" : "w-[228px]",
       )}>
         <div className={cn("relative flex h-16 items-center border-b border-sky-100/80", collapsed ? "justify-center px-2" : "gap-3 px-5")}>
-          <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-[#0a84ff] to-[#20c9b7] text-white shadow-lg shadow-sky-500/20">
-            <Headphones size={18} />
-          </div>
-          {!collapsed && <div>
-            <p className="text-[13px] font-semibold text-[#173b57]">SupportDesk</p>
-            <p className="text-[10px] uppercase tracking-[.16em] text-sky-600/70">MD Control</p>
-          </div>}
+          {collapsed ? (
+            <Image
+              src="/brand/supper-icon-transparent-1024.png"
+              alt="SUPPER"
+              width={44}
+              height={44}
+              priority
+              className="h-11 w-11 rounded-2xl object-contain drop-shadow-sm"
+            />
+          ) : (
+            <div className="brand-logo-card flex h-11 w-[154px] items-center rounded-2xl px-2.5 shadow-sm ring-1 ring-sky-100/80">
+              <Image
+                src="/brand/supper-logo-wordmark-transparent.png"
+                alt="SUPPER Support Control System"
+                width={175}
+                height={50}
+                priority
+                className="h-9 w-auto object-contain"
+              />
+            </div>
+          )}
           <button
             type="button"
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
