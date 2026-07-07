@@ -84,10 +84,13 @@ function filterKey(value: string) {
   return value.trim().toLowerCase();
 }
 
-function categoryMatchesCustomer(category: Category, customerKey: string, customerName: string) {
-  if (!customerKey) return false;
-  if (category.customerKey) return category.customerKey === customerKey;
-  return filterKey(category.customerName) === filterKey(customerName);
+function categoryCustomerName(category: Category, customerNameByKey: Map<string, string>) {
+  return category.customerName || customerNameByKey.get(category.customerKey) || "";
+}
+
+function categoryMatchesCustomer(category: Category, customerName: string, customerNameByKey: Map<string, string>) {
+  if (!customerName) return false;
+  return filterKey(categoryCustomerName(category, customerNameByKey)) === filterKey(customerName);
 }
 
 function matchesOwnerFilter(ticket: Ticket, ownerFilter: string) {
@@ -292,6 +295,7 @@ export function TicketManager({
       a.projectCode.localeCompare(b.projectCode, undefined, { sensitivity: "base", numeric: true })),
     [customers],
   );
+  const customerNameByKey = useMemo(() => new Map(customers.map((customer) => [customer.key, customer.customerName])), [customers]);
   const filtered = useMemo(
     () => tickets
       .filter((t) =>
@@ -312,12 +316,24 @@ export function TicketManager({
   const formCustomer = useMemo(() => customers.find((customer) => customer.key === formCustomerKey), [customers, formCustomerKey]);
   const categoryOptions = useMemo(() => {
     const customerName = formCustomer?.customerName || "";
-    return categories
-      .filter((category) => category.category)
-      .filter((category) => category.active || category.category === formCategory)
-      .filter((category) => categoryMatchesCustomer(category, formCustomerKey, customerName))
-      .sort((a, b) => a.category.localeCompare(b.category, undefined, { sensitivity: "base", numeric: true }));
-  }, [categories, formCategory, formCustomer?.customerName, formCustomerKey]);
+    const options = new Map<string, Category>();
+    for (const category of categories) {
+      if (!category.category) continue;
+      if (!category.active && category.category !== formCategory) continue;
+      if (!categoryMatchesCustomer(category, customerName, customerNameByKey)) continue;
+      const key = filterKey(category.category);
+      const current = options.get(key);
+      if (!current || category.active) {
+        options.set(key, {
+          ...category,
+          customerKey: "",
+          customerName: categoryCustomerName(category, customerNameByKey),
+        });
+      }
+    }
+    return [...options.values()].sort((a, b) =>
+      a.category.localeCompare(b.category, undefined, { sensitivity: "base", numeric: true }));
+  }, [categories, customerNameByKey, formCategory, formCustomer?.customerName]);
   const formKanbanStatus = useMemo(() => mapKanbanStatus(formStatus), [formStatus]);
   const formTicketForSla = useMemo(() => {
     if (!formCustomer || !formStartDate) return null;
@@ -381,7 +397,7 @@ export function TicketManager({
     const customer = customers.find((item) => item.key === customerKey);
     setFormCustomerKey(customerKey);
     if (formCategory && !categories.some((category) =>
-      category.category === formCategory && categoryMatchesCustomer(category, customerKey, customer?.customerName || "")
+      category.category === formCategory && categoryMatchesCustomer(category, customer?.customerName || "", customerNameByKey)
     )) {
       setFormCategory("");
     }

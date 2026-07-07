@@ -1,1 +1,51 @@
-[]
+[
+  {
+    "id": "6857a52e-6456-4654-a200-14b5ebb1c475",
+    "customerKey": "",
+    "customerName": "TUG",
+    "category": "Artwork",
+    "active": true
+  },
+  {
+    "id": "9dede8ce-e43d-4151-a3ff-afa47ca3a11d",
+    "customerKey": "",
+    "customerName": "TUG",
+    "category": "iGrid",
+    "active": true
+  },
+  {
+    "id": "2ed6092d-6396-4a58-8eab-dcc068b6d0b3",
+    "customerKey": "",
+    "customerName": "TUG",
+    "category": "WISEUp",
+    "active": true
+  },
+  {
+    "id": "2a372bbd-9893-4764-945f-b03f1f1df504",
+    "customerKey": "",
+    "customerName": "TUG",
+    "category": "OpenText",
+    "active": true
+  },
+  {
+    "id": "89789410-102c-4b09-96e7-84f71d4aaacc",
+    "customerKey": "",
+    "customerName": "PTTOR",
+    "category": "OpenText",
+    "active": true
+  },
+  {
+    "id": "ba09e1be-8db5-4ef5-b8a6-eacdbcac445e",
+    "customerKey": "",
+    "customerName": "PTTOR",
+    "category": "SAP FI",
+    "active": true
+  },
+  {
+    "id": "4da511e7-03ce-4257-90d5-7b11485e3fa2",
+    "customerKey": "",
+    "customerName": "PTTOR",
+    "category": "Infra",
+    "active": true
+  }
+]

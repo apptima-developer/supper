@@ -30,24 +30,47 @@ const labels: Record<Tab, string> = {
   categories: "Categories",
 };
 
+function customerNameKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function resolvedCategoryCustomerName(item: Category, customerNameByKey: Map<string, string>) {
+  return item.customerName || customerNameByKey.get(item.customerKey) || "";
+}
+
+function normalizeCategoryItems(items: Category[], customerNameByKey: Map<string, string>) {
+  return items.map((item) => ({
+    ...item,
+    customerKey: "",
+    customerName: resolvedCategoryCustomerName(item, customerNameByKey),
+  }));
+}
+
 export function MasterDataManager({ initial, customers }: { initial: DataMap; customers: Customer[] }) {
-  const [tab, setTab] = useState<Tab>("sla");
-  const [data, setData] = useState(initial);
-  const [busy, setBusy] = useState(false);
-  const items = data[tab];
-  const sortedCustomers = useMemo(
-    () => [...customers].sort((a, b) =>
-      a.customerName.localeCompare(b.customerName, undefined, { sensitivity: "base", numeric: true }) ||
-      a.projectCode.localeCompare(b.projectCode, undefined, { sensitivity: "base", numeric: true })),
+  const customerNameByKey = useMemo(() => new Map(customers.map((customer) => [customer.key, customer.customerName])), [customers]);
+  const customerOptions = useMemo(
+    () => {
+      const options = new Map<string, { name: string; projects: number }>();
+      for (const customer of customers) {
+        const key = customerNameKey(customer.customerName);
+        const current = options.get(key);
+        options.set(key, { name: current?.name || customer.customerName, projects: (current?.projects || 0) + 1 });
+      }
+      return [...options.values()].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+    },
     [customers],
   );
+  const [tab, setTab] = useState<Tab>("sla");
+  const [data, setData] = useState<DataMap>(() => ({
+    ...initial,
+    categories: normalizeCategoryItems(initial.categories, customerNameByKey),
+  }));
+  const [busy, setBusy] = useState(false);
+  const items = data[tab];
 
   function setItems(value: DataMap[Tab]) {
     setData((current) => ({ ...current, [tab]: value }));
-  }
-
-  function customerLabel(customer: Customer) {
-    return `${customer.customerName} · ${customer.projectCode}`;
   }
 
   function add() {
@@ -57,11 +80,11 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
     else if (tab === "statuses") setItems([...(items as Status[]), { id, label: "", kanban: "open", color: "slate" }]);
     else if (tab === "teams") setItems([...(items as NamedMaster[]), { id, name: "", lob: "", email: "", phone: "", active: true }]);
     else if (tab === "categories") {
-      const customer = sortedCustomers[0];
+      const customer = customerOptions[0];
       setItems([...(items as Category[]), {
         id,
-        customerKey: customer?.key || "",
-        customerName: customer?.customerName || "",
+        customerKey: "",
+        customerName: customer?.name || "",
         category: "",
         active: true,
       }]);
@@ -73,25 +96,28 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
     setItems(items.map((item) => item.id === id ? { ...item, [field]: value } : item) as DataMap[Tab]);
   }
 
-  function patchCategoryCustomer(id: string, customerKey: string) {
-    const customer = customers.find((item) => item.key === customerKey);
+  function patchCategoryCustomer(id: string, customerName: string) {
     setItems((items as Category[]).map((item) => item.id === id ? {
       ...item,
-      customerKey,
-      customerName: customer?.customerName || item.customerName,
+      customerKey: "",
+      customerName,
     } : item) as DataMap[Tab]);
   }
 
   async function save() {
     setBusy(true);
+    const payload = tab === "categories"
+      ? normalizeCategoryItems(items as Category[], customerNameByKey).map((item) => ({ ...item, category: item.category.trim(), customerName: item.customerName.trim() }))
+      : items;
     try {
       const response = await fetch(`/api/master/${tab}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(items),
+        body: JSON.stringify(payload),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
+      if (tab === "categories") setItems(payload as DataMap[Tab]);
       toast.success(`${labels[tab]} saved`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save master data");
@@ -192,9 +218,12 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
               {(items as Category[]).map((item) => (
                 <tr key={item.id}>
                   <td className="min-w-72 py-1 pr-2">
-                    <Select value={item.customerKey} onChange={(e) => patchCategoryCustomer(item.id, e.target.value)}>
+                    <Select value={resolvedCategoryCustomerName(item, customerNameByKey)} onChange={(e) => patchCategoryCustomer(item.id, e.target.value)}>
                       <option value="">Select customer</option>
-                      {sortedCustomers.map((customer) => <option key={customer.id} value={customer.key}>{customerLabel(customer)}</option>)}
+                      {customerOptions.map((customer) => <option key={customer.name} value={customer.name}>{customer.name}{customer.projects > 1 ? ` (${customer.projects} projects)` : ""}</option>)}
+                      {resolvedCategoryCustomerName(item, customerNameByKey) && !customerOptions.some((customer) => customer.name === resolvedCategoryCustomerName(item, customerNameByKey)) && (
+                        <option value={resolvedCategoryCustomerName(item, customerNameByKey)}>{resolvedCategoryCustomerName(item, customerNameByKey)}</option>
+                      )}
                     </Select>
                   </td>
                   <td className="min-w-64 py-1 pr-2"><Input value={item.category} onChange={(e) => patch(item.id, "category", e.target.value)} placeholder="Category" /></td>
