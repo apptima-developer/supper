@@ -98,27 +98,18 @@ export function AppShell({ session, children }: { session: Session; children: Re
         collapsed ? "w-[76px]" : "w-[228px]",
       )}>
         <div className={cn("relative flex h-16 items-center border-b border-sky-100/80", collapsed ? "justify-center px-2" : "gap-3 px-5")}>
-          {collapsed ? (
-            <Image
-              src="/brand/supper-icon-transparent-1024.png"
-              alt="SUPPER"
-              width={44}
-              height={44}
-              priority
-              className="h-11 w-11 rounded-2xl object-contain drop-shadow-sm"
-            />
-          ) : (
-            <div className="brand-logo-card flex h-11 w-[154px] items-center rounded-2xl px-2.5 shadow-sm ring-1 ring-sky-100/80">
-              <Image
-                src="/brand/supper-logo-wordmark-transparent.png"
-                alt="SUPPER Support Control System"
-                width={175}
-                height={50}
-                priority
-                className="h-9 w-auto object-contain"
-              />
-            </div>
-          )}
+          <Image
+            src="/brand/supper-icon-transparent-1024.png"
+            alt="SUPPER"
+            width={40}
+            height={40}
+            priority
+            className={cn("rounded-2xl object-contain drop-shadow-sm", collapsed ? "h-10 w-10" : "h-9 w-9")}
+          />
+          {!collapsed && <div>
+            <p className="text-[13px] font-semibold text-[#173b57]">SUPPER</p>
+            <p className="text-[10px] uppercase tracking-[.16em] text-sky-600/70">Support Control</p>
+          </div>}
           <button
             type="button"
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
