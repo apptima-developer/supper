@@ -38,12 +38,24 @@ function resolvedCategoryCustomerName(item: Category, customerNameByKey: Map<str
   return item.customerName || customerNameByKey.get(item.customerKey) || "";
 }
 
+function compareCategoryItems(a: Category, b: Category, customerNameByKey: Map<string, string>) {
+  return resolvedCategoryCustomerName(a, customerNameByKey).localeCompare(resolvedCategoryCustomerName(b, customerNameByKey), undefined, { sensitivity: "base", numeric: true }) ||
+    a.category.localeCompare(b.category, undefined, { sensitivity: "base", numeric: true });
+}
+
+function sortCategoryItems(items: Category[], customerNameByKey: Map<string, string>) {
+  return [...items].sort((a, b) => compareCategoryItems(a, b, customerNameByKey));
+}
+
 function normalizeCategoryItems(items: Category[], customerNameByKey: Map<string, string>) {
-  return items.map((item) => ({
-    ...item,
-    customerKey: "",
-    customerName: resolvedCategoryCustomerName(item, customerNameByKey),
-  }));
+  return sortCategoryItems(
+    items.map((item) => ({
+      ...item,
+      customerKey: "",
+      customerName: resolvedCategoryCustomerName(item, customerNameByKey),
+    })),
+    customerNameByKey,
+  );
 }
 
 export function MasterDataManager({ initial, customers }: { initial: DataMap; customers: Customer[] }) {
@@ -215,7 +227,7 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
               <tr><th className="pb-2">Customer</th><th className="pb-2">Category</th><th className="w-40 pb-2">State</th><th /></tr>
             </thead>
             <tbody>
-              {(items as Category[]).map((item) => (
+              {sortCategoryItems(items as Category[], customerNameByKey).map((item) => (
                 <tr key={item.id}>
                   <td className="min-w-72 py-1 pr-2">
                     <Select value={resolvedCategoryCustomerName(item, customerNameByKey)} onChange={(e) => patchCategoryCustomer(item.id, e.target.value)}>
