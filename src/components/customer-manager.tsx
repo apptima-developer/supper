@@ -63,13 +63,13 @@ function rowClass(customer: Customer) {
   if (state === "expired") return "border-l-4 border-l-slate-400 border-t bg-slate-200/60 transition-colors hover:bg-slate-200/80";
   if (state === "suspended") return "border-l-4 border-l-rose-400 border-t bg-rose-100/70 transition-colors hover:bg-rose-100/90";
   if (state === "done") return "border-l-4 border-l-slate-500 border-t bg-slate-200/70 transition-colors hover:bg-slate-200/90";
-  if (state === "pre-sales") return "border-l-4 border-l-violet-400 border-t bg-violet-100/70 transition-colors hover:bg-violet-100/90";
+  if (state === "pre-sales") return "border-l-4 border-l-sky-400 border-t bg-sky-50/80 transition-colors hover:bg-sky-100/80";
   return "border-l-4 border-l-transparent border-t transition-colors hover:bg-sky-50/70";
 }
 
 function contractStatusBadgeClass(status: string) {
   if (status === "Suspended") return "bg-rose-100 text-rose-800 ring-rose-200";
-  if (status === "Pre-sales") return "bg-violet-100 text-violet-800 ring-violet-200";
+  if (status === "Pre-sales") return "bg-sky-100 text-sky-700 ring-sky-200";
   if (status === "Done") return "bg-slate-200 text-slate-700 ring-slate-300";
   return "bg-emerald-100 text-emerald-800 ring-emerald-200";
 }
@@ -77,6 +77,10 @@ function contractStatusBadgeClass(status: string) {
 function lifecycleBadgeClass(lifecycle: string) {
   if (lifecycle === "Expiring") return "bg-amber-100 text-amber-800 ring-amber-200";
   return "bg-slate-200 text-slate-700 ring-slate-300";
+}
+
+function showLifecycleBadge(manualStatus: string, lifecycle: string | null): lifecycle is string {
+  return manualStatus !== "Done" && (lifecycle === "Expiring" || lifecycle === "Expired");
 }
 
 function compareCustomers(a: Customer, b: Customer) {
@@ -260,8 +264,7 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                           <div className="flex items-center gap-1.5 whitespace-nowrap">
                             <span className="font-medium text-slate-800">{c.contractType || "-"}</span>
                             <Badge className={contractStatusBadgeClass(manualStatus)}>{manualStatus}</Badge>
-                            {lifecycle === "Expiring" && <Badge className={lifecycleBadgeClass(lifecycle)}>Expiring</Badge>}
-                            {lifecycle === "Expired" && <Badge className={lifecycleBadgeClass(lifecycle)}>Expired</Badge>}
+                            {showLifecycleBadge(manualStatus, lifecycle) && <Badge className={lifecycleBadgeClass(lifecycle)}>{lifecycle}</Badge>}
                           </div>
                         </td>
                         <td className="whitespace-nowrap px-4 py-2 text-[11px]">
@@ -325,8 +328,7 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                         <div className="flex items-center gap-1.5 whitespace-nowrap">
                           <span className="font-medium text-slate-800">{c.contractType || "-"}</span>
                           <Badge className={contractStatusBadgeClass(manualStatus)}>{manualStatus}</Badge>
-                          {lifecycle === "Expiring" && <Badge className={lifecycleBadgeClass(lifecycle)}>Expiring</Badge>}
-                          {lifecycle === "Expired" && <Badge className={lifecycleBadgeClass(lifecycle)}>Expired</Badge>}
+                          {showLifecycleBadge(manualStatus, lifecycle) && <Badge className={lifecycleBadgeClass(lifecycle)}>{lifecycle}</Badge>}
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2 text-[11px]">
