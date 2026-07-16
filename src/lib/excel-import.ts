@@ -1,6 +1,5 @@
 import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
-import { z } from "zod";
 import {
   customerKey,
   hoursFromMd,
@@ -9,7 +8,8 @@ import {
   normalizeOwnerEfforts,
   ticketDiff,
 } from "./domain";
-import { listBackups, readJson } from "./json-store";
+import { listBackups } from "./json-store";
+import { loadImportMappings, type ImportMappings } from "./import-mappings";
 import {
   auditRepository,
   customerRepository,
@@ -45,13 +45,6 @@ type ImportReferenceData = {
   priorities: NamedMaster[];
   issueTypes: NamedMaster[];
 };
-
-const mappingsSchema = z.object({
-  snow: z.record(z.string(), z.string()),
-  supportdesk: z.object({
-    customerAliases: z.record(z.string(), z.string()).default({}),
-  }).default({ customerAliases: {} }),
-});
 
 const text = (value: unknown) => value == null ? "" : String(value).trim();
 const cleanHeader = (value: unknown) => text(value).replace(/\s+/g, " ");
@@ -422,11 +415,12 @@ export async function parseWorkbook(
   buffer: Buffer,
   kind: "supportdesk" | "snow",
   references?: Partial<ImportReferenceData>,
+  mappingOverrides?: Partial<ImportMappings>,
 ): Promise<ParsedImport> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);
   const sheetNames = workbook.worksheets.map((sheet) => sheet.name);
-  const mappings = await readJson("imports/mappings.json", mappingsSchema);
+  const mappings = await loadImportMappings(mappingOverrides);
   const referenceData = await loadImportReferenceData(references);
   const warnings: string[] = [];
   if (kind === "supportdesk") {

@@ -1,6 +1,7 @@
 import "server-only";
 import { z, type ZodType } from "zod";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { getDataBackend } from "./env";
 import {
   auditListSchema,
   auditSchema,
@@ -62,7 +63,7 @@ const reportAssetSchema = z.object({
 });
 
 export function relationalStoreEnabled() {
-  return process.env.DATA_BACKEND === "supabase-relational" || process.env.SUPABASE_DATA_MODEL === "relational";
+  return getDataBackend() === "supabase-relational";
 }
 
 function parseDate(value?: string | null) {

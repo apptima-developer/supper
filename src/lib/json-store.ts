@@ -1,11 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ZodType } from "zod";
+import { getDataBackend } from "./env";
 
 const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
-const supabaseEnabled = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
-const strictSupabase = process.env.DATA_BACKEND === "supabase" || process.env.NODE_ENV === "production";
+const dataBackend = getDataBackend();
+const supabaseEnabled = dataBackend === "supabase";
+const strictSupabase = supabaseEnabled;
 
 type StoreModule = typeof import("./store");
 type JsonBatchSpec = Record<string, { path: string; schema: ZodType }>;

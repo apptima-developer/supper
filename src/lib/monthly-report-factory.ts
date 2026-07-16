@@ -21,6 +21,8 @@ const execFileAsync = promisify(execFile);
 const dataRoot = path.join(process.cwd(), "data");
 const monthlyRoot = path.join(dataRoot, "reports", "monthly");
 const templateRoot = path.join(process.cwd(), "templates", "reports");
+const mandayTemplatePath = path.join(templateRoot, "manday-summary-template.xlsx");
+const supportReportTemplatePath = path.join(templateRoot, "support-service-monthly-report-template.xlsx");
 const sourceNames: Record<MonthlySourceFileType, string> = {
   monthly_review: "monthly-review.xlsx",
   cr: "cr.xlsx",
@@ -59,6 +61,14 @@ const requiredHeaders: Record<MonthlySourceFileType, string[]> = {
     "Satisfaction Level", "Satisfaction Comment", "First Response Time", "SLA Overdue",
   ],
 };
+
+async function assertRuntimeAsset(filePath: string, label: string) {
+  try {
+    await fs.access(filePath);
+  } catch {
+    throw new Error(`Missing runtime report template: ${label} (${path.relative(process.cwd(), filePath)}). Restore templates/reports before exporting monthly reports.`);
+  }
+}
 const previewLimit = 150;
 
 type UploadedMonthlyFile = {
@@ -731,15 +741,20 @@ export async function generateMonthlyReportOutputs({
     status: "generated",
   };
   try {
+    await Promise.all([
+      assertRuntimeAsset(mandayTemplatePath, "manday summary Excel template"),
+      assertRuntimeAsset(supportReportTemplatePath, "support service monthly report Excel template"),
+    ]);
+
     const mandayWorkbook = new ExcelJS.Workbook();
-    await mandayWorkbook.xlsx.readFile(path.join(templateRoot, "manday-summary-template.xlsx"));
+    await mandayWorkbook.xlsx.readFile(mandayTemplatePath);
     const mandayData = mandayWorkbook.getWorksheet("data");
     if (!mandayData) throw new Error("Manday template is missing data sheet");
     replaceSheetData(mandayData, datasets.monthlyReview, rows.monthlyReview);
     await saveWorkbook(mandayWorkbook, mandayPath);
 
     const reportWorkbook = new ExcelJS.Workbook();
-    await reportWorkbook.xlsx.readFile(path.join(templateRoot, "support-service-monthly-report-template.xlsx"));
+    await reportWorkbook.xlsx.readFile(supportReportTemplatePath);
     const sheets = {
       data: reportWorkbook.getWorksheet("data"),
       cr: reportWorkbook.getWorksheet("cr"),

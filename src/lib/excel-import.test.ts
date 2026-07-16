@@ -2,6 +2,7 @@ import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
 import { importPreview, parseWorkbook } from "./excel-import";
 import { customerKey } from "./domain";
+import { defaultImportMappings } from "./import-mappings";
 
 const references = {
   customers: [
@@ -50,7 +51,7 @@ describe("SupportDesk workbook parser", () => {
     master.addRow(["Agent One", "High", "Annual", "Active", "Incident", "00 - Open", "", "", "", "", "", "Example Co"]);
 
     const bytes = await workbook.xlsx.writeBuffer();
-    const parsed = await parseWorkbook(Buffer.from(bytes), "supportdesk", references);
+    const parsed = await parseWorkbook(Buffer.from(bytes), "supportdesk", references, defaultImportMappings);
     const preview = importPreview(parsed);
 
     expect(preview.counts.customers).toBe(0);
@@ -67,7 +68,7 @@ describe("SupportDesk workbook parser", () => {
     });
     expect(parsed.master.issueTypes).toEqual([]);
     expect(parsed.master.priorities).toEqual([]);
-    const parsedAgain = await parseWorkbook(Buffer.from(bytes), "supportdesk", references);
+    const parsedAgain = await parseWorkbook(Buffer.from(bytes), "supportdesk", references, defaultImportMappings);
     expect(parsedAgain.master).toEqual(parsed.master);
     expect(parsed.diagnostics).toMatchObject({ blankIssueIds: 1, syntheticIssueIds: 1, consolidatedDuplicateGroups: 1 });
     expect(parsed.tickets.some((ticket) => ticket.issueId.startsWith("ADJ-"))).toBe(true);

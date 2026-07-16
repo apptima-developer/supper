@@ -1,6 +1,7 @@
 import "server-only";
 import path from "node:path";
 import { z } from "zod";
+import { getDataBackend, getSupabaseConfig } from "./env";
 
 const reportAssetSchema = z.object({
   fileName: z.string(),
@@ -18,7 +19,7 @@ function reportKey(fileName: string) {
 }
 
 function relationalEnabled() {
-  return process.env.DATA_BACKEND === "supabase-relational" || process.env.SUPABASE_DATA_MODEL === "relational";
+  return getDataBackend() === "supabase-relational";
 }
 
 function missingStorageError(action: string) {
@@ -26,7 +27,7 @@ function missingStorageError(action: string) {
 }
 
 async function store() {
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  if (!getSupabaseConfig()) {
     throw missingStorageError("access");
   }
   return import("./store");

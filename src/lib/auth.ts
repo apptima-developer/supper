@@ -2,11 +2,15 @@ import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { getSessionSecret } from "./env";
 import { userRepository } from "./repositories";
 import type { Role } from "./types";
 
 const COOKIE_NAME = "supportdesk_session";
-const secret = new TextEncoder().encode(process.env.SESSION_SECRET || "supportdesk-local-change-this-secret");
+
+function sessionSecret() {
+  return new TextEncoder().encode(getSessionSecret());
+}
 
 export type Session = { userId: string; username: string; name: string; role: Role };
 
@@ -18,7 +22,7 @@ export async function authenticate(username: string, password: string): Promise<
 }
 
 export async function createSession(session: Session) {
-  const token = await new SignJWT(session).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("12h").sign(secret);
+  const token = await new SignJWT(session).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("12h").sign(sessionSecret());
   (await cookies()).set(COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",
@@ -36,7 +40,7 @@ export async function getSession(): Promise<Session | null> {
   const token = (await cookies()).get(COOKIE_NAME)?.value;
   if (!token) return null;
   try {
-    const { payload } = await jwtVerify(token, secret);
+    const { payload } = await jwtVerify(token, sessionSecret());
     return payload as unknown as Session;
   } catch {
     return null;

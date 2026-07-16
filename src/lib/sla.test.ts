@@ -6,6 +6,9 @@ import type { Sla, Ticket } from "./types";
 const slaRules: Sla[] = [
   { id: "sla-1", customerName: "ACME", p1: 1, p2: 4, p3: 2, p4: 16 },
 ];
+const longSlaRules: Sla[] = [
+  { id: "sla-1", customerName: "ACME", p1: 1, p2: 4, p3: 4, p4: 16 },
+];
 
 function ticket(overrides: Partial<Ticket> = {}): Ticket {
   return {
@@ -77,15 +80,61 @@ describe("SLA pauses", () => {
     expect(state.dueDate?.toISOString()).toBe("2026-06-01T07:00:00.000Z");
   });
 
-  it("uses business hours for P3 SLA", () => {
+  it.each([
+    ["inside business hours", "2026-06-01T16:00:00+07:00", [], "2026-06-02T03:00:00.000Z"],
+    ["before business hours", "2026-06-01T08:00:00+07:00", [], "2026-06-01T04:00:00.000Z"],
+    ["after business hours", "2026-06-01T18:00:00+07:00", [], "2026-06-02T04:00:00.000Z"],
+    ["weekend", "2026-06-06T10:00:00+07:00", [], "2026-06-08T04:00:00.000Z"],
+    ["configured holiday", "2026-06-03T10:00:00+07:00", [{ id: "h1", date: "2026-06-03", name: "Holiday" }], "2026-06-04T04:00:00.000Z"],
+  ])("uses Bangkok business hours for P3 SLA: %s", (_, startDate, holidays, expectedIso) => {
     const state = ticketSlaState(
-      ticket({ startDate: "2026-06-01T16:00:00+07:00", severity: "Medium" }),
+      ticket({ startDate, severity: "Medium" }),
       slaRules,
-      [],
+      holidays,
       new Date("2026-06-01T16:30:00+07:00"),
     );
 
     expect(state.clockMode).toBe("business");
-    expect(state.dueDate?.toISOString()).toBe("2026-06-02T03:00:00.000Z");
+    expect(state.dueDate?.toISOString()).toBe(expectedIso);
+  });
+
+  it("is deterministic when the server process timezone is UTC", () => {
+    const previousTimezone = process.env.TZ;
+    process.env.TZ = "UTC";
+    try {
+      const state = ticketSlaState(
+        ticket({ startDate: "2026-06-01T16:00:00+07:00", severity: "Medium" }),
+        slaRules,
+        [],
+        new Date("2026-06-01T16:30:00+07:00"),
+      );
+
+      expect(state.clockMode).toBe("business");
+      expect(state.dueDate?.toISOString()).toBe("2026-06-02T03:00:00.000Z");
+    } finally {
+      process.env.TZ = previousTimezone;
+    }
+  });
+
+  it("extends a business-hour SLA when a waiting pause crosses business days", () => {
+    const state = ticketSlaState(
+      ticket({
+        startDate: "2026-06-01T16:00:00+07:00",
+        severity: "Medium",
+        slaPauses: [{
+          id: "pause-1",
+          startAt: "2026-06-01T16:30:00+07:00",
+          endAt: "2026-06-02T09:30:00+07:00",
+          reason: "waiting",
+          actor: "admin",
+        }],
+      }),
+      longSlaRules,
+      [],
+      new Date("2026-06-02T10:00:00+07:00"),
+    );
+
+    expect(state.dueDate?.toISOString()).toBe("2026-06-02T06:00:00.000Z");
+    expect(state.pausedHours).toBe(1);
   });
 });

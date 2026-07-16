@@ -9,6 +9,7 @@ const hourMs = 60 * 60 * 1000;
 const workingHoursPerDay = 8;
 const workStartHour = 9;
 const workEndHour = workStartHour + workingHoursPerDay;
+const bangkokOffsetHours = 7;
 const closedKanbanStatuses = new Set(["resolved", "closed", "cancelled"]);
 const slaSeverityFields: Record<TicketSeverityCode, keyof Pick<Sla, "p1" | "p2" | "p3" | "p4">> = { P1: "p1", P2: "p2", P3: "p3", P4: "p4" };
 
@@ -16,8 +17,40 @@ function pad2(value: number) {
   return String(value).padStart(2, "0");
 }
 
+function bangkokDate(date: Date) {
+  const bangkok = new Date(date.getTime() + bangkokOffsetHours * hourMs);
+  return {
+    year: bangkok.getUTCFullYear(),
+    month: bangkok.getUTCMonth() + 1,
+    day: bangkok.getUTCDate(),
+    hour: bangkok.getUTCHours(),
+    minute: bangkok.getUTCMinutes(),
+    second: bangkok.getUTCSeconds(),
+    millisecond: bangkok.getUTCMilliseconds(),
+    weekday: bangkok.getUTCDay(),
+  };
+}
+
+function fromBangkokDate(parts: { year: number; month: number; day: number; hour?: number; minute?: number; second?: number; millisecond?: number }) {
+  return new Date(Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    (parts.hour ?? 0) - bangkokOffsetHours,
+    parts.minute ?? 0,
+    parts.second ?? 0,
+    parts.millisecond ?? 0,
+  ));
+}
+
 function dateKey(date: Date) {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  const parts = bangkokDate(date);
+  return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
+}
+
+function bangkokWorkBoundary(date: Date, hour: number) {
+  const parts = bangkokDate(date);
+  return fromBangkokDate({ year: parts.year, month: parts.month, day: parts.day, hour });
 }
 
 function dateValue(value: string, fallbackHour = workStartHour) {
@@ -32,26 +65,28 @@ function dateValue(value: string, fallbackHour = workStartHour) {
 }
 
 function isBusinessDay(date: Date, holidayDates: Set<string>) {
-  const day = date.getDay();
+  const day = bangkokDate(date).weekday;
   return day !== 0 && day !== 6 && !holidayDates.has(dateKey(date));
 }
 
 function nextBusinessStart(date: Date, holidayDates: Set<string>) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + 1);
-  next.setHours(workStartHour, 0, 0, 0);
-  while (!isBusinessDay(next, holidayDates)) next.setDate(next.getDate() + 1);
+  const parts = bangkokDate(date);
+  let next = fromBangkokDate({ year: parts.year, month: parts.month, day: parts.day + 1, hour: workStartHour });
+  while (!isBusinessDay(next, holidayDates)) {
+    const nextParts = bangkokDate(next);
+    next = fromBangkokDate({ year: nextParts.year, month: nextParts.month, day: nextParts.day + 1, hour: workStartHour });
+  }
   return next;
 }
 
 function alignToBusinessTime(date: Date, holidayDates: Set<string>) {
   const aligned = new Date(date);
   while (!isBusinessDay(aligned, holidayDates)) {
-    aligned.setDate(aligned.getDate() + 1);
-    aligned.setHours(workStartHour, 0, 0, 0);
+    return nextBusinessStart(aligned, holidayDates);
   }
-  if (aligned.getHours() < workStartHour) aligned.setHours(workStartHour, 0, 0, 0);
-  if (aligned.getHours() >= workEndHour) return nextBusinessStart(aligned, holidayDates);
+  const parts = bangkokDate(aligned);
+  if (parts.hour < workStartHour) return bangkokWorkBoundary(aligned, workStartHour);
+  if (parts.hour >= workEndHour) return nextBusinessStart(aligned, holidayDates);
   return aligned;
 }
 
@@ -62,8 +97,7 @@ function addBusinessHours(start: Date, hours: number, holidayDates: Set<string>)
   while (remaining > 0 && guard < 10000) {
     guard += 1;
     current = alignToBusinessTime(current, holidayDates);
-    const endOfWorkday = new Date(current);
-    endOfWorkday.setHours(workEndHour, 0, 0, 0);
+    const endOfWorkday = bangkokWorkBoundary(current, workEndHour);
     const available = Math.max(0, (endOfWorkday.getTime() - current.getTime()) / hourMs);
     if (remaining <= available) return new Date(current.getTime() + remaining * hourMs);
     remaining -= available;
@@ -81,8 +115,7 @@ function businessHoursBetween(start: Date, end: Date, holidayDates: Set<string>)
     guard += 1;
     current = alignToBusinessTime(current, holidayDates);
     if (current.getTime() >= end.getTime()) break;
-    const endOfWorkday = new Date(current);
-    endOfWorkday.setHours(workEndHour, 0, 0, 0);
+    const endOfWorkday = bangkokWorkBoundary(current, workEndHour);
     const sliceEnd = end.getTime() < endOfWorkday.getTime() ? end : endOfWorkday;
     if (sliceEnd.getTime() > current.getTime()) total += (sliceEnd.getTime() - current.getTime()) / hourMs;
     current = nextBusinessStart(current, holidayDates);

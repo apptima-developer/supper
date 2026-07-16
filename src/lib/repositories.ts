@@ -2,6 +2,7 @@ import { cache } from "react";
 import { customerListSchema, ticketListSchema, historyListSchema, auditListSchema, statusListSchema, slaListSchema, namedMasterListSchema, categoryListSchema, holidayListSchema, importBatchListSchema, reportJobListSchema, userListSchema, type Customer, type Ticket, type TicketHistory, type Audit, type Status, type Sla, type NamedMaster, type Category, type Holiday, type ImportBatch, type ReportJob, type User } from "./types";
 import { readJson, readJsonBatch, restoreBackupSet, updateJson } from "./json-store";
 import { recalculateCustomer, ticketDiff } from "./domain";
+import { getDataBackend } from "./env";
 
 const paths = {
   customers: "core/customers.json",
@@ -39,7 +40,7 @@ const specs = {
 } as const;
 
 function relationalEnabled() {
-  return process.env.DATA_BACKEND === "supabase-relational" || process.env.SUPABASE_DATA_MODEL === "relational";
+  return getDataBackend() === "supabase-relational";
 }
 
 async function relational() {
