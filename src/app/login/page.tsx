@@ -1,6 +1,20 @@
-import Image from "next/image";
 import { LockKeyhole, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+function SupperWordmark({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className="text-left leading-none">
+      <p
+        className={`bg-[linear-gradient(100deg,#0a84ff_0%,#20c9b7_34%,#8b5cf6_68%,#0a84ff_100%)] bg-clip-text font-black text-transparent drop-shadow-sm ${compact ? "text-[20px] tracking-[.16em]" : "text-[23px] tracking-[.18em]"}`}
+      >
+        SUPPER
+      </p>
+      <p className={`mt-1 font-semibold uppercase tracking-[.20em] text-sky-700/70 ${compact ? "text-[7px]" : "text-[8px]"}`}>
+        Support Control System
+      </p>
+    </div>
+  );
+}
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const { error } = await searchParams;
@@ -15,15 +29,8 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <div className="absolute right-4 top-6 h-72 w-72 rounded-full bg-white/10 blur-3xl" />
         <div className="absolute bottom-0 left-8 h-80 w-80 rounded-full bg-cyan-200/20 blur-3xl" />
 
-        <div className="brand-logo-card relative flex h-14 w-[220px] items-center rounded-3xl px-3 shadow-[0_18px_40px_rgba(15,23,42,.16)] ring-1 ring-white/40">
-          <Image
-            src="/brand/supper-logo-wordmark-transparent.png"
-            alt="SUPPER Support Control System"
-            width={220}
-            height={63}
-            priority
-            className="h-11 w-auto object-contain"
-          />
+        <div className="brand-logo-card relative flex h-14 w-[220px] items-center rounded-3xl px-5 shadow-[0_18px_40px_rgba(15,23,42,.16)] ring-1 ring-white/40">
+          <SupperWordmark />
         </div>
 
         <div className="relative my-auto max-w-lg">
@@ -49,15 +56,8 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
       <section className="flex items-center justify-center p-6">
         <div className="lux-surface w-full max-w-[400px] rounded-3xl border bg-white/80 p-8 shadow-[0_28px_70px_rgba(35,77,112,.12)]">
           <div className="mb-8 lg:hidden">
-            <div className="brand-logo-card flex h-12 w-[190px] items-center rounded-2xl px-3 shadow-sm ring-1 ring-sky-100/80">
-              <Image
-                src="/brand/supper-logo-wordmark-transparent.png"
-                alt="SUPPER Support Control System"
-                width={190}
-                height={54}
-                priority
-                className="h-9 w-auto object-contain"
-              />
+            <div className="brand-logo-card flex h-12 w-[190px] items-center rounded-2xl px-4 shadow-sm ring-1 ring-sky-100/80">
+              <SupperWordmark compact />
             </div>
           </div>
           <p className="text-[11px] font-semibold uppercase tracking-[.15em] text-sky-600">Welcome back</p>
