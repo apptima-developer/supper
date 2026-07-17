@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { safeErrorResponse } from "@/lib/request-security";
 import { getSession } from "@/lib/auth";
 import { isTicketOwner, ticketOwnerLabel } from "@/lib/domain";
 import { loadTicketManagerData } from "@/lib/repositories";
@@ -13,7 +14,7 @@ function dueTime(date: Date | null | undefined) {
   return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const session = await getSession();
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -52,6 +53,6 @@ export async function GET() {
       items: notifications.slice(0, 20),
     });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Notification load failed" }, { status: 400 });
+    return safeErrorResponse(error, "Could not load notifications", request, 500);
   }
 }

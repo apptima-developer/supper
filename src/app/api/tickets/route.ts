@@ -5,32 +5,19 @@ import { assertCan } from "@/lib/rbac";
 import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
 import { normalizeDateTime } from "@/lib/utils";
-import { ticketLogAttachmentSchema, ticketSchema, type Ticket, type TicketLog } from "@/lib/types";
-
-function makeTicketLog(raw: unknown, actor: string): TicketLog | null {
-  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const message = typeof raw === "string" ? raw.trim() : String(record.message ?? "").trim();
-  const attachments = Array.isArray(record.attachments)
-    ? record.attachments.flatMap((item) => {
-        const parsed = ticketLogAttachmentSchema.safeParse(item);
-        return parsed.success && parsed.data.contentType.startsWith("image/") && parsed.data.dataUrl.startsWith("data:image/")
-          ? [parsed.data]
-          : [];
-      }).slice(0, 4)
-    : [];
-  return message || attachments.length
-    ? { id: crypto.randomUUID(), message, attachments, actor, createdAt: new Date().toISOString() }
-    : null;
-}
+import { ticketSchema, type Ticket } from "@/lib/types";
+import { ticketCreateSchema } from "@/lib/mutation-schemas";
+import { readJsonBody, safeErrorResponse, HttpError } from "@/lib/request-security";
+import { makeTicketLog } from "@/lib/ticket-log-security";
+import { ticketMutationBodyLimit } from "@/lib/request-limits";
 
 export async function GET() { const session = await getSession(); if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); return NextResponse.json(await ticketRepository.list()); }
 
-async function normalizeTicketDates(raw: Record<string, unknown>, ticket: Partial<Ticket>) {
-  const startDate = normalizeDateTime(String(raw.startDate || ""));
-  const closeDate = normalizeDateTime(String(raw.closeDate || ""), 17);
-  const fallbackDueDate = normalizeDateTime(String(raw.dueDate || ""), 17);
+async function normalizeTicketDates(issueId: string, ticketCreateDate: string, ticket: Partial<Ticket>) {
+  const startDate = normalizeDateTime(String(ticket.startDate || ""));
+  const closeDate = normalizeDateTime(String(ticket.closeDate || ""), 17);
   if (!startDate || !ticket.customerName || !ticket.severity || !ticket.kanbanStatus) {
-    return { startDate, dueDate: fallbackDueDate, closeDate };
+    return { startDate, dueDate: "", closeDate };
   }
 
   const [sla, holidays] = await Promise.all([
@@ -40,17 +27,17 @@ async function normalizeTicketDates(raw: Record<string, unknown>, ticket: Partia
   const slaTicket = {
     ...ticket,
     id: "",
-    issueId: String(raw.issueId || ""),
-    date: String(raw.date || ""),
+    issueId,
+    date: ticketCreateDate,
     startDate,
-    dueDate: fallbackDueDate,
+    dueDate: "",
     closeDate,
     createdAt: "",
     updatedAt: "",
     slaPauses: ticket.slaPauses || [],
   } as Ticket;
   const computedDueDate = ticketSlaState(slaTicket, sla, holidays).dueDate?.toISOString();
-  return { startDate, dueDate: computedDueDate || fallbackDueDate, closeDate };
+  return { startDate, dueDate: computedDueDate || "", closeDate };
 }
 
 export async function POST(request: Request) {
@@ -59,33 +46,31 @@ export async function POST(request: Request) {
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     assertCan(session.role, "tickets:manage");
 
-    const raw = await request.json() as Record<string, unknown>;
-    const customer = await customerRepository.get(String(raw.customerKey || ""));
-    if (!customer) throw new Error("Customer not found");
+    const input = await readJsonBody(request, ticketCreateSchema, ticketMutationBodyLimit());
+    const customer = await customerRepository.get(input.customerKey);
+    if (!customer) throw new HttpError(400, "CUSTOMER_NOT_FOUND", "Customer not found");
 
-    const severity = ticketSeverityLabel(String(raw.severity || ""));
-    const kanbanStatus = mapKanbanStatus(String(raw.status || ""));
+    const severity = ticketSeverityLabel(input.severity);
+    const kanbanStatus = mapKanbanStatus(input.status);
     const slaPauses = transitionSlaPauses([], "open", kanbanStatus, session.username);
-    const effort = ticketEffortFields(raw);
-    const log = makeTicketLog(raw.logEntry, session.username);
+    const effort = ticketEffortFields({ ownerEfforts: input.ownerEfforts });
+    const log = makeTicketLog(input.logEntry, session.username);
     const ticketCreateDate = new Date().toISOString();
-    const protectedRaw = { ...raw, date: ticketCreateDate };
-    const dates = await normalizeTicketDates(protectedRaw, {
+    const dates = await normalizeTicketDates(input.issueId, ticketCreateDate, {
+      ...input,
       customerName: customer.customerName,
       customerKey: customer.key,
       severity,
-      status: String(raw.status || ""),
       kanbanStatus,
       slaPauses,
     });
-    const input = ticketSchema.omit({ id: true, createdAt: true, updatedAt: true }).parse({
-      ...raw,
+    const ticket = ticketSchema.omit({ id: true, createdAt: true, updatedAt: true }).parse({
+      ...input,
       ...effort,
       ...dates,
       date: ticketCreateDate,
-      category: String(raw.category ?? ""),
       severity,
-      remark: String(raw.remark ?? ""),
+      remark: input.remark || "",
       ticketLogs: log ? [log] : [],
       customerKey: customer.key,
       customerName: customer.customerName,
@@ -93,8 +78,8 @@ export async function POST(request: Request) {
       slaPauses,
     });
 
-    return NextResponse.json(await ticketRepository.create(input, session.username), { status: 201 });
+    return NextResponse.json(await ticketRepository.create(ticket, session.username), { status: 201 });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid ticket" }, { status: 400 });
+    return safeErrorResponse(error, "Could not create ticket", request, 400);
   }
 }

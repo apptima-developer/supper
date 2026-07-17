@@ -5,28 +5,15 @@ import { assertCan } from "@/lib/rbac";
 import { customerRepository, masterRepositories, ticketRepository } from "@/lib/repositories";
 import { ticketSlaState } from "@/lib/sla";
 import { normalizeDateTime } from "@/lib/utils";
-import { ticketLogAttachmentSchema, type Ticket, type TicketLog } from "@/lib/types";
-
-function makeTicketLog(raw: unknown, actor: string): TicketLog | null {
-  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const message = typeof raw === "string" ? raw.trim() : String(record.message ?? "").trim();
-  const attachments = Array.isArray(record.attachments)
-    ? record.attachments.flatMap((item) => {
-        const parsed = ticketLogAttachmentSchema.safeParse(item);
-        return parsed.success && parsed.data.contentType.startsWith("image/") && parsed.data.dataUrl.startsWith("data:image/")
-          ? [parsed.data]
-          : [];
-      }).slice(0, 4)
-    : [];
-  return message || attachments.length
-    ? { id: crypto.randomUUID(), message, attachments, actor, createdAt: new Date().toISOString() }
-    : null;
-}
+import type { Ticket } from "@/lib/types";
+import { ticketUserUpdateSchema } from "@/lib/mutation-schemas";
+import { HttpError, readJsonBody, safeErrorResponse } from "@/lib/request-security";
+import { makeTicketLog } from "@/lib/ticket-log-security";
+import { ticketMutationBodyLimit } from "@/lib/request-limits";
 
 async function applyComputedDates(current: Ticket, patch: Partial<Ticket>) {
   const shouldCompute =
     "startDate" in patch ||
-    "dueDate" in patch ||
     "closeDate" in patch ||
     "severity" in patch ||
     "customerKey" in patch ||
@@ -39,7 +26,7 @@ async function applyComputedDates(current: Ticket, patch: Partial<Ticket>) {
   const next = { ...current, ...patch };
   const startDate = "startDate" in patch ? normalizeDateTime(String(patch.startDate || "")) : next.startDate;
   const closeDate = "closeDate" in patch ? normalizeDateTime(String(patch.closeDate || ""), 17) : next.closeDate;
-  const fallbackDueDate = "dueDate" in patch ? normalizeDateTime(String(patch.dueDate || ""), 17) : next.dueDate;
+  const fallbackDueDate = next.dueDate;
   if (!startDate || !next.customerName || !next.severity) return { ...patch, startDate, dueDate: fallbackDueDate, closeDate };
 
   const [sla, holidays] = await Promise.all([
@@ -58,24 +45,20 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     const { id } = await params;
     const current = await ticketRepository.get(id);
-    if (!current) throw new Error("Ticket not found");
+    if (!current) throw new HttpError(404, "TICKET_NOT_FOUND", "Ticket not found");
 
-    const raw = await request.json() as Record<string, unknown>;
-    const { date: _date, logEntry: _logEntry, ticketLogs: _ticketLogs, slaPauses: _slaPauses, ...rawPatch } = raw;
-    void _date;
-    void _logEntry;
-    void _ticketLogs;
-    void _slaPauses;
-    let patch = rawPatch as Partial<Ticket>;
-    const log = makeTicketLog(raw.logEntry, session.username);
+    const input = await readJsonBody(request, ticketUserUpdateSchema, ticketMutationBodyLimit());
+    const { logEntry, ...mutableInput } = input;
+    let patch: Partial<Ticket> = mutableInput;
+    const log = makeTicketLog(logEntry, session.username);
     if (log) patch.ticketLogs = [...(current.ticketLogs || []), log];
     if ("category" in patch) patch.category = String(patch.category || "");
     if ("severity" in patch) patch.severity = ticketSeverityLabel(String(patch.severity || ""));
-    if ("ownerEfforts" in patch || "mdUsed" in patch || "owner" in patch) Object.assign(patch, ticketEffortFields(patch, current));
+    if ("ownerEfforts" in patch) Object.assign(patch, ticketEffortFields({ ownerEfforts: patch.ownerEfforts }, current));
     if (patch.status) patch.kanbanStatus = mapKanbanStatus(patch.status);
     if (patch.customerKey) {
       const customer = await customerRepository.get(patch.customerKey);
-      if (!customer) throw new Error("Customer not found");
+      if (!customer) throw new HttpError(400, "CUSTOMER_NOT_FOUND", "Customer not found");
       patch.customerKey = customer.key;
       patch.customerName = customer.customerName;
     }
@@ -86,7 +69,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     return NextResponse.json(await ticketRepository.update(id, patch, session.username));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid update" }, { status: 400 });
+    return safeErrorResponse(error, "Could not update ticket", request, 400);
   }
 }
-export async function DELETE(_: Request, { params }: { params: Promise<{ id: string }> }) { try { const session = await getSession(); if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); assertCan(session.role, "tickets:manage"); const { id } = await params; await ticketRepository.delete(id, session.username); return NextResponse.json({ ok: true }); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Delete failed" }, { status: 400 }); } }
+export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) { try { const session = await getSession(); if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); assertCan(session.role, "tickets:manage"); const { id } = await params; await ticketRepository.delete(id, session.username); return NextResponse.json({ ok: true }); } catch (error) { return safeErrorResponse(error, "Could not delete ticket", request, 400); } }

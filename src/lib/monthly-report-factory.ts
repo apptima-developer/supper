@@ -10,6 +10,7 @@ import type {
   MonthlyNormalizedDataset,
   MonthlyProjectSummary,
   MonthlyReportBatch,
+  MonthlyReportBatchView,
   MonthlyReportExport,
   MonthlyReportPreview,
   MonthlyReportRow,
@@ -66,7 +67,7 @@ async function assertRuntimeAsset(filePath: string, label: string) {
   try {
     await fs.access(filePath);
   } catch {
-    throw new Error(`Missing runtime report template: ${label} (${path.relative(process.cwd(), filePath)}). Restore templates/reports before exporting monthly reports.`);
+    throw new Error(`Missing runtime report template: ${label}. Restore the required report templates before exporting.`);
   }
 }
 const previewLimit = 150;
@@ -424,13 +425,34 @@ function trimRows<T>(rows: T[]) {
   return rows.slice(0, previewLimit);
 }
 
-export async function listMonthlyReportBatches() {
+function publicBatch(batch: MonthlyReportBatch): MonthlyReportBatchView {
+  return {
+    ...batch,
+    sourceFiles: batch.sourceFiles.map((item) => {
+      const { storagePath, ...file } = item;
+      void storagePath;
+      return file;
+    }),
+  };
+}
+
+function publicExport(item: MonthlyReportExport) {
+  const { mandaySummaryPath, monthlyReportWorkbookPath, monthlyReportPdfPath, ...safe } = item;
+  return {
+    ...safe,
+    mandaySummaryAvailable: Boolean(mandaySummaryPath),
+    monthlyReportWorkbookAvailable: Boolean(monthlyReportWorkbookPath),
+    monthlyReportPdfAvailable: Boolean(monthlyReportPdfPath),
+  };
+}
+
+export async function listMonthlyReportBatches(): Promise<MonthlyReportBatchView[]> {
   try {
     const entries = await fs.readdir(monthlyRoot, { withFileTypes: true });
     const batches = await Promise.all(entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => readJsonFile<MonthlyReportBatch | null>(path.join(monthlyRoot, entry.name, "batch.json"), null)));
-    return batches.filter((batch): batch is MonthlyReportBatch => Boolean(batch)).sort((a, b) => b.periodStart.localeCompare(a.periodStart));
+    return batches.filter((batch): batch is MonthlyReportBatch => Boolean(batch)).sort((a, b) => b.periodStart.localeCompare(a.periodStart)).map(publicBatch);
   } catch {
     return [];
   }
@@ -450,7 +472,7 @@ export async function getMonthlyReportPreview(period: string, projectCode?: stri
     ? filteredRowsForProject(period, year, month, selectedProject, datasets)
     : { monthlyReview: [], cr: [], inc: [], sr: [], issueList: [], period };
   return {
-    batch,
+    batch: publicBatch(batch),
     selected: batch.projectSummaries.find((summary) => summary.projectCode === selectedProject),
     rows: {
       monthlyReview: trimRows(rows.monthlyReview),
@@ -465,7 +487,7 @@ export async function getMonthlyReportPreview(period: string, projectCode?: stri
       inc: datasets.inc.headers,
       sr: datasets.sr.headers,
     },
-    exports: (await readExports(period)).filter((item) => !selectedProject || item.projectCode === selectedProject),
+    exports: (await readExports(period)).filter((item) => !selectedProject || item.projectCode === selectedProject).map(publicExport),
   };
 }
 
@@ -515,8 +537,8 @@ export async function createMonthlyReportBatch({
         storagePath: relativeDataPath(sourcePath),
         importedAt: now,
       });
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : `${type}: import failed`);
+    } catch {
+      errors.push(`${type}: workbook validation failed`);
     }
   }
 
@@ -788,7 +810,7 @@ export async function generateMonthlyReportOutputs({
     const failed: MonthlyReportExport = {
       ...exportRecord,
       status: "failed",
-      errorMessage: error instanceof Error ? error.message : "Export failed",
+      errorMessage: "Export failed. Check the server logs.",
     };
     exports.unshift(failed);
     await writeExports(period, exports);
@@ -810,4 +832,21 @@ export async function readMonthlyReportFile(relativePath: string) {
     ? "application/pdf"
     : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   return { bytes, fileName, contentType };
+}
+
+export async function readMonthlyReportExportFile(
+  period: string,
+  exportId: string,
+  kind: "manday" | "workbook" | "pdf",
+) {
+  periodFromKey(period);
+  const item = (await readExports(period)).find((candidate) => candidate.id === exportId);
+  if (!item) throw new Error("Monthly report export not found");
+  const relativePath = kind === "manday"
+    ? item.mandaySummaryPath
+    : kind === "workbook"
+      ? item.monthlyReportWorkbookPath
+      : item.monthlyReportPdfPath;
+  if (!relativePath) throw new Error("Requested export file is unavailable");
+  return readMonthlyReportFile(relativePath);
 }

@@ -18,9 +18,7 @@ function SupperWordmark({ compact = false }: { compact?: boolean }) {
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const { error } = await searchParams;
-  const errorMessage = error === "setup"
-    ? "Storage setup is incomplete. Verify Supabase environment variables, app_store SQL permissions, and seed data before signing in."
-    : error ? "Invalid username or password." : "";
+  const errorMessage = error ? "Authentication failed. Check your credentials and try again." : "";
 
   return (
     <main className="grid min-h-screen bg-[radial-gradient(circle_at_18%_-8%,rgba(125,211,252,.42),transparent_34%),radial-gradient(circle_at_86%_0%,rgba(196,181,253,.24),transparent_30%),linear-gradient(180deg,#fbfdff,#eef8ff_52%,#f8fbff)] lg:grid-cols-[1.08fr_.92fr]">

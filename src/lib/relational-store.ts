@@ -155,6 +155,7 @@ function userRow(item: User) {
     email: item.email.toLowerCase(),
     role: item.role,
     active: item.active,
+    auth_version: item.authVersion,
     data: item,
   };
 }
@@ -281,8 +282,11 @@ export async function replaceAudit(items: Audit[]) {
 }
 
 export async function listUsers() {
-  const data = await must("Failed to list users", supabaseAdmin.from("support_users").select("data").order("username"));
-  return rows(data, userListSchema);
+  const data = await must("Failed to list users", supabaseAdmin.from("support_users").select("data,auth_version").order("username"));
+  return userListSchema.parse((data || []).map((item) => ({
+    ...(item.data as Record<string, unknown>),
+    authVersion: item.auth_version ?? (item.data as Record<string, unknown>).authVersion ?? 1,
+  })));
 }
 
 export async function upsertUser(user: User) {

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
+import { safeErrorResponse } from "@/lib/request-security";
 import { getSession } from "@/lib/auth";
 import { can } from "@/lib/rbac";
-import { readMonthlyReportFile } from "@/lib/monthly-report-factory";
+import { readMonthlyReportExportFile } from "@/lib/monthly-report-factory";
 
 export const runtime = "nodejs";
 
@@ -10,9 +11,12 @@ export async function GET(request: Request) {
     const session = await getSession();
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (!can(session.role, "reports:view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    const file = new URL(request.url).searchParams.get("file");
-    if (!file) throw new Error("Missing file path");
-    const report = await readMonthlyReportFile(file);
+    const params = new URL(request.url).searchParams;
+    const period = params.get("period") || "";
+    const exportId = params.get("exportId") || "";
+    const kind = params.get("kind");
+    if (!period || !exportId || !["manday", "workbook", "pdf"].includes(kind || "")) throw new Error("Invalid export download request");
+    const report = await readMonthlyReportExportFile(period, exportId, kind as "manday" | "workbook" | "pdf");
     return new NextResponse(new Uint8Array(report.bytes), {
       headers: {
         "Content-Type": report.contentType,
@@ -20,6 +24,6 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not download report file" }, { status: 404 });
+    return safeErrorResponse(error, "Could not download report file", request, 404);
   }
 }

@@ -1,6 +1,6 @@
 # SUPPER Baseline Audit
 
-Phase: 0.1.1 - Reproducible Baseline and Auxiliary Storage Correction
+Phase: 0.2 - Data and Security Foundation (includes the approved Phase 0.1.1 storage baseline)
 
 ## Supported Storage Modes
 
@@ -24,6 +24,8 @@ If `DATA_BACKEND` is omitted:
 Always required in production:
 
 - `SESSION_SECRET`: at least 32 random characters. There is no production fallback.
+- `RATE_LIMIT_PEPPER`: a separate random value of at least 32 characters.
+- `APP_ORIGIN`: exact absolute HTTPS origin for browser mutation protection.
 
 Required only when `DATA_BACKEND=supabase` or `DATA_BACKEND=supabase-relational`:
 
@@ -35,6 +37,7 @@ The service role key is used only by server-side modules. It must not be exposed
 Optional:
 
 - `LIBREOFFICE_PATH`: explicit LibreOffice binary path for monthly report PDF export.
+- `MAX_JSON_BODY_KB`, `MAX_IMPORT_FILE_MB`, `MAX_INLINE_IMAGE_MB`: request limits with documented safe defaults.
 
 ## Runtime Assets
 
@@ -84,6 +87,12 @@ Runtime asset report:
 npm run verify:runtime-assets
 ```
 
+Migration structure report:
+
+```bash
+npm run verify:migrations
+```
+
 ## Health Endpoints
 
 No session required:
@@ -119,10 +128,14 @@ npm run dev
 
 ## Baseline Results
 
-Verified in this phase:
+The clean Phase 0.2 starting point was `main` at approved commit `995d8ddb4795c0e16c9504cbf806fe6a64c648a9` or later. Before modification, `git pull --ff-only origin main` reported up to date; 51 tests, lint, and the Next.js production build passed.
 
-- `npm test` passes.
-- `npm run lint` passes.
-- `npm run build` completes beyond page-data collection.
+Phase 0.2 verification covers:
+
+- storage routing remains unchanged across all three modes.
+- strict mutation ownership, session invalidation, password policy, throttling, Origin checks, request/file/image limits, DTO privacy, restore policy, header configuration, and redaction have deterministic tests.
+- migration filenames and content structure are verified without executing SQL.
 - Unit tests can run from a temporary copy without `data/`.
 - SLA business-hour calculations are deterministic in Asia/Bangkok.
+
+Final command counts and build timings are recorded in the delivery summary for the commit because they vary by machine.

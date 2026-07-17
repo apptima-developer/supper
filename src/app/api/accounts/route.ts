@@ -1,17 +1,11 @@
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { getSession } from "@/lib/auth";
 import { userRepository, writeAudit } from "@/lib/repositories";
-import { roleSchema, type User } from "@/lib/types";
-
-const createAccountSchema = z.object({
-  username: z.string().trim().min(3, "Username must be at least 3 characters"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
-  email: z.string().trim().email("Enter a valid email"),
-  role: roleSchema,
-  active: z.boolean().default(true),
-});
+import type { User } from "@/lib/types";
+import { accountCreateSchema } from "@/lib/mutation-schemas";
+import { HttpError, readJsonBody, safeErrorResponse } from "@/lib/request-security";
+import { toAdminUserDto } from "@/lib/user-dto";
 
 export async function POST(request: Request) {
   try {
@@ -19,14 +13,13 @@ export async function POST(request: Request) {
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (session.role !== "admin") return NextResponse.json({ error: "Admin role required" }, { status: 403 });
 
-    const raw = await request.json();
-    const input = createAccountSchema.parse(raw);
+    const input = await readJsonBody(request, accountCreateSchema);
 
     const users = await userRepository.list();
     const username = input.username.toLowerCase();
     const email = input.email.toLowerCase();
-    if (users.some((user) => user.username.toLowerCase() === username)) throw new Error("Username already exists");
-    if (users.some((user) => user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
+    if (users.some((user) => user.username.toLowerCase() === username)) throw new HttpError(409, "USERNAME_EXISTS", "Username already exists");
+    if (users.some((user) => user.email && user.email.toLowerCase() === email)) throw new HttpError(409, "EMAIL_EXISTS", "Email already exists");
 
     const passwordHash = await bcrypt.hash(input.password, 10);
     const user: User = {
@@ -37,16 +30,10 @@ export async function POST(request: Request) {
       passwordHash,
       role: input.role,
       active: input.active,
+      authVersion: 1,
     };
     await userRepository.create(user);
-    const created: Omit<User, "passwordHash"> = {
-      id: user.id,
-      username: user.username,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      active: user.active,
-    };
+    const created = toAdminUserDto(user);
 
     await writeAudit({
       action: "create",
@@ -58,9 +45,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json(created, { status: 201 });
   } catch (error) {
-    const message = error instanceof z.ZodError
-      ? error.issues[0]?.message || "Invalid account data"
-      : error instanceof Error ? error.message : "Could not create account";
-    return NextResponse.json({ error: message }, { status: 400 });
+    return safeErrorResponse(error, "Could not create account", request, 400);
   }
 }

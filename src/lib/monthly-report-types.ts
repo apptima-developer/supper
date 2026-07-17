@@ -63,6 +63,16 @@ export type MonthlyReportExport = {
   errorMessage?: string;
 };
 
+export type MonthlySourceFileView = Omit<MonthlySourceFile, "storagePath">;
+export type MonthlyReportBatchView = Omit<MonthlyReportBatch, "sourceFiles"> & {
+  sourceFiles: MonthlySourceFileView[];
+};
+export type MonthlyReportExportView = Omit<MonthlyReportExport, "mandaySummaryPath" | "monthlyReportWorkbookPath" | "monthlyReportPdfPath"> & {
+  mandaySummaryAvailable: boolean;
+  monthlyReportWorkbookAvailable: boolean;
+  monthlyReportPdfAvailable: boolean;
+};
+
 export type MonthlyReportRow = {
   values: Record<string, unknown>;
   raw: unknown[];
@@ -111,7 +121,7 @@ export type MonthlyIssueListRow = {
 };
 
 export type MonthlyReportPreview = {
-  batch: MonthlyReportBatch;
+  batch: MonthlyReportBatchView;
   selected?: MonthlyProjectSummary;
   rows: {
     monthlyReview: MonthlyReportRow[];
@@ -126,5 +136,5 @@ export type MonthlyReportPreview = {
     inc: string[];
     sr: string[];
   };
-  exports: MonthlyReportExport[];
+  exports: MonthlyReportExportView[];
 };

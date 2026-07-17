@@ -8,6 +8,24 @@ const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
 const auxiliaryJsonStorage = resolveStorageRouting(getDataBackend()).auxiliaryJson;
 const usesSupabaseAppStore = auxiliaryJsonStorage === "supabase-app-store";
+const restorableTargets = new Set([
+  "audit/audit-log.json",
+  "auth/users.json",
+  "core/customers.json",
+  "core/ticket-history.json",
+  "core/tickets.json",
+  "imports/import-batches.json",
+  "imports/mappings.json",
+  "master/categories.json",
+  "master/contract-types.json",
+  "master/holidays.json",
+  "master/issue-types.json",
+  "master/priorities.json",
+  "master/sla.json",
+  "master/statuses.json",
+  "master/teams.json",
+  "reports/report-jobs.json",
+]);
 
 type StoreModule = typeof import("./store");
 type JsonBatchSpec = Record<string, { path: string; schema: ZodType }>;
@@ -146,13 +164,18 @@ export async function listBackups() {
   return results.sort().reverse();
 }
 
-function backupTarget(relativeBackupPath: string) {
-  if (!relativeBackupPath.startsWith("backups/")) throw new Error("Invalid backup path");
+export function backupTarget(relativeBackupPath: string) {
+  if (relativeBackupPath.includes("\\") || !/^backups\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9._-]+-\d{13}-[0-9a-f-]{8,64}\.json$/i.test(relativeBackupPath)) {
+    throw new Error("Invalid backup path");
+  }
   const relative = relativeBackupPath.slice("backups/".length);
   const directory = path.dirname(relative);
   const match = path.basename(relative).match(/^(.*)-(\d{13})-[0-9a-f-]+\.json$/i);
   if (!match) throw new Error("Unrecognized backup name");
-  return { target: path.join(directory, `${match[1]}.json`), timestamp: Number(match[2]) };
+  const target = path.posix.join(directory, `${match[1]}.json`);
+  dataPath(target);
+  if (!restorableTargets.has(target)) throw new Error("Unknown backup target");
+  return { target, timestamp: Number(match[2]) };
 }
 
 export async function restoreBackup(relativeBackupPath: string) {

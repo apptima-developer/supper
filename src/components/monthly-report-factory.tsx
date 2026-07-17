@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Input, Label, Select } from "./ui/input";
 import { EmptyState } from "./empty-state";
 import { cn, formatDate, formatNumber } from "@/lib/utils";
-import type { MonthlyIssueListRow, MonthlyProjectSummary, MonthlyReportBatch, MonthlyReportPreview, MonthlyReportRow } from "@/lib/monthly-report-types";
+import type { MonthlyIssueListRow, MonthlyProjectSummary, MonthlyReportBatchView, MonthlyReportPreview, MonthlyReportRow } from "@/lib/monthly-report-types";
 import type { Role } from "@/lib/types";
 
 type TabKey = "summary" | "monthly" | "cr" | "inc" | "sr" | "issue" | "exports";
@@ -33,12 +33,12 @@ const uploadFields = [
 
 type UploadFieldName = (typeof uploadFields)[number]["name"];
 
-function periodLabel(batch: MonthlyReportBatch) {
+function periodLabel(batch: MonthlyReportBatchView) {
   return `${batch.year}-${String(batch.month).padStart(2, "0")}`;
 }
 
-function downloadUrl(file?: string) {
-  return file ? `/api/monthly-reports/download?file=${encodeURIComponent(file)}` : "#";
+function downloadUrl(period: string, exportId: string, kind: "manday" | "workbook" | "pdf") {
+  return `/api/monthly-reports/download?period=${encodeURIComponent(period)}&exportId=${encodeURIComponent(exportId)}&kind=${kind}`;
 }
 
 function fieldValue(row: MonthlyReportRow, keys: string[]) {
@@ -205,7 +205,7 @@ function UploadField({
   );
 }
 
-export function MonthlyReportFactory({ initialBatches, role }: { initialBatches: MonthlyReportBatch[]; role: Role }) {
+export function MonthlyReportFactory({ initialBatches, role }: { initialBatches: MonthlyReportBatchView[]; role: Role }) {
   const current = new Date();
   const [year, setYear] = useState(current.getFullYear());
   const [month, setMonth] = useState(current.getMonth() + 1);
@@ -432,9 +432,9 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
                             <td className="px-3 py-2"><Badge tone={item.status === "generated" ? "emerald" : "rose"}>{item.status}</Badge></td>
                             <td className="px-3 py-2">
                               <div className="flex flex-wrap gap-2">
-                                {item.mandaySummaryPath && <Button variant="outline" size="sm" asChild><a href={downloadUrl(item.mandaySummaryPath)}><Download size={13} />Manday XLSX</a></Button>}
-                                {item.monthlyReportPdfPath && item.status === "generated" && <Button variant="outline" size="sm" asChild><a href={downloadUrl(item.monthlyReportPdfPath)}><Download size={13} />Monthly PDF</a></Button>}
-                                {item.monthlyReportWorkbookPath && <Button variant="ghost" size="sm" asChild><a href={downloadUrl(item.monthlyReportWorkbookPath)}><Download size={13} />Debug XLSX</a></Button>}
+                                {item.mandaySummaryAvailable && <Button variant="outline" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "manday")}><Download size={13} />Manday XLSX</a></Button>}
+                                {item.monthlyReportPdfAvailable && item.status === "generated" && <Button variant="outline" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "pdf")}><Download size={13} />Monthly PDF</a></Button>}
+                                {item.monthlyReportWorkbookAvailable && <Button variant="ghost" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "workbook")}><Download size={13} />Debug XLSX</a></Button>}
                               </div>
                             </td>
                             <td className="max-w-md truncate px-3 py-2 text-rose-600" title={item.errorMessage}>{item.errorMessage || "-"}</td>

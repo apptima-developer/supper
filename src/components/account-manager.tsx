@@ -112,7 +112,7 @@ export function AccountManager({ initialUsers, currentUserId }: { initialUsers: 
             </div>
             <div>
               <Label required>Password</Label>
-              <Input name="password" type="password" required minLength={6} autoComplete="new-password" placeholder="minimum 6 characters" />
+              <Input name="password" type="password" required minLength={12} autoComplete="new-password" placeholder="minimum 12 characters" />
             </div>
             <div>
               <Label required>Email</Label>
@@ -164,7 +164,7 @@ export function AccountManager({ initialUsers, currentUserId }: { initialUsers: 
                       {self && <p className="mt-0.5 text-[10px] text-slate-400">Current admin</p>}
                     </td>
                     <td className="min-w-44 px-4 py-2">
-                      <Input type="password" value={draft.password} placeholder="Leave blank to keep" autoComplete="new-password" onChange={(event) => patchDraft(user, { password: event.target.value })} />
+                      <Input type="password" minLength={12} value={draft.password} placeholder="Leave blank to keep" autoComplete="new-password" onChange={(event) => patchDraft(user, { password: event.target.value })} />
                     </td>
                     <td className="min-w-56 px-4 py-2">
                       <Input type="email" value={draft.email} onChange={(event) => patchDraft(user, { email: event.target.value })} />

@@ -144,7 +144,6 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
 
   async function save(formData: FormData) {
     setBusy(true);
-    const base: Partial<Customer> = editing || blank;
     const mdPurchased = parseNumber(formData.get("mdPurchased"));
     const carryForward = parseNumber(formData.get("carryForward"));
     const payload = aeOnly
@@ -163,10 +162,6 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
           renewalAlert: String(formData.get("renewalAlert")),
           aeUpdate: String(formData.get("aeUpdate")),
           active: formData.get("active") === "on",
-          mdUsed: base.mdUsed || 0,
-          mdRemaining: mdPurchased + carryForward - (base.mdUsed || 0),
-          burnRate: base.burnRate || 0,
-          mdStatus: base.mdStatus || "Healthy",
         };
 
     try {

@@ -3,6 +3,7 @@ import { AccountManager } from "@/components/account-manager";
 import { PageHeader } from "@/components/page-header";
 import { requireSession } from "@/lib/auth";
 import { userRepository } from "@/lib/repositories";
+import { toAdminUserDto } from "@/lib/user-dto";
 
 export const dynamic = "force-dynamic";
 
@@ -11,13 +12,7 @@ export default async function AccountsPage() {
   if (session.role !== "admin") redirect("/dashboard");
 
   const users = (await userRepository.list())
-    .map((user) => ({
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
-      active: user.active,
-    }))
+    .map(toAdminUserDto)
     .sort((a, b) => a.username.localeCompare(b.username, undefined, { sensitivity: "base", numeric: true }));
 
   return (

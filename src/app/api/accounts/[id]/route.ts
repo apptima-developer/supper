@@ -1,28 +1,10 @@
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { getSession } from "@/lib/auth";
 import { userRepository, writeAudit } from "@/lib/repositories";
-import { roleSchema, type User } from "@/lib/types";
-
-const updateAccountSchema = z.object({
-  username: z.string().trim().min(3, "Username must be at least 3 characters"),
-  password: z.string().optional(),
-  email: z.string().trim().email("Enter a valid email"),
-  role: roleSchema,
-  active: z.boolean(),
-});
-
-function publicUser(user: User) {
-  return {
-    id: user.id,
-    username: user.username,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    active: user.active,
-  };
-}
+import { accountUpdateSchema } from "@/lib/mutation-schemas";
+import { HttpError, readJsonBody, safeErrorResponse } from "@/lib/request-security";
+import { toAdminUserDto } from "@/lib/user-dto";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -31,20 +13,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (session.role !== "admin") return NextResponse.json({ error: "Admin role required" }, { status: 403 });
 
     const { id } = await params;
-    const input = updateAccountSchema.parse(await request.json());
-    if (input.password && input.password.length < 6) throw new Error("Password must be at least 6 characters");
+    const input = await readJsonBody(request, accountUpdateSchema);
     if (id === session.userId && (input.role !== "admin" || !input.active)) {
-      throw new Error("You cannot remove your own admin access");
+      throw new HttpError(400, "SELF_ADMIN_LOCKOUT", "You cannot remove your own admin access");
     }
     const passwordHash = input.password ? await bcrypt.hash(input.password, 10) : null;
 
     const users = await userRepository.list();
     const username = input.username.toLowerCase();
     const email = input.email.toLowerCase();
-    if (users.some((user) => user.id !== id && user.username.toLowerCase() === username)) throw new Error("Username already exists");
-    if (users.some((user) => user.id !== id && user.email && user.email.toLowerCase() === email)) throw new Error("Email already exists");
+    if (users.some((user) => user.id !== id && user.username.toLowerCase() === username)) throw new HttpError(409, "USERNAME_EXISTS", "Username already exists");
+    if (users.some((user) => user.id !== id && user.email && user.email.toLowerCase() === email)) throw new HttpError(409, "EMAIL_EXISTS", "Email already exists");
 
     const previous = users.find((user) => user.id === id);
+    if (!previous) throw new HttpError(404, "ACCOUNT_NOT_FOUND", "Account not found");
+    const securityChanged = Boolean(passwordHash)
+      || previous.username !== input.username
+      || previous.email !== input.email
+      || previous.role !== input.role
+      || previous.active !== input.active;
     const updated = previous ? {
       ...previous,
       username: input.username,
@@ -53,10 +40,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       role: input.role,
       active: input.active,
       passwordHash: passwordHash || previous.passwordHash,
+      authVersion: securityChanged ? previous.authVersion + 1 : previous.authVersion,
     } : undefined;
     if (updated) await userRepository.save(updated);
 
-    if (!previous || !updated) throw new Error("Account not found");
+    if (!updated) throw new HttpError(404, "ACCOUNT_NOT_FOUND", "Account not found");
     await writeAudit({
       action: "update",
       entity: "user",
@@ -75,11 +63,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       },
     });
 
-    return NextResponse.json(publicUser(updated));
+    return NextResponse.json(toAdminUserDto(updated));
   } catch (error) {
-    const message = error instanceof z.ZodError
-      ? error.issues[0]?.message || "Invalid account update"
-      : error instanceof Error ? error.message : "Could not update account";
-    return NextResponse.json({ error: message }, { status: 400 });
+    return safeErrorResponse(error, "Could not update account", request, 400);
   }
 }

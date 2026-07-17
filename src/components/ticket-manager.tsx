@@ -13,7 +13,7 @@ import { MultiSelectFilter } from "./ui/multi-select-filter";
 import { PaginationControls } from "./ui/pagination-controls";
 import { EmptyState } from "./empty-state";
 import { TicketLogBubbles } from "./ticket-log-bubbles";
-import { activeSlaPause, hoursFromMd, isTicketOwner, mapKanbanStatus, mdFromHours, normalizeOwnerEfforts, ownerNamesFromEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
+import { activeSlaPause, hoursFromMd, isTicketOwner, mapKanbanStatus, normalizeOwnerEfforts, ticketEffortHours, ticketLogText, ticketOwnerLabel, ticketSeverityCode, ticketSeverityLabel, totalOwnerEffortHours } from "@/lib/domain";
 import { ticketResponseSlaState, ticketSlaState } from "@/lib/sla";
 import { dateTimeInputValue, formatDateTime, formatIssueType, normalizeDateTime } from "@/lib/utils";
 import type { Category, Customer, Holiday, NamedMaster, Role, Sla, Status, Ticket, TicketLogAttachment } from "@/lib/types";
@@ -154,11 +154,8 @@ function effortPayload(rows: EffortRow[]) {
     "",
     0,
   );
-  const totalHours = totalOwnerEffortHours(ownerEfforts);
   return {
     ownerEfforts,
-    owner: ownerNamesFromEfforts(ownerEfforts),
-    mdUsed: mdFromHours(totalHours),
   };
 }
 
@@ -446,8 +443,7 @@ export function TicketManager({
   async function save(formData: FormData) {
     setBusy(true);
     const payload = {
-      issueId: String(formData.get("issueId")),
-      date: String(formData.get("date")),
+      ...(!editing ? { issueId: String(formData.get("issueId")) } : {}),
       customerKey: String(formData.get("customerKey")),
       issueTitle: String(formData.get("issueTitle")),
       issueType: String(formData.get("issueType")),
@@ -456,7 +452,6 @@ export function TicketManager({
       ...effortPayload(effortRows),
       status: formStatus,
       startDate: normalizeDateTime(String(formData.get("startDate"))),
-      dueDate: formDueDate,
       closeDate: normalizeDateTime(String(formData.get("closeDate")), 17),
       chargeable: formData.get("chargeable") === "on",
       logEntry: {

@@ -11,6 +11,7 @@ export const userSchema = z.object({
   passwordHash: z.string(),
   role: roleSchema,
   active: z.boolean().default(true),
+  authVersion: z.number().int().positive().default(1),
 });
 export type User = z.infer<typeof userSchema>;
 

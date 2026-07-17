@@ -2,9 +2,11 @@ import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { z } from "zod";
 import { getSessionSecret } from "./env";
 import { userRepository } from "./repositories";
-import type { Role } from "./types";
+import { roleSchema } from "./types";
+import { sessionMatchesUser, validLoginUser } from "./auth-policy";
 
 const COOKIE_NAME = "supportdesk_session";
 
@@ -12,13 +14,27 @@ function sessionSecret() {
   return new TextEncoder().encode(getSessionSecret());
 }
 
-export type Session = { userId: string; username: string; name: string; role: Role };
+const sessionSchema = z.object({
+  userId: z.string().min(1),
+  username: z.string().min(1),
+  name: z.string().min(1),
+  role: roleSchema,
+  authVersion: z.number().int().positive().default(1),
+});
+export type Session = z.infer<typeof sessionSchema>;
 
 export async function authenticate(username: string, password: string): Promise<Session | null> {
   const users = await userRepository.list();
-  const user = users.find((candidate) => candidate.username.toLowerCase() === username.toLowerCase() && candidate.active);
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) return null;
-  return { userId: user.id, username: user.username, name: user.name, role: user.role };
+  const user = users.find((candidate) => candidate.username.toLowerCase() === username.trim().toLowerCase());
+  const validUser = await validLoginUser(user, password, bcrypt.compare);
+  if (!validUser) return null;
+  return {
+    userId: validUser.id,
+    username: validUser.username,
+    name: validUser.name,
+    role: validUser.role,
+    authVersion: validUser.authVersion,
+  };
 }
 
 export async function createSession(session: Session) {
@@ -41,7 +57,17 @@ export async function getSession(): Promise<Session | null> {
   if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, sessionSecret());
-    return payload as unknown as Session;
+    const parsed = sessionSchema.safeParse(payload);
+    if (!parsed.success) return null;
+    const user = (await userRepository.list()).find((candidate) => candidate.id === parsed.data.userId);
+    if (!sessionMatchesUser(parsed.data, user)) return null;
+    return {
+      userId: user!.id,
+      username: user!.username,
+      name: user!.name,
+      role: user!.role,
+      authVersion: user!.authVersion,
+    };
   } catch {
     return null;
   }
