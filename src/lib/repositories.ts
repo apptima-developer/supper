@@ -3,6 +3,7 @@ import { customerListSchema, ticketListSchema, historyListSchema, auditListSchem
 import { readJson, readJsonBatch, restoreBackupSet, updateJson } from "./json-store";
 import { recalculateCustomer, ticketDiff } from "./domain";
 import { getDataBackend } from "./env";
+import { usesRelationalCoreStorage } from "./storage-routing";
 
 const paths = {
   customers: "core/customers.json",
@@ -40,7 +41,7 @@ const specs = {
 } as const;
 
 function relationalEnabled() {
-  return getDataBackend() === "supabase-relational";
+  return usesRelationalCoreStorage(getDataBackend());
 }
 
 async function relational() {

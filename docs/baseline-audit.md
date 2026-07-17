@@ -1,14 +1,16 @@
 # SUPPER Baseline Audit
 
-Phase: 0.1 - Reproducible Baseline and Test Stabilization
+Phase: 0.1.1 - Reproducible Baseline and Auxiliary Storage Correction
 
 ## Supported Storage Modes
 
 SUPPER currently supports three storage modes through `DATA_BACKEND`:
 
-- `local-json`: reads and writes JSON files under `data/`. Intended for local development only.
-- `supabase`: reads and writes JSONB rows in the `app_store` table.
-- `supabase-relational`: reads and writes relational `support_*` tables.
+- `local-json`: core business data and auxiliary JSON artifacts read and write files under `data/`. Intended for local development only.
+- `supabase`: core business data and auxiliary JSON artifacts read and write JSONB rows in the `app_store` table.
+- `supabase-relational`: core business entities read and write relational `support_*` tables. Auxiliary JSON artifacts that have not yet been migrated continue to use Supabase `app_store`.
+
+The application treats core business storage and auxiliary JSON storage as separate routing decisions. In `supabase-relational` mode, import mapping overrides, Settings backups, backup restoration, and any remaining `json-store` consumers must use `app_store`; they must never fall back to the Vercel filesystem. Supabase-backed modes propagate configuration, connection, and permission failures instead of silently writing local files.
 
 If `DATA_BACKEND` is omitted:
 
@@ -44,7 +46,9 @@ Required for monthly report export at runtime:
 Import mapping configuration:
 
 - source defaults live in `src/lib/import-mappings.ts`
-- optional runtime override may exist at `data/imports/mappings.json`
+- in `local-json` mode, an optional runtime override may exist at `data/imports/mappings.json`
+- in `supabase` and `supabase-relational` modes, the optional override uses the `imports/mappings.json` key in `app_store`
+- only a genuinely missing optional override falls back to source defaults; Supabase failures remain visible
 
 Missing report templates do not affect unit tests or production builds. Monthly report export fails at runtime with an actionable missing-template error if a required template is absent.
 
@@ -93,6 +97,7 @@ No session required:
 - Generated monthly report exports require the template files listed above.
 - Import Center supports source defaults and optional mapping overrides, but production-specific aliases should still be managed carefully outside test fixtures.
 - Local JSON storage is retained for development and compatibility; production should use a Supabase backend unless intentionally configured otherwise.
+- `supabase-relational` still depends on `app_store` for auxiliary JSON artifacts. Migrating those artifacts to dedicated tables or object storage requires a later explicit phase.
 
 ## Safe Local Startup Procedure
 

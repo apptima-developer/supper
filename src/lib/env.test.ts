@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getDataBackend, getSessionSecret, validateRuntimeEnvironment } from "./env";
+import { getDataBackend, getSessionSecret, isSupabaseBackend, validateRuntimeEnvironment } from "./env";
 
 describe("server environment validation", () => {
   it("allows the local-json backend without Supabase variables", () => {
@@ -29,5 +29,9 @@ describe("server environment validation", () => {
       DATA_BACKEND: "local-json",
       SESSION_SECRET: "0123456789abcdef0123456789abcdef",
     }).ok).toBe(true);
+
+    expect(isSupabaseBackend({ DATA_BACKEND: "supabase" })).toBe(true);
+    expect(isSupabaseBackend({ DATA_BACKEND: "supabase-relational" })).toBe(true);
+    expect(isSupabaseBackend({ DATA_BACKEND: "local-json" })).toBe(false);
   });
 });

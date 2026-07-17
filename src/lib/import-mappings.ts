@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { readJson } from "./json-store";
+import { isJsonStoreRecordNotFoundError, readJson } from "./json-store";
 
 export const importMappingsSchema = z.object({
   snow: z.record(z.string(), z.string()),
@@ -32,6 +32,11 @@ export const defaultImportMappings: ImportMappings = {
   },
 };
 
+type RuntimeImportMappingsReader = (
+  relativePath: string,
+  schema: typeof importMappingsSchema,
+) => Promise<ImportMappings>;
+
 function mergeImportMappings(runtime: Partial<ImportMappings>): ImportMappings {
   return importMappingsSchema.parse({
     snow: { ...defaultImportMappings.snow, ...(runtime.snow || {}) },
@@ -44,17 +49,19 @@ function mergeImportMappings(runtime: Partial<ImportMappings>): ImportMappings {
   });
 }
 
-export async function loadImportMappings(overrides?: Partial<ImportMappings>) {
+export async function loadImportMappings(
+  overrides?: Partial<ImportMappings>,
+  runtimeReader: RuntimeImportMappingsReader = readJson,
+) {
   if (overrides) return mergeImportMappings(overrides);
   try {
-    const runtime = await readJson("imports/mappings.json", importMappingsSchema);
+    const runtime = await runtimeReader("imports/mappings.json", importMappingsSchema);
     return mergeImportMappings(runtime);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    const message = error instanceof Error ? error.message : "";
     const optionalRuntimeMappingMissing =
       code === "ENOENT" ||
-      message.startsWith("Supabase storage is required to read imports/mappings.json");
+      isJsonStoreRecordNotFoundError(error);
     if (!optionalRuntimeMappingMissing) throw error;
     return defaultImportMappings;
   }

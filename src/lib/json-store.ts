@@ -2,12 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ZodType } from "zod";
 import { getDataBackend } from "./env";
+import { resolveStorageRouting } from "./storage-routing";
 
 const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
-const dataBackend = getDataBackend();
-const supabaseEnabled = dataBackend === "supabase";
-const strictSupabase = supabaseEnabled;
+const auxiliaryJsonStorage = resolveStorageRouting(getDataBackend()).auxiliaryJson;
+const usesSupabaseAppStore = auxiliaryJsonStorage === "supabase-app-store";
 
 type StoreModule = typeof import("./store");
 type JsonBatchSpec = Record<string, { path: string; schema: ZodType }>;
@@ -19,10 +19,21 @@ async function store(): Promise<StoreModule> {
   return import("./store");
 }
 
-function supabaseRequiredError(action: string, relativePath = "data") {
-  return new Error(
-    `Supabase storage is required to ${action} ${relativePath}. ` +
-    "Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, run scripts/supabase-app-store.sql, then run npm run supabase:seed.",
+export class JsonStoreRecordNotFoundError extends Error {
+  readonly code = "JSON_STORE_RECORD_NOT_FOUND";
+
+  constructor(readonly relativePath: string) {
+    super(`Supabase app_store record not found: ${relativePath}`);
+    this.name = "JsonStoreRecordNotFoundError";
+  }
+}
+
+export function isJsonStoreRecordNotFoundError(error: unknown): error is JsonStoreRecordNotFoundError {
+  return error instanceof JsonStoreRecordNotFoundError || (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "JSON_STORE_RECORD_NOT_FOUND"
   );
 }
 
@@ -38,16 +49,11 @@ async function readFileJson<T>(relativePath: string, schema: ZodType<T>): Promis
 }
 
 export async function readJson<T>(relativePath: string, schema: ZodType<T>): Promise<T> {
-  if (supabaseEnabled) {
-    try {
-      const value = await (await store()).getStore<T>(relativePath);
-      if (value !== undefined) return schema.parse(value);
-    } catch (error) {
-      if (strictSupabase) throw error;
-      console.warn(`Supabase read failed for ${relativePath}; falling back to local data/.`);
-    }
+  if (usesSupabaseAppStore) {
+    const value = await (await store()).getStore<T>(relativePath);
+    if (value === undefined) throw new JsonStoreRecordNotFoundError(relativePath);
+    return schema.parse(value);
   }
-  if (strictSupabase) throw supabaseRequiredError("read", relativePath);
   return readFileJson(relativePath, schema);
 }
 
@@ -55,27 +61,16 @@ export async function readJsonBatch<T extends JsonBatchSpec>(specs: T): Promise<
   const entries = Object.entries(specs) as Array<[keyof T & string, T[keyof T]]>;
   const paths = entries.map(([, spec]) => spec.path);
 
-  if (supabaseEnabled) {
-    try {
-      const values = await (await store()).getStores(paths);
-      const result: Partial<JsonBatchResult<T>> = {};
-      for (const [name, spec] of entries) {
-        const value = values[spec.path];
-        if (value === undefined) {
-          if (strictSupabase) throw supabaseRequiredError("read", spec.path);
-          result[name] = await readFileJson(spec.path, spec.schema) as JsonBatchResult<T>[keyof T];
-        } else {
-          result[name] = spec.schema.parse(value) as JsonBatchResult<T>[keyof T];
-        }
-      }
-      return result as JsonBatchResult<T>;
-    } catch (error) {
-      if (strictSupabase) throw error;
-      console.warn(`Supabase batch read failed for ${paths.join(", ")}; falling back to local data/.`);
+  if (usesSupabaseAppStore) {
+    const values = await (await store()).getStores(paths);
+    const result: Partial<JsonBatchResult<T>> = {};
+    for (const [name, spec] of entries) {
+      const value = values[spec.path];
+      if (value === undefined) throw new JsonStoreRecordNotFoundError(spec.path);
+      result[name] = spec.schema.parse(value) as JsonBatchResult<T>[keyof T];
     }
+    return result as JsonBatchResult<T>;
   }
-
-  if (strictSupabase) throw supabaseRequiredError("read", paths.join(", "));
 
   const pairs = await Promise.all(entries.map(async ([name, spec]) => [
     name,
@@ -88,21 +83,15 @@ export async function writeJsonAtomic<T>(relativePath: string, value: T, schema:
   const parsed = schema.parse(value);
   const suffix = `${Date.now()}-${crypto.randomUUID()}`;
 
-  if (supabaseEnabled) {
-    try {
-      const current = await (await store()).getStore<T>(relativePath);
-      if (current !== undefined) {
-        const backupName = `backups/${path.dirname(relativePath)}/${path.basename(relativePath, ".json")}-${suffix}.json`;
-        await (await store()).setStore(backupName, current);
-      }
-      await (await store()).setStore(relativePath, parsed);
-      return parsed;
-    } catch (error) {
-      if (strictSupabase) throw error;
-      console.warn(`Supabase write failed for ${relativePath}; falling back to local data/.`);
+  if (usesSupabaseAppStore) {
+    const current = await (await store()).getStore<T>(relativePath);
+    if (current !== undefined) {
+      const backupName = `backups/${path.dirname(relativePath)}/${path.basename(relativePath, ".json")}-${suffix}.json`;
+      await (await store()).setStore(backupName, current);
     }
+    await (await store()).setStore(relativePath, parsed);
+    return parsed;
   }
-  if (strictSupabase) throw supabaseRequiredError("write", relativePath);
 
   const target = dataPath(relativePath);
   const directory = path.dirname(target);
@@ -135,16 +124,10 @@ export function updateJson<T>(relativePath: string, schema: ZodType<T>, updater:
 }
 
 export async function listBackups() {
-  if (supabaseEnabled) {
-    try {
-      const keys = await (await store()).listStoreKeys("backups/");
-      return keys.filter((key) => key.endsWith(".json")).sort().reverse();
-    } catch (error) {
-      if (strictSupabase) throw error;
-      console.warn("Supabase backup listing failed; falling back to local data/backups.");
-    }
+  if (usesSupabaseAppStore) {
+    const keys = await (await store()).listStoreKeys("backups/");
+    return keys.filter((key) => key.endsWith(".json")).sort().reverse();
   }
-  if (strictSupabase) throw supabaseRequiredError("list backups from", "backups/");
 
   const root = path.join(DATA_ROOT, "backups");
   const results: string[] = [];
@@ -175,24 +158,18 @@ function backupTarget(relativeBackupPath: string) {
 export async function restoreBackup(relativeBackupPath: string) {
   const { target } = backupTarget(relativeBackupPath);
 
-  if (supabaseEnabled) {
-    try {
-      const raw = await (await store()).getStore<unknown>(relativeBackupPath);
-      if (raw === undefined) throw new Error("Backup not found");
-      const current = await (await store()).getStore<unknown>(target);
-      if (current !== undefined) {
-        const suffix = `${Date.now()}-${crypto.randomUUID()}`;
-        const preRestoreBackup = `backups/${path.dirname(target)}/${path.basename(target, ".json")}-${suffix}.json`;
-        await (await store()).setStore(preRestoreBackup, current);
-      }
-      await (await store()).setStore(target, raw);
-      return target;
-    } catch (error) {
-      if (strictSupabase) throw error;
-      console.warn(`Supabase restore failed for ${relativeBackupPath}; falling back to local data/backups.`);
+  if (usesSupabaseAppStore) {
+    const raw = await (await store()).getStore<unknown>(relativeBackupPath);
+    if (raw === undefined) throw new JsonStoreRecordNotFoundError(relativeBackupPath);
+    const current = await (await store()).getStore<unknown>(target);
+    if (current !== undefined) {
+      const suffix = `${Date.now()}-${crypto.randomUUID()}`;
+      const preRestoreBackup = `backups/${path.dirname(target)}/${path.basename(target, ".json")}-${suffix}.json`;
+      await (await store()).setStore(preRestoreBackup, current);
     }
+    await (await store()).setStore(target, raw);
+    return target;
   }
-  if (strictSupabase) throw supabaseRequiredError("restore backup", relativeBackupPath);
 
   const source = dataPath(relativeBackupPath);
   const raw = JSON.parse(await fs.readFile(source, "utf8"));
