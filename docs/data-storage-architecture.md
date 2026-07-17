@@ -10,7 +10,7 @@ Phase 0.2 freezes the routing approved in Phase 0.1.1. It does not migrate produ
 | `supabase` | Supabase `app_store` JSONB rows | Supabase `app_store` JSONB rows | Existing hosted compatibility mode |
 | `supabase-relational` | Relational `support_*` tables | Supabase `app_store` JSONB rows | Target production architecture |
 
-Core entities include customers, tickets, ticket history, audit records, users, import batches, report jobs, and shared master data. Auxiliary JSON consumers include import mapping overrides and Settings backups. `supabase-relational` intentionally continues to use `app_store` for those auxiliary records.
+Core entities include customers, tickets, ticket history, audit records, users, import batches, report jobs, and shared master data. Auxiliary JSON consumers include import mapping overrides and their Settings backups. `supabase-relational` intentionally continues to use `app_store` for the active `imports/mappings.json` record and its snapshots.
 
 The routing decision is centralized in `src/lib/storage-routing.ts`. Repositories use relational functions only when core routing resolves to `supabase-relational`; `src/lib/json-store.ts` independently resolves auxiliary storage. Supabase-backed errors remain visible and must never fall back to the Vercel filesystem.
 
@@ -18,12 +18,12 @@ The routing decision is centralized in `src/lib/storage-routing.ts`. Repositorie
 
 - Pages load data through `src/lib/repositories.ts`, which selects the core repository backend.
 - Customer, ticket, user, master, import, audit, and report mutations use the same repository boundary.
-- `src/lib/json-store.ts` handles auxiliary JSON reads, atomic writes, backups, and restoration.
+- `src/lib/json-store.ts` handles auxiliary JSON reads, atomic writes, backups, and restoration under the centralized backend-aware restore policy.
 - Import mapping overrides use `json-store`; only a genuinely absent optional override may use source defaults.
 - Report assets use relational storage only in `supabase-relational`; legacy modes retain their existing behavior.
 - Login throttling is separate security state: Supabase modes use `support_login_rate_limits`; local development uses process memory.
 
-Existing routing regression tests cover all three modes, app_store failure propagation, backup listing/restoration, and the absence of local fallback.
+Existing routing regression tests cover all three modes, app_store failure propagation, backup listing/restoration, and the absence of local fallback. In `supabase-relational`, Settings lists and restores only active auxiliary `imports/mappings.json` snapshots. Legacy core JSON snapshots are inactive because their contents cannot update the active relational `support_*` tables; attempts are rejected with HTTP 409 before any app_store write. Relational import rollback remains a separate snapshot mechanism and is unchanged.
 
 ## Production target and limitations
 

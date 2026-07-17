@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { DataBackend } from "./env";
 
 const backupPath = "backups/imports/mappings-1700000000000-aabbccdd.json";
+const coreBackupPath = "backups/core/tickets-1700000000000-aabbccdd.json";
 
 const fsMocks = {
   access: vi.fn(),
@@ -39,7 +40,7 @@ describe("json-store backend behavior", () => {
     fsMocks.rename.mockResolvedValue(undefined);
     storeMocks.listStoreKeys.mockResolvedValue([backupPath]);
     storeMocks.getStore.mockImplementation(async (key: string) => (
-      key === backupPath ? { source: true } : { current: true }
+      key === backupPath || key === coreBackupPath ? { source: true } : { current: true }
     ));
     storeMocks.setStore.mockResolvedValue(undefined);
   });
@@ -60,6 +61,33 @@ describe("json-store backend behavior", () => {
     expect(fsMocks.readFile).toHaveBeenCalled();
     expect(storeMocks.listStoreKeys).not.toHaveBeenCalled();
     expect(storeMocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("keeps local core JSON backup restoration active", async () => {
+    const jsonStore = await loadJsonStore("local-json");
+    await expect(jsonStore.restoreBackup(coreBackupPath)).resolves.toBe("core/tickets.json");
+    expect(fsMocks.readFile).toHaveBeenCalled();
+    expect(storeMocks.setStore).not.toHaveBeenCalled();
+  });
+
+  it("keeps Supabase app_store core backup restoration active", async () => {
+    const jsonStore = await loadJsonStore("supabase");
+    await expect(jsonStore.restoreBackup(coreBackupPath)).resolves.toBe("core/tickets.json");
+    expect(storeMocks.setStore).toHaveBeenCalledWith("core/tickets.json", { source: true });
+  });
+
+  it("filters and rejects inactive relational core JSON without any app_store write", async () => {
+    const jsonStore = await loadJsonStore("supabase-relational");
+    storeMocks.listStoreKeys.mockResolvedValueOnce([coreBackupPath, backupPath]);
+
+    await expect(jsonStore.listBackups()).resolves.toEqual([backupPath]);
+    await expect(jsonStore.restoreBackup(coreBackupPath)).rejects.toMatchObject({
+      status: 409,
+      code: "INACTIVE_BACKUP_TARGET",
+      target: "core/tickets.json",
+    });
+    expect(storeMocks.getStore).not.toHaveBeenCalled();
+    expect(storeMocks.setStore).not.toHaveBeenCalled();
   });
 
   it.each(["supabase", "supabase-relational"] as const)(

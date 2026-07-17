@@ -3,29 +3,13 @@ import path from "node:path";
 import type { ZodType } from "zod";
 import { getDataBackend } from "./env";
 import { resolveStorageRouting } from "./storage-routing";
+import { assertActiveBackupTarget, isActiveBackupTarget, isKnownBackupTarget } from "./backup-restore-policy";
 
 const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
-const auxiliaryJsonStorage = resolveStorageRouting(getDataBackend()).auxiliaryJson;
+const dataBackend = getDataBackend();
+const auxiliaryJsonStorage = resolveStorageRouting(dataBackend).auxiliaryJson;
 const usesSupabaseAppStore = auxiliaryJsonStorage === "supabase-app-store";
-const restorableTargets = new Set([
-  "audit/audit-log.json",
-  "auth/users.json",
-  "core/customers.json",
-  "core/ticket-history.json",
-  "core/tickets.json",
-  "imports/import-batches.json",
-  "imports/mappings.json",
-  "master/categories.json",
-  "master/contract-types.json",
-  "master/holidays.json",
-  "master/issue-types.json",
-  "master/priorities.json",
-  "master/sla.json",
-  "master/statuses.json",
-  "master/teams.json",
-  "reports/report-jobs.json",
-]);
 
 type StoreModule = typeof import("./store");
 type JsonBatchSpec = Record<string, { path: string; schema: ZodType }>;
@@ -144,7 +128,7 @@ export function updateJson<T>(relativePath: string, schema: ZodType<T>, updater:
 export async function listBackups() {
   if (usesSupabaseAppStore) {
     const keys = await (await store()).listStoreKeys("backups/");
-    return keys.filter((key) => key.endsWith(".json")).sort().reverse();
+    return keys.filter(isActiveBackupPath).sort().reverse();
   }
 
   const root = path.join(DATA_ROOT, "backups");
@@ -161,7 +145,15 @@ export async function listBackups() {
     }
   }
   await walk(root);
-  return results.sort().reverse();
+  return results.filter(isActiveBackupPath).sort().reverse();
+}
+
+function isActiveBackupPath(relativeBackupPath: string) {
+  try {
+    return isActiveBackupTarget(dataBackend, backupTarget(relativeBackupPath).target);
+  } catch {
+    return false;
+  }
 }
 
 export function backupTarget(relativeBackupPath: string) {
@@ -174,12 +166,13 @@ export function backupTarget(relativeBackupPath: string) {
   if (!match) throw new Error("Unrecognized backup name");
   const target = path.posix.join(directory, `${match[1]}.json`);
   dataPath(target);
-  if (!restorableTargets.has(target)) throw new Error("Unknown backup target");
+  if (!isKnownBackupTarget(target)) throw new Error("Unknown backup target");
   return { target, timestamp: Number(match[2]) };
 }
 
 export async function restoreBackup(relativeBackupPath: string) {
   const { target } = backupTarget(relativeBackupPath);
+  assertActiveBackupTarget(dataBackend, target);
 
   if (usesSupabaseAppStore) {
     const raw = await (await store()).getStore<unknown>(relativeBackupPath);

@@ -1,6 +1,6 @@
 # SUPPER Baseline Audit
 
-Phase: 0.2 - Data and Security Foundation (includes the approved Phase 0.1.1 storage baseline)
+Phase: 0.2.1 - Close Remaining Security and Storage Gaps (includes the approved Phase 0.2 foundation)
 
 ## Supported Storage Modes
 
@@ -10,7 +10,7 @@ SUPPER currently supports three storage modes through `DATA_BACKEND`:
 - `supabase`: core business data and auxiliary JSON artifacts read and write JSONB rows in the `app_store` table.
 - `supabase-relational`: core business entities read and write relational `support_*` tables. Auxiliary JSON artifacts that have not yet been migrated continue to use Supabase `app_store`.
 
-The application treats core business storage and auxiliary JSON storage as separate routing decisions. In `supabase-relational` mode, import mapping overrides, Settings backups, backup restoration, and any remaining `json-store` consumers must use `app_store`; they must never fall back to the Vercel filesystem. Supabase-backed modes propagate configuration, connection, and permission failures instead of silently writing local files.
+The application treats core business storage and auxiliary JSON storage as separate routing decisions. In `supabase-relational` mode, the active import mapping override and its Settings backups use `app_store`; legacy core JSON backups are not active restore targets and cannot report a successful relational restore. Supabase-backed modes propagate configuration, connection, and permission failures instead of silently writing local files.
 
 If `DATA_BACKEND` is omitted:
 
@@ -100,6 +100,8 @@ No session required:
 - `GET /api/health/live`: no external connections; returns application name, status, and version.
 - `GET /api/health/ready`: validates runtime configuration without exposing secrets.
 
+The proxy processes safe methods before configuration-dependent Origin evaluation. Liveness therefore remains HTTP 200 without `APP_ORIGIN`, `SESSION_SECRET`, or Supabase access, while invalid readiness configuration produces the route's sanitized HTTP 503 rather than a proxy HTTP 403. Browser mutations, including login, remain Origin-protected.
+
 ## Known Limitations
 
 - Monthly report factory still uses local runtime files under `data/reports/monthly` and local Excel templates.
@@ -128,7 +130,7 @@ npm run dev
 
 ## Baseline Results
 
-The clean Phase 0.2 starting point was `main` at approved commit `995d8ddb4795c0e16c9504cbf806fe6a64c648a9` or later. Before modification, `git pull --ff-only origin main` reported up to date; 51 tests, lint, and the Next.js production build passed.
+The clean Phase 0.2.1 starting point was `main` at `ed1ef4c5af3b7aa7fe16f9c4f4cd20ed2853c107` (`chore: harden SUPPER data and security foundation`). Before modification, `git pull --ff-only origin main` reported up to date. `npm ci` succeeded; 70 tests in 10 files, lint, the Next.js 16.2.9 production build, runtime asset verification, and migration verification all passed.
 
 Phase 0.2 verification covers:
 

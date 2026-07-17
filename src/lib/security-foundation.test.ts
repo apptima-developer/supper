@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { backupTarget } from "./json-store";
 import { restoreBackupAsAdmin } from "./backup-service";
+import { activeRestorableTargets, InactiveBackupTargetError, isActiveBackupTarget } from "./backup-restore-policy";
 import { dummyPasswordHash, genericAuthenticationFailure, sessionMatchesUser, validLoginUser } from "./auth-policy";
 import { createLoginRateLimitKey, createMemoryLoginRateLimitStore, loginRateLimitStorageDescription } from "./login-rate-limit";
 import { accountCreateSchema, accountUpdateSchema, customerCreateSchema, passwordSchema, ticketCreateSchema, ticketUserUpdateSchema } from "./mutation-schemas";
 import { validateInlineImageDataUrl, validateSpreadsheetUpload } from "./request-limits";
-import { assertContentLength, HttpError, isSameOriginRequest, readLimitedBodyBytes } from "./request-security";
+import { assertContentLength, HttpError, isSameOriginRequest, maximumLoginBodyBytes, readLimitedBodyBytes, readLoginFormBody, safeErrorResponse } from "./request-security";
 import { buildSecurityHeaders } from "./security-headers";
 import { redactSensitive } from "./server-logging";
 import { toAdminUserDto } from "./user-dto";
+import { resolveRelationalImportSnapshotMarker } from "./import-rollback-policy";
 import type { Session } from "./auth";
 import type { User } from "./types";
 
@@ -147,6 +149,58 @@ describe("same-origin and request limits", () => {
     await expect(readLimitedBodyBytes(new Request("https://app.test", { method: "POST", body: "1234" }), 4)).resolves.toHaveLength(4);
     await expect(readLimitedBodyBytes(new Request("https://app.test", { method: "POST", body: "12345" }), 4)).rejects.toMatchObject({ status: 413 });
   });
+
+  it("parses only bounded URL-encoded login forms", async () => {
+    const headers = { "content-type": "application/x-www-form-urlencoded" };
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers,
+      body: "username=operator&password=correct-horse",
+    }))).resolves.toEqual({ username: "operator", password: "correct-horse" });
+
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers,
+      body: "x".repeat(maximumLoginBodyBytes),
+    }))).resolves.toEqual({ username: "", password: "" });
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers,
+      body: "x".repeat(maximumLoginBodyBytes + 1),
+    }))).rejects.toMatchObject({ status: 413 });
+  });
+
+  it("enforces actual login bytes despite absent or misleading Content-Length", async () => {
+    const oversized = "x".repeat(maximumLoginBodyBytes + 1);
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: oversized,
+    }))).rejects.toMatchObject({ status: 413 });
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", "content-length": "1" },
+      body: oversized,
+    }))).rejects.toMatchObject({ status: 413 });
+  });
+
+  it("rejects unsupported or malformed login bodies and keeps absent passwords generic", async () => {
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data" },
+      body: "username=operator",
+    }))).rejects.toMatchObject({ status: 415 });
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "username=%ZZ&password=value",
+    }))).rejects.toMatchObject({ status: 400 });
+    await expect(readLoginFormBody(new Request("https://app.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "username=operator",
+    }))).resolves.toEqual({ username: "operator", password: "" });
+  });
 });
 
 describe("upload validation", () => {
@@ -176,10 +230,55 @@ describe("backup, DTO, headers, and redaction", () => {
     const audit = vi.fn(async () => undefined);
     const admin = { ...session, role: "admin" as const };
     await expect(restoreBackupAsAdmin(admin, "backup-key", { restore: async () => "core/tickets.json", audit, now: () => new Date("2026-07-17T00:00:00.000Z") })).resolves.toMatchObject({ target: "core/tickets.json", result: "success" });
-    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ actor: "operator", details: { target: "core/tickets.json", restoredAt: "2026-07-17T00:00:00.000Z", result: "success" } }));
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ actor: "operator", details: expect.objectContaining({ target: "core/tickets.json", restoredAt: "2026-07-17T00:00:00.000Z", result: "success" }) }));
     await expect(restoreBackupAsAdmin(session, "backup-key", { restore: async () => "never", audit })).rejects.toMatchObject({ status: 403 });
     const storageFailure = new Error("storage denied");
     await expect(restoreBackupAsAdmin(admin, "backup-key", { restore: async () => { throw storageFailure; }, audit })).rejects.toBe(storageFailure);
+  });
+
+  it("reports restore success with a correlation warning when only audit recording fails", async () => {
+    const auditFailure = new Error("audit unavailable");
+    const logCritical = vi.fn();
+    const admin = { ...session, role: "admin" as const };
+    await expect(restoreBackupAsAdmin(admin, "backup-key", {
+      restore: async () => "imports/mappings.json",
+      audit: async () => { throw auditFailure; },
+      operationId: "operation-12345678",
+      logCritical,
+    })).resolves.toMatchObject({
+      target: "imports/mappings.json",
+      result: "success",
+      audit: "failed",
+      operationId: "operation-12345678",
+    });
+    expect(logCritical).toHaveBeenCalledWith("RESTORE_SUCCEEDED_AUDIT_FAILED", auditFailure, {
+      operationId: "operation-12345678",
+      target: "imports/mappings.json",
+      actor: "operator",
+    });
+    expect(JSON.stringify(logCritical.mock.calls)).not.toContain("backup-key");
+  });
+
+  it("routes active restores by backend while leaving relational import rollback markers unchanged", () => {
+    expect(isActiveBackupTarget("local-json", "core/tickets.json")).toBe(true);
+    expect(isActiveBackupTarget("supabase", "core/tickets.json")).toBe(true);
+    expect(activeRestorableTargets("supabase-relational")).toEqual(["imports/mappings.json"]);
+    expect(isActiveBackupTarget("supabase-relational", "core/tickets.json")).toBe(false);
+    expect(resolveRelationalImportSnapshotMarker(["relational:snapshot-1", "backups/core/tickets-old.json"]))
+      .toEqual({ marker: "relational:snapshot-1", snapshotId: "snapshot-1" });
+  });
+
+  it("returns a conflict response instead of false success for inactive relational JSON", async () => {
+    const response = safeErrorResponse(
+      new InactiveBackupTargetError("supabase-relational", "core/tickets.json"),
+      "Could not restore backup",
+      new Request("https://app.example.test/api/settings/restore"),
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "INACTIVE_BACKUP_TARGET",
+      error: "Backup target is not active for supabase-relational storage",
+    });
   });
 
   it("rejects malformed backup paths", () => {

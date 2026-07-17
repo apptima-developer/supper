@@ -88,6 +88,32 @@ export async function readLimitedBodyBytes(request: Request, maxBytes: number) {
   return body;
 }
 
+export const maximumLoginBodyBytes = 16 * 1024;
+
+export async function readLoginFormBody(request: Request, maximumBytes = maximumLoginBodyBytes) {
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/x-www-form-urlencoded") {
+    throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/x-www-form-urlencoded");
+  }
+
+  const bytes = await readLimitedBodyBytes(request, maximumBytes);
+  let body: string;
+  try {
+    body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new HttpError(400, "INVALID_FORM_BODY", "Request body must contain valid form data");
+  }
+  if (/%(?![0-9a-f]{2})/i.test(body)) {
+    throw new HttpError(400, "INVALID_FORM_BODY", "Request body must contain valid form data");
+  }
+
+  const form = new URLSearchParams(body);
+  return {
+    username: form.get("username") || "",
+    password: form.get("password") || "",
+  };
+}
+
 export async function readJsonBody<T>(request: Request, schema: ZodType<T>, maximumBytes = getRequestLimits().maxJsonBodyBytes): Promise<T> {
   const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") {
@@ -105,6 +131,10 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>, maxi
 
 const safeMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 
+export function isSafeMethod(method: string) {
+  return safeMethods.has(method.toUpperCase());
+}
+
 export function isSameOriginRequest({
   method,
   requestUrl,
@@ -116,7 +146,7 @@ export function isSameOriginRequest({
   origin: string | null;
   configuredOrigin: string | null;
 }) {
-  if (safeMethods.has(method.toUpperCase())) return true;
+  if (isSafeMethod(method)) return true;
   if (!origin) return false;
   try {
     const expected = configuredOrigin || new URL(requestUrl).origin;

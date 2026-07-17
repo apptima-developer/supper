@@ -27,3 +27,13 @@ export function logServerError(event: string, error: unknown, context: Record<st
     timestamp: new Date().toISOString(),
   }));
 }
+
+export function logServerCritical(event: string, error: unknown, context: Record<string, unknown> = {}) {
+  console.error(JSON.stringify({
+    level: "critical",
+    event,
+    error: sanitize(error, 0),
+    context: sanitize(context, 0),
+    timestamp: new Date().toISOString(),
+  }));
+}

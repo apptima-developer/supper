@@ -24,9 +24,9 @@ Monthly report runtime files remain a documented deployment limitation and are n
 
 ## Production security setup
 
-Before deploying Phase 0.2:
+Before deploying Phase 0.2.1:
 
-1. Apply the reviewed SQL in `supabase/migrations/202607170001_security_foundation.sql` through the Supabase SQL Editor or an approved migration runner.
+1. Apply the reviewed SQL migrations in version order through the Supabase SQL Editor or an approved migration runner: `202607170001_security_foundation.sql`, then `202607170002_security_foundation_corrections.sql`.
 2. Configure `SESSION_SECRET`, `RATE_LIMIT_PEPPER`, and `APP_ORIGIN` in the hosting environment.
 3. Configure the selected storage backend and its Supabase server credentials.
 4. Run the verification commands below.

@@ -4,6 +4,7 @@ import { readJson, readJsonBatch, restoreBackupSet, updateJson } from "./json-st
 import { recalculateCustomer, ticketDiff } from "./domain";
 import { getDataBackend } from "./env";
 import { usesRelationalCoreStorage } from "./storage-routing";
+import { resolveRelationalImportSnapshotMarker } from "./import-rollback-policy";
 
 const paths = {
   customers: "core/customers.json",
@@ -465,9 +466,8 @@ export async function replaceImportedCoreData({
 
 export async function restoreImportedCoreDataBackup(paths: string[]) {
   if (relationalEnabled()) {
-    const marker = paths.find((path) => path.startsWith("relational:"));
-    if (!marker) throw new Error("Relational import snapshot not found for this batch");
-    const restored = await (await relational()).restoreImportSnapshot(marker.slice("relational:".length));
+    const { marker, snapshotId } = resolveRelationalImportSnapshotMarker(paths);
+    const restored = await (await relational()).restoreImportSnapshot(snapshotId);
     return [marker, restored];
   }
   return restoreBackupSet(paths);
