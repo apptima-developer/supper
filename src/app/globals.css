@@ -362,3 +362,77 @@ html.theme-dark main tbody tr[class~="bg-slate-200/60"]:hover,
 html.theme-dark main tbody tr[class~="bg-slate-200/70"]:hover {
   background-color: rgba(71, 85, 105, .74);
 }
+
+@media (max-width: 1023px) {
+  .mobile-form-table,
+  .mobile-form-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .mobile-form-table thead {
+    display: none;
+  }
+
+  .mobile-form-table tbody {
+    display: grid;
+    gap: .75rem;
+    padding: .75rem;
+  }
+
+  .mobile-form-table tr {
+    position: relative;
+    display: grid;
+    gap: .75rem;
+    width: 100%;
+    padding: 1rem;
+    border: 1px solid rgba(186, 230, 253, .8);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, .86);
+    box-shadow: 0 12px 35px rgba(35, 77, 112, .07);
+  }
+
+  .mobile-form-table td {
+    display: block;
+    width: 100% !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+  }
+
+  .mobile-form-table td:not([data-action]) {
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  .mobile-form-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: .35rem;
+    color: rgb(148 163 184);
+    font-size: .625rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    line-height: 1rem;
+    text-transform: uppercase;
+  }
+
+  .mobile-form-table td[data-action] {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: .25rem !important;
+    border-top: 1px solid rgba(186, 230, 253, .65);
+  }
+
+  html.theme-dark .mobile-form-table tr {
+    background: rgba(15, 23, 42, .82);
+    border-color: rgba(56, 189, 248, .2);
+    box-shadow: 0 16px 38px rgba(0, 0, 0, .22);
+  }
+
+  html.theme-dark .mobile-form-table td[data-action] {
+    border-color: rgba(56, 189, 248, .16);
+  }
+}

@@ -141,7 +141,7 @@ export function AccountManager({ initialUsers, currentUserId }: { initialUsers: 
           <span className="text-[10px] text-slate-400">{users.length} users</span>
         </CardHeader>
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-[12px]">
+          <table className="mobile-form-table w-full text-left text-[12px]">
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-4 py-2.5">Username</th>
@@ -159,28 +159,28 @@ export function AccountManager({ initialUsers, currentUserId }: { initialUsers: 
                 const self = user.id === currentUserId;
                 return (
                   <tr key={user.id} className="border-t hover:bg-slate-50/70">
-                    <td className="min-w-44 px-4 py-2">
+                    <td data-label="Username" className="min-w-44 px-4 py-2">
                       <Input value={draft.username} onChange={(event) => patchDraft(user, { username: event.target.value })} />
                       {self && <p className="mt-0.5 text-[10px] text-slate-400">Current admin</p>}
                     </td>
-                    <td className="min-w-44 px-4 py-2">
+                    <td data-label="New password" className="min-w-44 px-4 py-2">
                       <Input type="password" minLength={12} value={draft.password} placeholder="Leave blank to keep" autoComplete="new-password" onChange={(event) => patchDraft(user, { password: event.target.value })} />
                     </td>
-                    <td className="min-w-56 px-4 py-2">
+                    <td data-label="Email" className="min-w-56 px-4 py-2">
                       <Input type="email" value={draft.email} onChange={(event) => patchDraft(user, { email: event.target.value })} />
                     </td>
-                    <td className="min-w-36 px-4 py-2">
+                    <td data-label="Role" className="min-w-36 px-4 py-2">
                       <Select value={draft.role} onChange={(event) => patchDraft(user, { role: event.target.value as Role })}>
                         {roles.map((role) => <option key={role} value={role}>{role}</option>)}
                       </Select>
                     </td>
-                    <td className="px-4 py-2">
+                    <td data-label="Status" className="px-4 py-2">
                       <label className="flex items-center gap-2 text-[12px] font-medium text-slate-700">
                         <input type="checkbox" checked={draft.active} onChange={(event) => patchDraft(user, { active: event.target.checked })} />
                         <Badge tone={draft.active ? "emerald" : "slate"}>{draft.active ? "Active" : "Inactive"}</Badge>
                       </label>
                     </td>
-                    <td className="px-4 py-2 text-right">
+                    <td data-action className="px-4 py-2 text-right">
                       <Button size="sm" variant={changed ? "default" : "outline"} disabled={!changed || savingId === user.id} onClick={() => saveAccount(user)}>
                         <Save size={13} />
                         {savingId === user.id ? "Saving" : "Save"}

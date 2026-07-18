@@ -169,67 +169,67 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
       </div>
       <div className="overflow-x-auto p-4">
         {tab === "sla" ? (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Customer name</th><th className="pb-2">P1 hours</th><th className="pb-2">P2 hours</th><th className="pb-2">P3 hours</th><th className="pb-2">P4 hours</th><th /></tr>
             </thead>
             <tbody>
               {(items as Sla[]).map((item) => (
                 <tr key={item.id}>
-                  <td className="py-1 pr-2"><Input value={item.customerName} onChange={(e) => patch(item.id, "customerName", e.target.value)} /></td>
+                  <td data-label="Customer name" className="py-1 pr-2"><Input value={item.customerName} onChange={(e) => patch(item.id, "customerName", e.target.value)} /></td>
                   {(["p1", "p2", "p3", "p4"] as const).map((field) => (
-                    <td className="py-1 pr-2" key={field}><Input type="number" min="1" value={item[field]} onChange={(e) => patch(item.id, field, Number(e.target.value))} /></td>
+                    <td data-label={`${field.toUpperCase()} hours`} className="py-1 pr-2" key={field}><Input type="number" min="1" value={item[field]} onChange={(e) => patch(item.id, field, Number(e.target.value))} /></td>
                   ))}
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : tab === "holidays" ? (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Date</th><th className="pb-2">Holiday name</th><th /></tr>
             </thead>
             <tbody>
               {(items as Holiday[]).map((item) => (
                 <tr key={item.id}>
-                  <td className="w-52 py-1 pr-2"><Input type="date" value={item.date} onChange={(e) => patch(item.id, "date", e.target.value)} /></td>
-                  <td className="py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-label="Date" className="w-52 py-1 pr-2"><Input type="date" value={item.date} onChange={(e) => patch(item.id, "date", e.target.value)} /></td>
+                  <td data-label="Holiday name" className="py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : tab === "statuses" ? (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Raw code</th><th className="pb-2">Raw label</th><th className="pb-2">Kanban mapping</th><th className="pb-2">Color</th><th /></tr>
             </thead>
             <tbody>
               {(items as Status[]).map((item) => (
                 <tr key={item.id}>
-                  <td className="w-28 py-1 pr-2"><Input value={item.id} disabled /></td>
-                  <td className="py-1 pr-2"><Input value={item.label} onChange={(e) => patch(item.id, "label", e.target.value)} /></td>
-                  <td className="w-44 py-1 pr-2">
+                  <td data-label="Raw code" className="w-28 py-1 pr-2"><Input value={item.id} disabled /></td>
+                  <td data-label="Raw label" className="py-1 pr-2"><Input value={item.label} onChange={(e) => patch(item.id, "label", e.target.value)} /></td>
+                  <td data-label="Kanban mapping" className="w-44 py-1 pr-2">
                     <Select value={item.kanban} onChange={(e) => patch(item.id, "kanban", e.target.value)}>
                       {["open", "in_progress", "waiting", "monitor", "resolved", "closed", "cancelled"].map((v) => <option key={v}>{v}</option>)}
                     </Select>
                   </td>
-                  <td className="w-32 py-1 pr-2"><Input value={item.color} onChange={(e) => patch(item.id, "color", e.target.value)} /></td>
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-label="Color" className="w-32 py-1 pr-2"><Input value={item.color} onChange={(e) => patch(item.id, "color", e.target.value)} /></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : tab === "categories" ? (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Customer</th><th className="pb-2">Category</th><th className="w-40 pb-2">State</th><th /></tr>
             </thead>
             <tbody>
               {sortCategoryItems(items as Category[], customerNameByKey).map((item) => (
                 <tr key={item.id}>
-                  <td className="min-w-72 py-1 pr-2">
+                  <td data-label="Customer" className="min-w-72 py-1 pr-2">
                     <Select value={resolvedCategoryCustomerName(item, customerNameByKey)} onChange={(e) => patchCategoryCustomer(item.id, e.target.value)}>
                       <option value="">Select customer</option>
                       {customerOptions.map((customer) => <option key={customer.name} value={customer.name}>{customer.name}{customer.projects > 1 ? ` (${customer.projects} projects)` : ""}</option>)}
@@ -238,57 +238,57 @@ export function MasterDataManager({ initial, customers }: { initial: DataMap; cu
                       )}
                     </Select>
                   </td>
-                  <td className="min-w-64 py-1 pr-2"><Input value={item.category} onChange={(e) => patch(item.id, "category", e.target.value)} placeholder="Category" /></td>
-                  <td className="py-1 pr-2">
+                  <td data-label="Category" className="min-w-64 py-1 pr-2"><Input value={item.category} onChange={(e) => patch(item.id, "category", e.target.value)} placeholder="Category" /></td>
+                  <td data-label="State" className="py-1 pr-2">
                     <Select value={item.active ? "active" : "inactive"} onChange={(e) => patch(item.id, "active", e.target.value === "active")}>
                       <option value="active">Active</option>
                       <option value="inactive">Inactive</option>
                     </Select>
                   </td>
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : tab === "teams" ? (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Name</th><th className="pb-2">LOB</th><th className="pb-2">Email</th><th className="pb-2">Phone</th><th className="w-40 pb-2">State</th><th /></tr>
             </thead>
             <tbody>
               {(items as NamedMaster[]).map((item) => (
                 <tr key={item.id}>
-                  <td className="min-w-48 py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
-                  <td className="min-w-40 py-1 pr-2"><Input value={item.lob || ""} placeholder="LOB" onChange={(e) => patch(item.id, "lob", e.target.value)} /></td>
-                  <td className="min-w-64 py-1 pr-2"><Input type="email" value={item.email || ""} placeholder="name@example.com" onChange={(e) => patch(item.id, "email", e.target.value)} /></td>
-                  <td className="min-w-44 py-1 pr-2"><Input value={item.phone || ""} placeholder="Phone number" onChange={(e) => patch(item.id, "phone", e.target.value)} /></td>
-                  <td className="py-1 pr-2">
+                  <td data-label="Name" className="min-w-48 py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
+                  <td data-label="LOB" className="min-w-40 py-1 pr-2"><Input value={item.lob || ""} placeholder="LOB" onChange={(e) => patch(item.id, "lob", e.target.value)} /></td>
+                  <td data-label="Email" className="min-w-64 py-1 pr-2"><Input type="email" value={item.email || ""} placeholder="name@example.com" onChange={(e) => patch(item.id, "email", e.target.value)} /></td>
+                  <td data-label="Phone" className="min-w-44 py-1 pr-2"><Input value={item.phone || ""} placeholder="Phone number" onChange={(e) => patch(item.id, "phone", e.target.value)} /></td>
+                  <td data-label="State" className="py-1 pr-2">
                     <Select value={item.active ? "active" : "inactive"} onChange={(e) => patch(item.id, "active", e.target.value === "active")}>
                       <option value="active">Active</option>
                       <option value="inactive">Inactive</option>
                     </Select>
                   </td>
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : (
-          <table className="w-full text-left">
+          <table className="mobile-form-table w-full text-left">
             <thead className="text-[10px] uppercase text-slate-400">
               <tr><th className="pb-2">Name</th><th className="w-40 pb-2">State</th><th /></tr>
             </thead>
             <tbody>
               {(items as NamedMaster[]).map((item) => (
                 <tr key={item.id}>
-                  <td className="py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
-                  <td className="py-1 pr-2">
+                  <td data-label="Name" className="py-1 pr-2"><Input value={item.name} onChange={(e) => patch(item.id, "name", e.target.value)} /></td>
+                  <td data-label="State" className="py-1 pr-2">
                     <Select value={item.active ? "active" : "inactive"} onChange={(e) => patch(item.id, "active", e.target.value === "active")}>
                       <option value="active">Active</option>
                       <option value="inactive">Inactive</option>
                     </Select>
                   </td>
-                  <td><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
+                  <td data-action><Button variant="ghost" size="icon" onClick={() => setItems(items.filter((i) => i.id !== item.id) as DataMap[Tab])}><Trash2 size={14} className="text-rose-500" /></Button></td>
                 </tr>
               ))}
             </tbody>

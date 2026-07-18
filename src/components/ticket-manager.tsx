@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import { Clock3, History, ImagePlus, Plus, Search, SquarePen, Trash2, X } from "lucide-react";
+import { ArrowRight, Clock3, History, ImagePlus, Plus, Search, SquarePen, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Badge, statusTone } from "./ui/badge";
@@ -566,7 +566,84 @@ export function TicketManager({
 
       <div className="overflow-hidden rounded-lg border bg-white">
         {filtered.length ? (
-          <div className="overflow-x-auto">
+          <>
+            <div className="space-y-3 bg-slate-50/40 p-3 lg:hidden">
+              {pageTickets.map((ticket) => {
+                const sla = ticketSlaState(ticket, slaRules, holidays);
+                const responseSla = ticketResponseSlaState(ticket);
+                return (
+                  <article key={ticket.id} className="overflow-hidden rounded-2xl border border-sky-100 bg-white/90 shadow-[0_12px_35px_rgba(35,77,112,.08)]">
+                    <div className="border-b border-sky-100/80 bg-gradient-to-r from-white via-sky-50/45 to-cyan-50/30 p-4">
+                      <div className="flex items-start gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Link href={`/tickets/${ticket.id}`} className="font-semibold text-slate-900 hover:text-[#0a84ff]">
+                              {ticket.issueId}
+                            </Link>
+                            <Badge tone={severityTone(ticket.severity)}>{ticketSeverityLabel(ticket.severity)}</Badge>
+                            <Badge tone={statusTone(ticket.status)}>{ticket.status.replace(/^\d{2}\s*-\s*/, "")}</Badge>
+                          </div>
+                          <p className="mt-2 line-clamp-2 text-[12px] leading-5 text-slate-600">{ticket.issueTitle}</p>
+                        </div>
+                        {manage && (
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button variant="ghost" size="icon" onClick={() => openEditor(ticket)} title="Edit ticket">
+                              <SquarePen size={15} />
+                            </Button>
+                            <Button variant="ghost" size="icon" onClick={() => remove(ticket)} title="Delete ticket">
+                              <Trash2 size={15} className="text-rose-500" />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
+                        <span className="rounded-full bg-sky-100/80 px-2.5 py-1 font-semibold text-sky-700">{ticket.customerName || "No customer"}</span>
+                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">{ticket.category || "No category"}</span>
+                        <span className="text-slate-500">{formatIssueType(ticket.issueType)}</span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 p-4">
+                      <div className="flex items-start gap-3 rounded-xl border border-sky-100/80 bg-slate-50/70 px-3 py-2.5">
+                        <Clock3 size={16} className="mt-0.5 shrink-0 text-sky-600" />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">Start</span>
+                            <span className="whitespace-nowrap text-[11px] font-medium text-slate-700">{formatDateTime(ticket.startDate || ticket.date)}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="h-px flex-1 bg-sky-100" />
+                            <ArrowRight size={12} className="rotate-90 text-slate-300" />
+                            <span className="h-px flex-1 bg-sky-100" />
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">Due</span>
+                            <span className={`whitespace-nowrap text-[11px] font-medium ${sla.overdue ? "text-rose-600" : "text-slate-700"}`}>
+                              {formatDateTime(sla.dueDate?.toISOString() || ticket.dueDate)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-medium text-slate-400">Response</span>
+                        <Badge tone={responseSla.tone} title={responseSla.title}>{responseSla.label}</Badge>
+                        <span className="ml-1 text-[10px] font-medium text-slate-400">Resolution</span>
+                        <Badge tone={sla.tone} title={sla.title}>{sla.label}</Badge>
+                        {sla.overdue && <Badge tone="rose">Overdue</Badge>}
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-sky-100/80 pt-3 text-[11px]">
+                        <span className="font-semibold text-slate-700">{formatHours(ticketEffortHours(ticket))} hrs</span>
+                        <Badge tone={ticket.chargeable ? "emerald" : "slate"}>{ticket.chargeable ? "Chargeable" : "Non-charge"}</Badge>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="hidden overflow-x-auto lg:block">
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr>
@@ -645,7 +722,8 @@ export function TicketManager({
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         ) : (
           <EmptyState title={tickets.length ? "No matching tickets" : "No tickets yet"} description={tickets.length ? "Try changing the search or status filter." : "Import Issues_Log or create the first ticket."} />
         )}

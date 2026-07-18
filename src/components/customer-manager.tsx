@@ -92,6 +92,90 @@ function compareCustomers(a: Customer, b: Customer) {
   );
 }
 
+function CustomerMobileCard({
+  customer,
+  archived = false,
+  manage,
+  showActions,
+  showFinancials,
+  onEdit,
+  onRemove,
+}: {
+  customer: Customer;
+  archived?: boolean;
+  manage: boolean;
+  showActions: boolean;
+  showFinancials: boolean;
+  onEdit: () => void;
+  onRemove: () => void;
+}) {
+  const totalMd = capacity(customer);
+  const remainingMd = remaining(customer);
+  const amount = customer.mdPurchased * customer.mdRate;
+  const manualStatus = manualContractStatus(customer.contractStatus);
+  const lifecycle = contractLifecycle(customer);
+
+  return (
+    <article className={`overflow-hidden rounded-2xl border border-sky-100 shadow-[0_12px_35px_rgba(35,77,112,.08)] ${rowClass(customer)}`}>
+      <div className="p-4">
+        <div className="flex items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <Link href={`/customers/${customer.id}`} className="font-semibold text-slate-900 hover:text-[#0a84ff]">
+              {customer.customerName}
+            </Link>
+            <p className="mt-1 truncate text-[10px] text-slate-500" title={customer.projectCode}>{customer.projectCode || "No project code"}</p>
+          </div>
+          {showActions && (
+            <div className="flex shrink-0 items-center gap-1">
+              <Button variant="ghost" size="icon" onClick={onEdit} title="Edit customer"><SquarePen size={15} /></Button>
+              {manage && <Button variant="ghost" size="icon" onClick={onRemove} title="Delete customer"><Trash2 size={15} className="text-rose-500" /></Button>}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium text-slate-700">{customer.contractType || "No contract type"}</span>
+          <Badge className={contractStatusBadgeClass(manualStatus)}>{manualStatus}</Badge>
+          {showLifecycleBadge(manualStatus, lifecycle) && <Badge className={lifecycleBadgeClass(lifecycle)}>{lifecycle}</Badge>}
+          {archived && <Badge tone="slate">Inactive</Badge>}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-white/80 bg-white/65 px-3 py-2.5">
+          <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">Contract period</p>
+          <p className="mt-1 text-[11px] font-medium text-slate-700">
+            {formatDate(customer.startPeriod)} <span className="text-slate-400">to</span> {formatDate(customer.endPeriod)}
+          </p>
+        </div>
+
+        {!archived && (
+          <div className="mt-3">
+            <div className="mb-2 flex items-center justify-between text-[10px]">
+              <span className="font-medium text-slate-500">MD utilization</span>
+              <span className="font-semibold text-slate-700">{formatNumber(customer.mdUsed)} / {formatNumber(totalMd)} · {formatNumber(customer.burnRate, 0)}%</span>
+            </div>
+            <Progress value={customer.burnRate} tone={customer.burnRate >= 100 ? "bg-rose-500" : customer.burnRate >= 80 ? "bg-amber-500" : "bg-gradient-to-r from-[#0a84ff] to-[#20c9b7]"} />
+          </div>
+        )}
+
+        <div className="mt-3 flex items-end justify-between gap-3 border-t border-white/80 pt-3">
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">Remaining</p>
+            <p className="mt-1 text-[14px] font-semibold text-slate-800">{formatNumber(remainingMd)} MD</p>
+          </div>
+          <Badge tone={statusTone(customer.mdStatus)}>{customer.mdStatus}</Badge>
+        </div>
+
+        {showFinancials && !archived && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50/70 px-3 py-2 text-[10px] text-slate-500">
+            <span>Rate <strong className="text-slate-700">{formatAmount(customer.mdRate)}</strong></span>
+            <span>Amount <strong className="text-slate-700">{formatAmount(amount)}</strong></span>
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export function CustomerManager({ customers, contractTypes, role }: { customers: Customer[]; contractTypes: NamedMaster[]; role: Role }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
@@ -223,7 +307,22 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
             <Badge tone="slate">{archivedCustomers.length} inactive</Badge>
           </div>
           {archivedCustomers.length ? (
-            <div className="overflow-x-auto">
+            <>
+              <div className="space-y-3 bg-slate-50/40 p-3 lg:hidden">
+                {archivedCustomers.map((customer) => (
+                  <CustomerMobileCard
+                    key={customer.id}
+                    customer={customer}
+                    archived
+                    manage={manage}
+                    showActions={showActions}
+                    showFinancials={false}
+                    onEdit={() => show(customer)}
+                    onRemove={() => remove(customer)}
+                  />
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto lg:block">
               <table className="w-full text-left">
                 <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                   <tr>
@@ -272,7 +371,8 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                   })}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           ) : (
             <div className="p-8 text-center text-[12px] text-slate-400">No archived customers match the current filters.</div>
           )}
@@ -281,7 +381,21 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
 
       <div className="overflow-hidden rounded-lg border bg-white">
         {filtered.length ? (
-          <div className="overflow-x-auto">
+          <>
+            <div className="space-y-3 bg-slate-50/40 p-3 lg:hidden">
+              {pageCustomers.map((customer) => (
+                <CustomerMobileCard
+                  key={customer.id}
+                  customer={customer}
+                  manage={manage}
+                  showActions={showActions}
+                  showFinancials={showFinancials}
+                  onEdit={() => show(customer)}
+                  onRemove={() => remove(customer)}
+                />
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto lg:block">
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr>
@@ -348,7 +462,8 @@ export function CustomerManager({ customers, contractTypes, role }: { customers:
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         ) : (
           <EmptyState title={customers.length ? "No matching customers" : "No customers yet"} description={customers.length ? "Try a different search or status filter." : "Import Customer_MD_Control or add the first customer contract."} />
         )}

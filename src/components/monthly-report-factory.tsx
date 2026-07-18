@@ -422,22 +422,22 @@ export function MonthlyReportFactory({ initialBatches, role }: { initialBatches:
               {tab === "exports" && (
                 preview.exports.length ? (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-left text-[11px]">
+                    <table className="mobile-form-table w-full text-left text-[11px]">
                       <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-3 py-2">Generated</th><th className="px-3 py-2">By</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Files</th><th className="px-3 py-2">Error</th></tr></thead>
                       <tbody>
                         {preview.exports.map((item) => (
                           <tr key={item.id} className="border-t">
-                            <td className="px-3 py-2">{formatDate(item.generatedAt)}</td>
-                            <td className="px-3 py-2">{item.generatedBy}</td>
-                            <td className="px-3 py-2"><Badge tone={item.status === "generated" ? "emerald" : "rose"}>{item.status}</Badge></td>
-                            <td className="px-3 py-2">
+                            <td data-label="Generated" className="px-3 py-2">{formatDate(item.generatedAt)}</td>
+                            <td data-label="By" className="px-3 py-2">{item.generatedBy}</td>
+                            <td data-label="Status" className="px-3 py-2"><Badge tone={item.status === "generated" ? "emerald" : "rose"}>{item.status}</Badge></td>
+                            <td data-label="Files" className="px-3 py-2">
                               <div className="flex flex-wrap gap-2">
                                 {item.mandaySummaryAvailable && <Button variant="outline" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "manday")}><Download size={13} />Manday XLSX</a></Button>}
                                 {item.monthlyReportPdfAvailable && item.status === "generated" && <Button variant="outline" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "pdf")}><Download size={13} />Monthly PDF</a></Button>}
                                 {item.monthlyReportWorkbookAvailable && <Button variant="ghost" size="sm" asChild><a href={downloadUrl(selectedPeriod, item.id, "workbook")}><Download size={13} />Debug XLSX</a></Button>}
                               </div>
                             </td>
-                            <td className="max-w-md truncate px-3 py-2 text-rose-600" title={item.errorMessage}>{item.errorMessage || "-"}</td>
+                            <td data-label="Error" className="max-w-md truncate px-3 py-2 text-rose-600" title={item.errorMessage}>{item.errorMessage || "-"}</td>
                           </tr>
                         ))}
                       </tbody>
