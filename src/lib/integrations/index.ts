@@ -1,0 +1,84 @@
+export {
+  integrationErrorCategories,
+  integrationEventTypes,
+  integrationOperations,
+  integrationProviders,
+  type ExternalMessageId,
+  type ExternalThreadId,
+  type ExternalTicketId,
+  type IntegrationConnector,
+  type IntegrationCorrelationId,
+  type IntegrationErrorCategory,
+  type IntegrationEventId,
+  type IntegrationEventType,
+  type IntegrationFailure,
+  type IntegrationIdempotencyKey,
+  type IntegrationInvocationContext,
+  type IntegrationInvocationRecord,
+  type IntegrationOperation,
+  type IntegrationProvider,
+  type IntegrationResult,
+  type JsonObject,
+  type JsonPrimitive,
+  type JsonValue,
+} from "./contracts";
+
+export {
+  IntegrationBoundaryError,
+  isIntegrationBoundaryError,
+  normalizeIntegrationError,
+  serializeIntegrationErrorForLog,
+  serializeIntegrationErrorForPublic,
+} from "./errors";
+
+export {
+  canonicalSerializeIdempotencyMaterial,
+  deriveEventIdempotencyKey,
+  deriveIdempotencyKey,
+  deriveMessageIdempotencyKey,
+  deriveTicketIdempotencyKey,
+  type IdempotencyMaterial,
+} from "./idempotency";
+
+export { InMemoryIntegrationConnector } from "./in-memory-adapter";
+
+export {
+  canRetry,
+  createIntegrationEvent,
+  normalizeExternalTicketReference,
+  normalizeIntegrationEvent,
+  normalizeMessageEnvelope,
+  normalizeRetryMetadata,
+} from "./normalization";
+
+export {
+  attachmentMetadataSchema,
+  boundedMetadataSchema,
+  cloneBoundedJsonObject,
+  correlationIdSchema,
+  createExternalTicketReferenceSchema,
+  externalMessageIdSchema,
+  externalThreadIdSchema,
+  externalTicketIdSchema,
+  externalTicketReferenceSchema,
+  idempotencyKeySchema,
+  integrationBoundaryLimits,
+  integrationErrorCategorySchema,
+  integrationEventIdSchema,
+  integrationEventSchema,
+  integrationEventTypeSchema,
+  integrationFailureSchema,
+  integrationOperationSchema,
+  integrationProviderSchema,
+  normalizedEmailAddressSchema,
+  normalizedHeaderMapSchema,
+  normalizedMessageEnvelopeSchema,
+  retryMetadataSchema,
+  type AttachmentMetadata,
+  type ExternalTicketReference,
+  type IntegrationEvent,
+  type IntegrationEventCreationInput,
+  type NormalizedEmailAddress,
+  type NormalizedMessageEnvelope,
+  type RetryMetadata,
+} from "./schemas";

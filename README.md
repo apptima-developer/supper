@@ -22,6 +22,10 @@ Excel imports use a preview/commit workflow. SupportDesk workbooks read `Custome
 
 Monthly report runtime files remain a documented deployment limitation and are not migrated by Phase 0.2.
 
+## Integration architecture
+
+The provider-neutral integration boundary lives in `src/lib/integrations/`. It defines validated message and ticket envelopes, versioned events, stable idempotency, bounded retry metadata, safe errors, and a generic connector contract. It does not contain a live email, n8n, ServiceNow, HTTP, queue, worker, persistence, or provider implementation. See [integration boundary](docs/integration-boundary.md) before extending it in a later patch.
+
 ## Production security setup
 
 Before deploying Phase 0.2.1:

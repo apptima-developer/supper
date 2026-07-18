@@ -133,3 +133,48 @@ The four migration files were recorded before modification and remain immutable:
 - `202607180002_fix_login_rate_limit_rpc_variable_conflict.sql`: `ea4faa2262bdaa8a0d3b7df0b88faa0a7e380167a157b12c0d5406353a159efa`
 
 B1 is limited to request correlation IDs, sanitized health metadata, safe structured logging, non-destructive deployment verification scripts, tests, and operational documentation. It does not change authentication rules, sessions, cookies, Origin protection, login throttling, storage, repositories, backups, imports, tickets, customers, reports, dependencies, database schema, or UI behavior. No SQL is executed and no migration is added.
+
+## Patch B2 - Integration Boundary Skeleton
+
+Patch B2 starts from the supplied Golden Source `supper-source-audit-220ffef.zip` at source commit `220ffef`. The documented B0 and B1 sections above remain append-only and are not rewritten.
+
+Before B2 source changes, the Golden Source was extracted into an isolated temporary directory. The minimal audit archive omitted binary report templates, so only the two approved tracked templates were copied into the isolated verification directory. Their SHA-256 values remained `6bf1c606328e38e0af6b10a90a0ca6ea6702a0d0c4226546711b0d8d36ffefd9` and `42c3a78481508c16656e082d55bbc0ec3a8ad989b9c175788bffbaccd3440c5b`.
+
+Pre-modification results:
+
+| Command | Result |
+| --- | --- |
+| `npm ci` | PASS; 593 packages installed with the previously documented transitive deprecation warnings only. |
+| `npm test` | PASS; 15 files and 111 tests. |
+| `npm run lint` | PASS. |
+| `npm run build` | PASS outside the restricted sandbox; Next.js 16.2.9 production build completed. The sandboxed run failed only because Turbopack was not permitted to bind its internal local port. |
+| `npm run verify:migrations` | PASS; four ordered migration files verified. |
+| `npm run verify:runtime-assets` | PASS; required assets present and the optional runtime mapping override absent. |
+| `npm run verify:build-env` | PASS for the isolated development `local-json` configuration. |
+
+The four immutable migration checksums remained:
+
+- `202607170001_security_foundation.sql`: `ac71b277ac035ba61638ad74db64c57a0f7c913bf38fc3ea5a54031c5965ace4`
+- `202607170002_security_foundation_corrections.sql`: `3ac900810d716b30e08900f70261f57394ee593024debc9ba0a177482781a89f`
+- `202607180001_fix_login_rate_limit_rpc_conflict.sql`: `2336baa83d2768439c5b2ecbfaf8f0270264b8f89808759434b569961911d82f`
+- `202607180002_fix_login_rate_limit_rpc_variable_conflict.sql`: `ea4faa2262bdaa8a0d3b7df0b88faa0a7e380167a157b12c0d5406353a159efa`
+
+B2 adds only provider-neutral TypeScript/Zod contracts, normalized envelopes, versioned events, stable idempotency, retry metadata, safe errors, an in-memory contract-test adapter, tests, and documentation under the existing source tree. It does not add a live provider, transport, API route, worker, scheduler, queue, webhook, persistence, database change, environment variable, UI change, authentication change, or business feature. B3 was not started.
+
+Post-modification results:
+
+| Command or regression | Result |
+| --- | --- |
+| `npm test` | PASS; 16 files and 139 tests. |
+| `npm run lint` | PASS. |
+| `npm run build` | PASS; Next.js 16.2.9 compiled, completed TypeScript checks, generated all static pages, and finalized optimization. |
+| `npm run verify:runtime-assets` | PASS; required templates and import mapping sources are present. |
+| `npm run verify:migrations` | PASS; the same four ordered migrations remain valid. |
+| `npm run verify:build-env` | PASS for the selected local development backend. |
+| Disposable smoke test | PASS; liveness, readiness, and login page returned the expected safe responses. |
+| Disposable login | PASS; the real form POST returned HTTP 303 and established a session. |
+| Authenticated read-only pages | PASS; dashboard, customers, tickets, kanban, reports, settings, accounts, and master data each returned HTTP 200. |
+
+Post-modification migration and report-template SHA-256 values exactly matched the pre-modification values recorded above. No migration was added, removed, renamed, reordered, or edited, and neither report template changed.
+
+The manual regression used an isolated temporary source copy with an empty disposable `local-json` dataset and a disposable administrator account. It did not use or mutate repository data, production data, Supabase, backups, imports, customer records, tickets, master data, accounts, reports, or settings. No test credential or hash was added to the repository.
