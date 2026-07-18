@@ -60,4 +60,34 @@ describe("migration verifier", () => {
     expect(sql).not.toMatch(/\bdrop\s+(?:function|table)\b/);
     expect(sql).not.toMatch(/\bdelete\s+from\s+public\.support_login_rate_limits\b/);
   });
+
+  it("uses an unambiguous constraint target in the login rate-limit RPC hotfix", async () => {
+    const sql = (await readFile(path.join(
+      process.cwd(),
+      "supabase/migrations/202607180001_fix_login_rate_limit_rpc_conflict.sql",
+    ), "utf8")).toLowerCase().replace(/\s+/g, " ");
+    expect(sql).toContain("on conflict on constraint support_login_rate_limits_pkey do update");
+    expect(sql).not.toContain("on conflict (key_hash) do update");
+    expect(sql).toContain("set search_path = pg_catalog, public");
+    expect(sql).toContain("from public;");
+    expect(sql).toContain("from anon, authenticated;");
+    expect(sql).toContain("to service_role;");
+    expect(sql).not.toMatch(/\bdrop\s+(?:function|table)\b/);
+    expect(sql).not.toMatch(/\bdelete\s+from\s+public\.support_login_rate_limits\b/);
+  });
+
+  it("sets column precedence for PL/pgSQL output-variable name collisions", async () => {
+    const sql = (await readFile(path.join(
+      process.cwd(),
+      "supabase/migrations/202607180002_fix_login_rate_limit_rpc_variable_conflict.sql",
+    ), "utf8")).toLowerCase().replace(/\s+/g, " ");
+    expect(sql).toContain("#variable_conflict use_column");
+    expect(sql).toContain("on conflict on constraint support_login_rate_limits_pkey do update");
+    expect(sql).toContain("set search_path = pg_catalog, public");
+    expect(sql).toContain("from public;");
+    expect(sql).toContain("from anon, authenticated;");
+    expect(sql).toContain("to service_role;");
+    expect(sql).not.toMatch(/\bdrop\s+(?:function|table)\b/);
+    expect(sql).not.toMatch(/\bdelete\s+from\s+public\.support_login_rate_limits\b/);
+  });
 });

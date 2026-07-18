@@ -8,17 +8,19 @@ Versioned, reviewable SQL migrations live in `supabase/migrations/`. Names use `
 
 ## Applying Phase 0.2.1
 
-Apply both migrations manually in immutable version order:
+Apply all migrations manually in immutable version order:
 
 1. `supabase/migrations/202607170001_security_foundation.sql`
 2. `supabase/migrations/202607170002_security_foundation_corrections.sql`
+3. `supabase/migrations/202607180001_fix_login_rate_limit_rpc_conflict.sql`
+4. `supabase/migrations/202607180002_fix_login_rate_limit_rpc_variable_conflict.sql`
 
 Use one of these approved paths:
 
 1. Review the complete SQL and its target project.
 2. Take the normal database backup or recovery checkpoint.
-3. Execute `202607170001`, commit it, and then execute `202607170002` in the Supabase SQL Editor while authenticated as an authorized database administrator, or use the organization's approved Supabase migration runner.
-4. Confirm rows `202607170001` and `202607170002` exist in `support_schema_migrations`.
+3. Execute `202607170001`, commit it, then execute `202607170002`, `202607180001`, and `202607180002` in the Supabase SQL Editor while authenticated as an authorized database administrator, or use the organization's approved Supabase migration runner.
+4. Confirm rows `202607170001`, `202607170002`, `202607180001`, and `202607180002` exist in `support_schema_migrations`.
 5. Confirm `support_users.auth_version`, `support_login_rate_limits`, and `support_record_login_failure` exist.
 6. Inspect the exact function privileges with `\df+ public.support_record_login_failure` in an approved PostgreSQL client, or run the catalog query below. Verify `PUBLIC`, `anon`, and `authenticated` have no execute privilege and `service_role` does.
 7. Confirm the function configuration includes `search_path=pg_catalog, public` and perform an application login-failure smoke test through the deployed server route only.
@@ -55,6 +57,10 @@ Expected application-role result: `service_role` has `EXECUTE`; `PUBLIC`, `anon`
 - Records the migration version idempotently.
 
 The correction migration is non-destructive. It revokes default and browser-role execution of the existing `SECURITY DEFINER` rate-limit RPC, re-grants execution to `service_role`, pins a trusted function search path, and records `202607170002`. It does not drop or recreate the function or table and does not delete existing login rate-limit state.
+
+Migration `202607180001` replaces only the function body to target the table primary-key constraint explicitly. This removes the ambiguous column-name conflict target while retaining the same signature, behavior, search path, grants, and existing rate-limit rows.
+
+Migration `202607180002` pins PL/pgSQL name resolution to table columns inside this function. `RETURNS TABLE` creates output variables named like the stored columns, so the local `#variable_conflict use_column` directive prevents those variables from shadowing insert/update column references without changing the RPC signature or stored state.
 
 No table is dropped, no existing password is reset, and no production data is copied or deleted.
 
