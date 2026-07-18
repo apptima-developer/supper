@@ -2,7 +2,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Bell, LogOut, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun } from "lucide-react";
+import { Bell, LogOut, Menu, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun, X } from "lucide-react";
 import { AppNav } from "./app-nav";
 import type { Session } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -44,6 +44,7 @@ function notificationTone(tone: NotificationItem["tone"]) {
 
 export function AppShell({ session, children }: { session: Session; children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "system";
     const stored = window.localStorage.getItem("supportdesk-theme") as ThemeMode | null;
@@ -85,6 +86,28 @@ export function AppShell({ session, children }: { session: Session; children: Re
     };
   }, []);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) setMobileNavOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+
+    document.body.style.overflow = "hidden";
+    desktopQuery.addEventListener("change", closeOnDesktop);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileNavOpen]);
+
   function cycleTheme() {
     const next = themeOrder[(themeOrder.indexOf(themeMode) + 1) % themeOrder.length];
     window.localStorage.setItem("supportdesk-theme", next);
@@ -93,6 +116,68 @@ export function AppShell({ session, children }: { session: Session; children: Re
 
   return (
     <div className="app-shell min-h-screen">
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button
+            type="button"
+            aria-label="Close navigation menu"
+            className="absolute inset-0 bg-slate-950/35 backdrop-blur-[2px]"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <aside
+            id="mobile-navigation"
+            aria-label="Mobile navigation"
+            className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-2.5rem))] flex-col border-r border-white/70 bg-white/90 shadow-[24px_0_70px_rgba(15,43,68,.22)] backdrop-blur-2xl"
+          >
+            <div className="flex h-16 items-center gap-3 border-b border-sky-100/80 px-5">
+              <Image
+                src="/brand/supper-icon-transparent-1024.png"
+                alt="SUPPER"
+                width={40}
+                height={40}
+                priority
+                unoptimized
+                className="h-9 w-9 rounded-2xl object-contain drop-shadow-sm"
+              />
+              <div>
+                <p className="text-[13px] font-semibold text-[#173b57]">SUPPER</p>
+                <p className="text-[10px] uppercase tracking-[.16em] text-sky-600/70">Support Control</p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close navigation menu"
+                onClick={() => setMobileNavOpen(false)}
+                className="ml-auto grid h-9 w-9 place-items-center rounded-xl text-slate-500 transition-colors hover:bg-sky-50 hover:text-slate-800"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-5 pb-2 pt-5 text-[10px] font-semibold uppercase tracking-[.14em] text-sky-700/55">Workspace</div>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <AppNav role={session.role} onNavigate={() => setMobileNavOpen(false)} />
+            </div>
+
+            <div className="border-t border-sky-100/80 p-4">
+              <div className="flex items-center gap-3 rounded-2xl bg-gradient-to-br from-white/85 to-sky-50/70 p-3 ring-1 ring-white/80">
+                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-sky-100 to-cyan-100 text-[11px] font-semibold text-sky-700">
+                  {initials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[12px] font-semibold text-[#173b57]">{session.name}</p>
+                  <p className="capitalize text-[10px] text-slate-500">{session.role}</p>
+                </div>
+                <form action="/api/auth/logout" method="post">
+                  <button title="Sign out" className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-sky-50 hover:text-slate-700">
+                    <LogOut size={15} />
+                  </button>
+                </form>
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
       <aside className={cn(
         "fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-white/70 bg-white/70 shadow-[18px_0_45px_rgba(35,77,112,.08)] backdrop-blur-2xl transition-[width] duration-200 lg:flex",
         collapsed ? "w-[76px]" : "w-[228px]",
@@ -104,6 +189,7 @@ export function AppShell({ session, children }: { session: Session; children: Re
             width={40}
             height={40}
             priority
+            unoptimized
             className={cn("rounded-2xl object-contain drop-shadow-sm", collapsed ? "h-10 w-10" : "h-9 w-9")}
           />
           {!collapsed && <div>
@@ -150,6 +236,20 @@ export function AppShell({ session, children }: { session: Session; children: Re
 
       <div className={cn("transition-[padding] duration-200", collapsed ? "lg:pl-[76px]" : "lg:pl-[228px]")}>
         <header className="sticky top-0 z-20 flex h-16 items-center border-b border-white/70 bg-white/70 px-5 shadow-[0_10px_30px_rgba(35,77,112,.05)] backdrop-blur-2xl md:px-7">
+          <button
+            type="button"
+            aria-label="Open navigation menu"
+            aria-controls="mobile-navigation"
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen(true)}
+            className="mr-3 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white/75 text-slate-600 shadow-sm ring-1 ring-sky-100 transition-colors hover:bg-sky-50 hover:text-[#173b57] lg:hidden"
+          >
+            <Menu size={19} />
+          </button>
+          <div className="mr-3 min-w-0 md:hidden">
+            <p className="truncate text-[12px] font-semibold text-[#173b57]">SUPPER</p>
+            <p className="truncate text-[9px] uppercase tracking-[.12em] text-sky-600/70">Support Control</p>
+          </div>
           <div className="relative hidden w-full max-w-md md:block">
             <Search className="absolute left-3 top-2.5 text-sky-500/70" size={15} />
             <input className="h-9 w-full rounded-xl bg-white/80 pl-9 pr-3 text-[12px] text-slate-700 outline-none ring-1 ring-sky-100 transition-all placeholder:text-slate-400 focus:bg-white focus:ring-4 focus:ring-sky-200/35" placeholder="Search tickets, customers, issue IDs..." />

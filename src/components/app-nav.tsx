@@ -19,7 +19,15 @@ const items = [
   { href: "/audit", label: "Audit log", icon: ShieldCheck, permission: "audit:view" as const },
   { href: "/settings", label: "Settings", icon: Settings, permission: "settings:manage" as const },
 ];
-export function AppNav({ role, collapsed = false }: { role: Role; collapsed?: boolean }) {
+export function AppNav({
+  role,
+  collapsed = false,
+  onNavigate,
+}: {
+  role: Role;
+  collapsed?: boolean;
+  onNavigate?: () => void;
+}) {
   const pathname = usePathname();
   return (
     <nav className={cn("space-y-1", collapsed ? "px-2" : "px-3")}>
@@ -32,6 +40,7 @@ export function AppNav({ role, collapsed = false }: { role: Role; collapsed?: bo
             href={item.href}
             title={collapsed ? item.label : undefined}
             aria-label={item.label}
+            onClick={onNavigate}
             className={cn(
               "flex h-9 items-center rounded-xl text-[12px] font-semibold transition-all",
               collapsed ? "justify-center px-0" : "gap-3 px-3",
