@@ -10,6 +10,8 @@
     "test": "vitest run",
     "verify:runtime-assets": "node scripts/verify-runtime-assets.mjs",
     "verify:migrations": "node scripts/verify-migrations.mjs",
+    "verify:build-env": "node scripts/verify-build-environment.mjs",
+    "smoke:test": "node scripts/smoke-test.mjs",
     "supabase:seed": "dotenv -e .env.local -- node scripts/seed-supabase.mjs",
     "supabase:migrate:relational": "dotenv -e .env.local -- node scripts/migrate-app-store-to-relational.mjs"
   },

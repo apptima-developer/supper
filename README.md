@@ -42,3 +42,14 @@ npm run build
 npm run verify:runtime-assets
 npm run verify:migrations
 ```
+
+## Operations
+
+Use the public liveness and readiness endpoints for safe deployment diagnostics, then run the non-destructive build and smoke checks:
+
+```bash
+npm run verify:build-env
+SMOKE_BASE_URL=https://your-deployment.example npm run smoke:test
+```
+
+The smoke test calls only `GET /api/health/live`, `GET /api/health/ready`, and `GET /login`. Request correlation, safe response fields, Vercel verification, and rollback guidance are documented in the [operations runbook](docs/operations-runbook.md).

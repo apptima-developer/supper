@@ -107,3 +107,29 @@ Repository-level environment example, runtime templates, and existing UI assets 
 - Dependency deprecations are recorded but intentionally not upgraded during the freeze.
 
 No integration feature was added. No production SQL was executed. No production data was copied, deleted, restored, or migrated. Authentication, sessions, Origin protection, rate limiting, storage routing, backup restore behavior, request limits, CSP, report logic, Supabase configuration, and Vercel environment variables were not changed.
+
+## Patch B1 - Observability and Safe Diagnostics
+
+Patch B1 starts from the supplied Golden Source `supper-source-audit-cdd5c8b.zip` at source commit `cdd5c8b`. The documented B0 underlying source commit above remains unchanged and is not rewritten. No older phase commit was merged or cherry-picked.
+
+Before B1 source changes, the Golden Source was extracted into an isolated temporary directory. The minimal audit archive intentionally omitted binary report templates, so only the two approved tracked templates documented above were copied into the isolated verification directory. Their SHA-256 values remained `6bf1c606328e38e0af6b10a90a0ca6ea6702a0d0c4226546711b0d8d36ffefd9` and `42c3a78481508c16656e082d55bbc0ec3a8ad989b9c175788bffbaccd3440c5b`.
+
+Pre-modification results:
+
+| Command | Result |
+| --- | --- |
+| `npm ci` | PASS; 593 packages installed with the previously documented transitive deprecation warnings only. |
+| `npm test` | PASS; 12 files and 94 tests. |
+| `npm run lint` | PASS. |
+| `npm run build` | PASS; Next.js 16.2.9 production build completed. |
+| `npm run verify:migrations` | PASS; four ordered migration files verified. |
+| `npm run verify:runtime-assets` | PASS; required assets present and the optional runtime mapping override absent. |
+
+The four migration files were recorded before modification and remain immutable:
+
+- `202607170001_security_foundation.sql`: `ac71b277ac035ba61638ad74db64c57a0f7c913bf38fc3ea5a54031c5965ace4`
+- `202607170002_security_foundation_corrections.sql`: `3ac900810d716b30e08900f70261f57394ee593024debc9ba0a177482781a89f`
+- `202607180001_fix_login_rate_limit_rpc_conflict.sql`: `2336baa83d2768439c5b2ecbfaf8f0270264b8f89808759434b569961911d82f`
+- `202607180002_fix_login_rate_limit_rpc_variable_conflict.sql`: `ea4faa2262bdaa8a0d3b7df0b88faa0a7e380167a157b12c0d5406353a159efa`
+
+B1 is limited to request correlation IDs, sanitized health metadata, safe structured logging, non-destructive deployment verification scripts, tests, and operational documentation. It does not change authentication rules, sessions, cookies, Origin protection, login throttling, storage, repositories, backups, imports, tickets, customers, reports, dependencies, database schema, or UI behavior. No SQL is executed and no migration is added.

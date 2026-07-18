@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 import { getAppOrigin, getSessionSecret } from "@/lib/env";
-import { isSafeMethod, isSameOriginRequest } from "@/lib/request-security";
+import { isSafeMethod, isSameOriginRequest, jsonResponseWithRequestId } from "@/lib/request-security";
 
 function sessionSecret() {
   return new TextEncoder().encode(getSessionSecret());
@@ -17,10 +17,10 @@ export async function proxy(request: NextRequest) {
         origin: request.headers.get("origin"),
         configuredOrigin: getAppOrigin(),
       })) {
-        return NextResponse.json({ error: "Request origin is not allowed", code: "INVALID_ORIGIN" }, { status: 403 });
+        return jsonResponseWithRequestId({ error: "Request origin is not allowed", code: "INVALID_ORIGIN" }, request, { status: 403 });
       }
     } catch {
-      return NextResponse.json({ error: "Request origin is not allowed", code: "INVALID_ORIGIN" }, { status: 403 });
+      return jsonResponseWithRequestId({ error: "Request origin is not allowed", code: "INVALID_ORIGIN" }, request, { status: 403 });
     }
   }
   if (path === "/login" || path.startsWith("/api/auth/") || path.startsWith("/api/health/")) return NextResponse.next();

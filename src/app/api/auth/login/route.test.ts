@@ -53,6 +53,7 @@ describe("login route body boundary", () => {
     const response = await POST(loginRequest("username=operator&password=correct-horse"));
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("https://app.example.test/dashboard");
+    expect(response.headers.get("x-request-id")).toMatch(/^[A-Za-z0-9._-]{8,100}$/);
     expect(mocks.authenticate).toHaveBeenCalledWith("operator", "correct-horse");
   });
 
@@ -76,6 +77,7 @@ describe("login route body boundary", () => {
     const missing = await POST(loginRequest("username=operator"));
     expect(missing.status).toBe(303);
     expect(missing.headers.get("location")).toBe("https://app.example.test/login?error=1");
+    expect(missing.headers.get("x-request-id")).toMatch(/^[A-Za-z0-9._-]{8,100}$/);
     expect(mocks.authenticate).toHaveBeenCalledWith("operator", "");
 
     const invalid = await POST(loginRequest("username=operator&password=wrong"));

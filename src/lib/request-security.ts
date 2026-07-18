@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z, type ZodType } from "zod";
 import { getRequestLimits } from "./env";
+import { isValidRequestId, REQUEST_ID_HEADER, resolveRequestId } from "./request-id";
 import { logServerError } from "./server-logging";
 
 export class HttpError extends Error {
@@ -15,8 +16,24 @@ export class HttpError extends Error {
 }
 
 export function requestId(request?: Request) {
-  const supplied = request?.headers.get("x-request-id")?.trim();
-  return supplied && /^[A-Za-z0-9._-]{8,100}$/.test(supplied) ? supplied : crypto.randomUUID();
+  return resolveRequestId(request?.headers.get(REQUEST_ID_HEADER));
+}
+
+export function withRequestId(response: NextResponse, correlationId: string) {
+  response.headers.set(REQUEST_ID_HEADER, correlationId);
+  return response;
+}
+
+export function jsonResponseWithRequestId(
+  body: Record<string, unknown>,
+  request?: Request,
+  init: ResponseInit = {},
+  correlationId?: string,
+) {
+  const id = correlationId && isValidRequestId(correlationId) ? correlationId : requestId(request);
+  const headers = new Headers(init.headers);
+  headers.set(REQUEST_ID_HEADER, id);
+  return NextResponse.json({ ...body, requestId: id }, { ...init, headers });
 }
 
 export function safeErrorResponse(
@@ -24,8 +41,9 @@ export function safeErrorResponse(
   fallbackMessage: string,
   request?: Request,
   fallbackStatus = 500,
+  correlationId?: string,
 ) {
-  const id = requestId(request);
+  const id = correlationId && isValidRequestId(correlationId) ? correlationId : requestId(request);
   let status = fallbackStatus;
   let code = fallbackStatus >= 500 ? "INTERNAL_ERROR" : "INVALID_REQUEST";
   let message = fallbackMessage;
@@ -46,10 +64,20 @@ export function safeErrorResponse(
     }));
   }
 
-  if (!expectedError || status >= 500) logServerError("api_request_failed", error, { requestId: id, status });
-  return NextResponse.json(
+  if (!expectedError || status >= 500) {
+    let route: string | undefined;
+    try {
+      route = request ? new URL(request.url).pathname : undefined;
+    } catch {
+      route = undefined;
+    }
+    logServerError("api_request_failed", error, { requestId: id, route, status });
+  }
+  return jsonResponseWithRequestId(
     { error: message, code, requestId: id, ...(issues ? { issues } : {}) },
-    { status, headers: { "X-Request-ID": id } },
+    request,
+    { status },
+    id,
   );
 }
 
