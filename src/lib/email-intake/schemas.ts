@@ -3,24 +3,15 @@ import {
   attachmentMetadataSchema,
   boundedMetadataSchema,
   correlationIdSchema,
-  deriveMessageIdempotencyKey,
   externalMessageIdSchema,
   externalThreadIdSchema,
   idempotencyKeySchema,
   integrationBoundaryLimits,
   integrationProviderSchema,
   normalizedEmailAddressSchema,
-} from "../integrations";
-
-const controlCharacters = /[\u0000-\u001f\u007f]/;
-
-function safeText(label: string, maximum: number) {
-  return z.string()
-    .trim()
-    .min(1, `${label} is required`)
-    .max(maximum, `${label} is too long`)
-    .refine((value) => !controlCharacters.test(value), `${label} contains control characters`);
-}
+} from "../integrations/schemas";
+import { deriveMessageIdempotencyKey } from "../integrations/idempotency";
+import { containsControlCharacters, safeBoundedTextSchema } from "../integrations/validation";
 
 function isoTimestamp(label: string) {
   return z.string().superRefine((value, context) => {
@@ -43,11 +34,11 @@ export const emailIntakeStatuses = [
 ] as const;
 
 export const emailIntakeStatusSchema = z.enum(emailIntakeStatuses);
-export const emailIntakeIdSchema = safeText("intakeId", 200);
-export const emailIntakeAuditIdSchema = safeText("auditId", 200);
-export const emailIntakeEventIdSchema = safeText("eventId", 200);
-export const emailIntakeActorSchema = safeText("actor", 200);
-export const emailIntakeProcessorSchema = safeText("processor", 200);
+export const emailIntakeIdSchema = safeBoundedTextSchema("intakeId", 200);
+export const emailIntakeAuditIdSchema = safeBoundedTextSchema("auditId", 200);
+export const emailIntakeEventIdSchema = safeBoundedTextSchema("eventId", 200);
+export const emailIntakeActorSchema = safeBoundedTextSchema("actor", 200);
+export const emailIntakeProcessorSchema = safeBoundedTextSchema("processor", 200);
 export const emailIntakeReasonCodeSchema = z.string().trim().min(1).max(80).regex(/^[A-Z0-9_]+$/);
 export const normalizedIsoTimestampSchema = isoTimestamp("timestamp");
 
@@ -96,7 +87,7 @@ export const emailIntakeRecordSchema = z.object({
   subject: z.string()
     .trim()
     .max(integrationBoundaryLimits.subjectCharacters)
-    .refine((value) => !controlCharacters.test(value), "subject contains control characters")
+    .refine((value) => !containsControlCharacters(value), "subject contains control characters")
     .optional(),
   normalizedText: z.string().max(integrationBoundaryLimits.textBodyCharacters).optional(),
   normalizedHtml: z.string().max(integrationBoundaryLimits.htmlBodyCharacters).optional(),
@@ -145,7 +136,7 @@ export const emailIntakeSearchSchema = z.object({
   status: emailIntakeStatusSchema.optional(),
   provider: integrationProviderSchema.optional(),
   sender: z.string().trim().max(320).optional(),
-  subject: z.string().trim().max(500).refine((value) => !controlCharacters.test(value)).optional(),
+  subject: z.string().trim().max(500).refine((value) => !containsControlCharacters(value)).optional(),
   receivedFrom: normalizedIsoTimestampSchema.optional(),
   receivedTo: normalizedIsoTimestampSchema.optional(),
   correlationId: correlationIdSchema.optional(),

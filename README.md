@@ -28,6 +28,8 @@ The provider-neutral integration boundary lives in `src/lib/integrations/`. It d
 
 The Email Intake domain in `src/lib/email-intake/` builds on that boundary with an immutable aggregate, explicit lifecycle, audit history, domain-event objects, duplicate protection, search, and repository adapters for every existing storage backend. It still does not connect to a provider, read or send mail, publish events, schedule work, expose an API, or change UI. See the [integration boundary](docs/integration-boundary.md) and [Email Intake domain](docs/email-intake-domain.md) before extending this foundation.
 
+Patch B3.5 makes those boundaries mechanically verifiable, narrows public module surfaces, and adds a read-only active-data integrity check without changing backend routing. See [architecture consolidation](docs/architecture-consolidation.md).
+
 ## Production security setup
 
 Before deploying Phase 0.2.1:
@@ -47,6 +49,8 @@ npm run lint
 npm run build
 npm run verify:runtime-assets
 npm run verify:migrations
+npm run verify:architecture
+npm run verify:data-integrity
 ```
 
 ## Operations

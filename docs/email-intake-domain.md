@@ -83,9 +83,13 @@ The domain creates versioned event objects such as `EmailIntakeCreated`, `EmailV
 
 Errors reuse `IntegrationBoundaryError`. B3 adds only `DuplicateEmailIntake`, `InvalidStatusTransition`, and `EmailIntakeNotFound`; public messages never include message content or identifiers.
 
+`InvalidStatusTransition` retains its source and target status as non-enumerable internal context. Public and log serializers keep their existing sanitized shape and do not expose that context.
+
 ## Limitations and next work
 
 - Relational-mode search scans `support_master_data` rows with the email-intake prefix and filters in memory. A later reviewed migration should introduce a dedicated indexed table before intake volume becomes large.
 - Local JSON locking is process-local and intended for single-process development. Production should use a Supabase backend.
 - There is no compare-and-swap version for concurrent updates to the same record. Atomic insert protects creation idempotency, but a future application service must define optimistic concurrency before parallel processors exist.
 - B3 does not connect to IMAP, POP3, SMTP, Microsoft Graph, Outlook, ServiceNow, n8n, AI, object storage, a queue, a worker, a scheduler, a webhook, an API route, or UI.
+
+Patch B3.5 keeps factory selection in `src/lib/email-intake/repository-factory.ts` and the application-facing factory export in `src/lib/repositories.ts`. Storage adapters and test-only adapters are intentionally not exported by the domain barrels. JSON repository contract tests use a real local JSON store rooted in a guarded OS temporary directory; relational contract tests use an isolated mock store.

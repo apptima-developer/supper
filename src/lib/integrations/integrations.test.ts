@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
-  InMemoryIntegrationConnector,
   IntegrationBoundaryError,
   canRetry,
   canonicalSerializeIdempotencyMaterial,
@@ -25,6 +24,7 @@ import {
   serializeIntegrationErrorForPublic,
   type IntegrationEventCreationInput,
 } from "./index";
+import { InMemoryIntegrationConnector } from "./in-memory-adapter";
 
 const correlationId = correlationIdSchema.parse("request-1234");
 const externalMessageId = externalMessageIdSchema.parse("message-42");

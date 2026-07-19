@@ -1,10 +1,9 @@
-import {
-  IntegrationBoundaryError,
-  externalMessageIdSchema,
-  integrationProviderSchema,
-  type IntegrationCorrelationId,
-  type IntegrationProvider,
-} from "../integrations";
+import type {
+  IntegrationCorrelationId,
+  IntegrationProvider,
+} from "../integrations/contracts";
+import { IntegrationBoundaryError } from "../integrations/errors";
+import { externalMessageIdSchema, integrationProviderSchema } from "../integrations/schemas";
 import {
   EmailIntakeAggregate,
   type EmailIntakeActionContext,

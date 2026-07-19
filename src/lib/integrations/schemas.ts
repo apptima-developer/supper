@@ -14,6 +14,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./contracts";
+import { containsControlCharacters, safeBoundedTextSchema } from "./validation";
 
 export const integrationBoundaryLimits = Object.freeze({
   identifierCharacters: 200,
@@ -31,20 +32,11 @@ export const integrationBoundaryLimits = Object.freeze({
   retryAttempts: 20,
 } as const);
 
-const controlCharacters = /[\u0000-\u001f\u007f]/;
 const lineBreaks = /[\r\n]/;
 const forbiddenObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
 
-function safeString(maximum: number, label: string) {
-  return z.string()
-    .trim()
-    .min(1, `${label} is required`)
-    .max(maximum, `${label} is too long`)
-    .refine((value) => !controlCharacters.test(value), `${label} contains control characters`);
-}
-
 function identifierSchema<Name extends string>(name: Name) {
-  return safeString(integrationBoundaryLimits.identifierCharacters, name);
+  return safeBoundedTextSchema(name, integrationBoundaryLimits.identifierCharacters);
 }
 
 export const integrationProviderSchema = z.enum(integrationProviders);
@@ -81,7 +73,7 @@ function cloneJsonValue(input: unknown, depth: number): JsonValue {
     if (input.length > integrationBoundaryLimits.metadataStringCharacters) {
       throw new Error("Metadata string is too long");
     }
-    if (controlCharacters.test(input)) throw new Error("Metadata string contains control characters");
+    if (containsControlCharacters(input)) throw new Error("Metadata string contains control characters");
     return input;
   }
   if (Array.isArray(input)) {
@@ -101,7 +93,7 @@ function cloneJsonValue(input: unknown, depth: number): JsonValue {
   const output: JsonObject = {};
   for (const key of ownKeys as string[]) {
     if (forbiddenObjectKeys.has(key)) throw new Error("Metadata contains a forbidden object key");
-    if (key.length > 100 || controlCharacters.test(key)) throw new Error("Metadata key is invalid");
+    if (key.length > 100 || containsControlCharacters(key)) throw new Error("Metadata key is invalid");
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
     if (!descriptor || descriptor.get || descriptor.set) throw new Error("Metadata accessors are not supported");
     if (!descriptor.enumerable) continue;
@@ -131,7 +123,7 @@ export const boundedMetadataSchema = z.unknown().transform((input, context) => {
 const emailAddressValueSchema = z.string()
   .trim()
   .max(320)
-  .refine((value) => !controlCharacters.test(value), "Email address contains control characters")
+  .refine((value) => !containsControlCharacters(value), "Email address contains control characters")
   .pipe(z.email())
   .transform((value) => value.toLowerCase());
 
@@ -140,7 +132,7 @@ export const normalizedEmailAddressSchema = z.object({
   displayName: z.string()
     .trim()
     .max(200)
-    .refine((value) => !lineBreaks.test(value) && !controlCharacters.test(value), "Display name is invalid")
+    .refine((value) => !lineBreaks.test(value) && !containsControlCharacters(value), "Display name is invalid")
     .optional(),
 }).strict();
 
@@ -174,7 +166,7 @@ export const normalizedHeaderMapSchema = z.record(z.string(), z.string()).transf
       continue;
     }
     const value = rawValue.trim();
-    if (!value || value.length > 998 || lineBreaks.test(value) || controlCharacters.test(value)) {
+    if (!value || value.length > 998 || lineBreaks.test(value) || containsControlCharacters(value)) {
       context.addIssue({ code: "custom", path: [rawName], message: "Header value is invalid" });
       continue;
     }
@@ -193,11 +185,11 @@ export const attachmentMetadataSchema = z.object({
     .trim()
     .min(1)
     .max(255)
-    .refine((value) => !controlCharacters.test(value) && !/[\\/]/.test(value), "filename is invalid"),
+    .refine((value) => !containsControlCharacters(value) && !/[\\/]/.test(value), "filename is invalid"),
   contentType: z.string().trim().min(1).max(127).regex(/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i),
   sizeBytes: z.number().int().nonnegative().max(integrationBoundaryLimits.attachmentBytes),
   disposition: z.enum(["attachment", "inline"]).default("attachment"),
-  contentId: safeString(255, "contentId").optional(),
+  contentId: safeBoundedTextSchema("contentId", 255).optional(),
   checksum: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
 }).strict();
 
@@ -231,7 +223,7 @@ export const normalizedMessageEnvelopeSchema = z.object({
   subject: z.string()
     .trim()
     .max(integrationBoundaryLimits.subjectCharacters)
-    .refine((value) => !lineBreaks.test(value) && !controlCharacters.test(value), "Subject is invalid")
+    .refine((value) => !lineBreaks.test(value) && !containsControlCharacters(value), "Subject is invalid")
     .optional(),
   textBody: z.string().max(integrationBoundaryLimits.textBodyCharacters).optional(),
   htmlBody: z.string().max(integrationBoundaryLimits.htmlBodyCharacters).optional(),
@@ -239,7 +231,7 @@ export const normalizedMessageEnvelopeSchema = z.object({
   attachments: z.array(attachmentMetadataSchema).max(integrationBoundaryLimits.attachments).default([]),
   sentAt: isoDateTimeInputSchema.optional(),
   receivedAt: isoDateTimeInputSchema,
-  rawReference: safeString(500, "rawReference").optional(),
+  rawReference: safeBoundedTextSchema("rawReference", 500).optional(),
   metadata: boundedMetadataSchema.default({}),
 }).strict();
 
@@ -262,7 +254,7 @@ export function createExternalTicketReferenceSchema({ allowLocalhostHttp = false
         context.addIssue({ code: "custom", message: "Ticket URL must use HTTPS" });
       }
     }).optional(),
-    lastKnownState: safeString(100, "lastKnownState").optional(),
+    lastKnownState: safeBoundedTextSchema("lastKnownState", 100).optional(),
     lastSyncedAt: isoDateTimeInputSchema.optional(),
     correlationId: correlationIdSchema,
     metadata: boundedMetadataSchema.default({}),
@@ -294,7 +286,7 @@ export const retryMetadataSchema = z.object({
 export const integrationFailureSchema = z.object({
   category: integrationErrorCategorySchema,
   code: z.string().trim().min(1).max(80).regex(/^[A-Z0-9_]+$/),
-  safeMessage: z.string().trim().min(1).max(240).refine((value) => !controlCharacters.test(value)),
+  safeMessage: z.string().trim().min(1).max(240).refine((value) => !containsControlCharacters(value)),
   retryable: z.boolean(),
   provider: integrationProviderSchema,
   operation: integrationOperationSchema,
@@ -320,7 +312,7 @@ export const integrationEventSchema = z.discriminatedUnion("eventType", [
     eventType: z.literal("message.received"),
     payload: z.object({
       externalMessageId: externalMessageIdSchema,
-      rawReference: safeString(500, "rawReference").optional(),
+      rawReference: safeBoundedTextSchema("rawReference", 500).optional(),
     }).strict(),
   }).strict(),
   z.object({

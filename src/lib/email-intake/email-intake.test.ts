@@ -10,7 +10,8 @@ import { context, createAggregate, dependencies, envelope } from "./test-fixture
 
 describe("email intake aggregate", () => {
   it("normalizes B2 message envelopes into an immutable first-class record", () => {
-    const result = EmailIntakeAggregate.create(envelope(), "system", dependencies());
+    const input = envelope();
+    const result = EmailIntakeAggregate.create(input, "system", dependencies());
     const record = result.aggregate.toRecord();
 
     expect(record).toMatchObject({
@@ -24,9 +25,25 @@ describe("email intake aggregate", () => {
     expect(result.events[0].eventType).toBe("EmailIntakeCreated");
     expect(result.aggregate.auditHistory[0].action).toBe("created");
     expect(Object.isFrozen(result.aggregate.auditHistory)).toBe(true);
+    expect(Object.isFrozen(result.events[0].payload)).toBe(true);
 
     record.subject = "mutated copy";
-    expect(result.aggregate.toRecord().subject).toBe("Support request");
+    record.sender.address = "record-copy@example.com";
+    record.recipients.push({ address: "record-copy@example.com" });
+    record.attachmentSummary[0].filename = "record-copy.png";
+    record.metadata.mailbox = "record-copy";
+    input.sender.address = "caller-input@example.com";
+    input.recipients[0].address = "caller-input@example.com";
+    input.attachments[0].filename = "caller-input.png";
+    input.metadata.mailbox = "caller-input";
+
+    expect(result.aggregate.toRecord()).toMatchObject({
+      subject: "Support request",
+      sender: { address: "agent@example.com" },
+      recipients: [{ address: "support@example.com" }],
+      attachmentSummary: [{ filename: "evidence.png" }],
+      metadata: { mailbox: "support" },
+    });
   });
 
   it("moves only through allowed lifecycle transitions and emits explicit events", () => {
@@ -51,7 +68,17 @@ describe("email intake aggregate", () => {
 
   it("rejects direct jumps and exposes lifecycle rules without mutable references", () => {
     const aggregate = createAggregate();
-    expect(() => aggregate.transitionTo("COMPLETED", context("2026-07-18T03:22:00.000Z"))).toThrow(InvalidStatusTransition);
+    try {
+      aggregate.transitionTo("COMPLETED", context("2026-07-18T03:22:00.000Z"));
+      throw new Error("Expected status transition to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidStatusTransition);
+      const transition = error as InvalidStatusTransition;
+      expect(transition.sourceStatus).toBe("RECEIVED");
+      expect(transition.targetStatus).toBe("COMPLETED");
+      expect(Object.keys(transition)).not.toContain("sourceStatus");
+      expect(transition.toPublic()).not.toHaveProperty("sourceStatus");
+    }
     const transitions = allowedEmailIntakeTransitions("RECEIVED");
     transitions.length = 0;
     expect(allowedEmailIntakeTransitions("RECEIVED")).toEqual(["VALIDATED", "FAILED", "REJECTED"]);

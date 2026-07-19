@@ -1,19 +1,38 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { removeTemporaryTestDirectory } from "../../../scripts/test-path-safety.mjs";
 import { IntegrationBoundaryError } from "../integrations";
 import { DuplicateEmailIntake, EmailIntakeNotFound } from "./errors";
 import { createJsonEmailIntakeRepository, type EmailIntakeJsonStore } from "./json-repository";
+import { createLocalEmailIntakeJsonStore } from "./local-json-store";
 import { createRelationalEmailIntakeRepository, type EmailIntakeRelationalStore } from "./relational-repository";
 import { createEmailIntakeRepositoryForBackend } from "./repository-factory";
 import { recordsShareIdentity, type EmailIntakeRepository } from "./repository";
 import type { EmailIntakeRecord } from "./schemas";
 import { context, correlationId, createAggregate } from "./test-fixtures";
 
-function jsonStore(): EmailIntakeJsonStore {
+vi.mock("server-only", () => ({}));
+
+const temporaryPrefix = "supper-email-intake-test-";
+const temporaryDirectories = new Set<string>();
+
+function memoryJsonStore(): EmailIntakeJsonStore {
   let records: EmailIntakeRecord[] = [];
   return {
     read: async () => structuredClone(records),
     write: async (next) => { records = structuredClone([...next]); },
   };
+}
+
+function localJsonRepository() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), temporaryPrefix));
+  temporaryDirectories.add(directory);
+  return createJsonEmailIntakeRepository(
+    createLocalEmailIntakeJsonStore(directory),
+    { allowTestDelete: true },
+  );
 }
 
 function relationalStore(): EmailIntakeRelationalStore {
@@ -35,9 +54,16 @@ function relationalStore(): EmailIntakeRelationalStore {
 }
 
 const repositoryFactories = [
-  ["JSON", () => createJsonEmailIntakeRepository(jsonStore(), { allowTestDelete: true })],
+  ["JSON", localJsonRepository],
   ["relational", () => createRelationalEmailIntakeRepository(relationalStore(), { allowTestDelete: true })],
 ] as const;
+
+afterEach(async () => {
+  for (const directory of temporaryDirectories) {
+    await removeTemporaryTestDirectory(directory, temporaryPrefix);
+  }
+  temporaryDirectories.clear();
+});
 
 function contract(name: string, createRepository: () => EmailIntakeRepository) {
   describe(`${name} email intake repository contract`, () => {
@@ -121,7 +147,7 @@ for (const [name, createRepository] of repositoryFactories) contract(name, creat
 describe("email intake repository factory", () => {
   it("routes both JSON backend modes through the JSON repository", async () => {
     for (const backend of ["local-json", "supabase"] as const) {
-      const repository = await createEmailIntakeRepositoryForBackend({ backend, jsonStore: jsonStore(), allowTestDelete: true });
+      const repository = await createEmailIntakeRepositoryForBackend({ backend, jsonStore: memoryJsonStore(), allowTestDelete: true });
       const aggregate = createAggregate(`message-factory-${backend}`);
       await repository.create(aggregate);
       expect((await repository.list()).map((item) => item.intakeId)).toEqual([aggregate.intakeId]);
@@ -140,7 +166,7 @@ describe("email intake repository factory", () => {
   });
 
   it("keeps test deletion disabled by default", async () => {
-    const repository = createJsonEmailIntakeRepository(jsonStore());
+    const repository = createJsonEmailIntakeRepository(memoryJsonStore());
     await expect(repository.deleteForTestsOnly("missing", correlationId)).rejects.toBeInstanceOf(IntegrationBoundaryError);
   });
 });

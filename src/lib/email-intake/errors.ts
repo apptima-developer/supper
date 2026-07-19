@@ -1,14 +1,20 @@
-import {
-  IntegrationBoundaryError,
-  type IntegrationCorrelationId,
-  type IntegrationOperation,
-  type IntegrationProvider,
-} from "../integrations";
+import type {
+  IntegrationCorrelationId,
+  IntegrationOperation,
+  IntegrationProvider,
+} from "../integrations/contracts";
+import { IntegrationBoundaryError } from "../integrations/errors";
+import type { EmailIntakeStatus } from "./schemas";
 
 type ErrorContext = {
   correlationId: IntegrationCorrelationId;
   provider?: IntegrationProvider;
   operation?: IntegrationOperation;
+};
+
+type StatusTransitionContext = ErrorContext & {
+  sourceStatus: EmailIntakeStatus;
+  targetStatus: EmailIntakeStatus;
 };
 
 export class DuplicateEmailIntake extends IntegrationBoundaryError {
@@ -27,7 +33,10 @@ export class DuplicateEmailIntake extends IntegrationBoundaryError {
 }
 
 export class InvalidStatusTransition extends IntegrationBoundaryError {
-  constructor(context: ErrorContext) {
+  readonly sourceStatus: EmailIntakeStatus;
+  readonly targetStatus: EmailIntakeStatus;
+
+  constructor(context: StatusTransitionContext) {
     super({
       category: "conflict",
       code: "INVALID_EMAIL_INTAKE_STATUS_TRANSITION",
@@ -38,6 +47,12 @@ export class InvalidStatusTransition extends IntegrationBoundaryError {
       correlationId: context.correlationId,
     });
     this.name = "InvalidStatusTransition";
+    this.sourceStatus = context.sourceStatus;
+    this.targetStatus = context.targetStatus;
+    Object.defineProperties(this, {
+      sourceStatus: { enumerable: false },
+      targetStatus: { enumerable: false },
+    });
   }
 }
 

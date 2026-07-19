@@ -215,3 +215,15 @@ Post-modification results:
 | Report templates | PASS; both SHA-256 values exactly match the pre-modification inventory. |
 
 The B3 tests cover aggregate immutability and validation, lifecycle transitions, audit history, event objects, processor/retry metadata, stable idempotency, duplicate external-message detection, repository contracts, JSON and relational adapters, backend factory routing, search filters, deterministic sorting, pagination, and explicitly gated test deletion. All persistence tests use in-memory adapters; no Supabase or other network connection is opened.
+
+## Patch B3.5 - Architecture Consolidation and Production Safety
+
+Patch B3.5 starts from Golden Source `supper-source-audit-3bcb4e9.zip` at source commit `3bcb4e93b68f3ee722b156c402ce7c981b7d5e6d`. Previous baseline sections remain unchanged and no older patch is replayed.
+
+The Golden Source baseline passed `npm ci`, 18 test files with 156 tests, lint, the Next.js 16.2.9 production build, migration verification, runtime-asset verification, and isolated `local-json` build-environment verification. Production-data paths, all four migrations, both report templates, and deployment/build configuration were hashed before implementation using external read-only manifests.
+
+B3.5 narrows domain barrels, makes domain-to-infrastructure dependency rules mechanically verifiable, consolidates duplicated pure text-validation primitives, preserves invalid-transition context internally without changing public serialization, moves JSON repository contracts onto real guarded temp-file tests, and adds read-only architecture/data-integrity commands. Backend selection, storage keys, SQL, migrations, environment variables, API routes, UI, authentication, sessions, Origin protection, and business behavior are unchanged.
+
+Detailed boundaries, destructive-operation inventory, verification behavior, manual read-only regression steps, and remaining risks are documented in [architecture-consolidation.md](architecture-consolidation.md). B4 is not started.
+
+Final B3.5 verification passed `npm ci`, 21 test files with 165 tests, lint, the Next.js 16.2.9 production build, runtime assets, migrations, build environment, architecture boundaries, and active-data integrity. An isolated read-only manual regression returned liveness 200, readiness 200, login 200, and anonymous dashboard redirect 307. External pre/post manifests confirmed identical content, size, and modification time for all 337 repository data files; all four migrations, both report templates, the lockfile, and deployment/build configuration also matched exactly. `package.json` changed only for the two new verification commands.

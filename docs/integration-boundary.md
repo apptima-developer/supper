@@ -78,9 +78,9 @@ The in-memory connector is for tests and contract examples only. The input is de
 
 ```ts
 import {
-  InMemoryIntegrationConnector,
   deriveMessageIdempotencyKey,
 } from "@/lib/integrations";
+import { InMemoryIntegrationConnector } from "@/lib/integrations/in-memory-adapter";
 
 const connector = new InMemoryIntegrationConnector<{ externalMessageId: string }, { accepted: boolean }>({
   provider: "email",

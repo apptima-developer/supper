@@ -1,12 +1,11 @@
-import {
-  IntegrationBoundaryError,
-  correlationIdSchema,
-  deriveMessageIdempotencyKey,
-  integrationBoundaryLimits,
-  normalizeMessageEnvelope,
-  type IntegrationCorrelationId,
-  type JsonObject,
-} from "../integrations";
+import type {
+  IntegrationCorrelationId,
+  JsonObject,
+} from "../integrations/contracts";
+import { IntegrationBoundaryError } from "../integrations/errors";
+import { deriveMessageIdempotencyKey } from "../integrations/idempotency";
+import { normalizeMessageEnvelope } from "../integrations/normalization";
+import { correlationIdSchema, integrationBoundaryLimits } from "../integrations/schemas";
 import { InvalidStatusTransition } from "./errors";
 import { eventTypeForStatus, type EmailIntakeDomainEvent } from "./events";
 import {
@@ -202,6 +201,8 @@ export class EmailIntakeAggregate {
         provider: this.#record.provider,
         operation: "event.handle",
         correlationId: this.#record.correlationId,
+        sourceStatus: this.#record.currentStatus,
+        targetStatus: nextStatus,
       });
     }
     if (nextStatus === "RECEIVED") {
@@ -209,6 +210,8 @@ export class EmailIntakeAggregate {
         provider: this.#record.provider,
         operation: "event.handle",
         correlationId: this.#record.correlationId,
+        sourceStatus: this.#record.currentStatus,
+        targetStatus: nextStatus,
       });
     }
 
@@ -287,6 +290,8 @@ export class EmailIntakeAggregate {
         provider: this.#record.provider,
         operation: "event.handle",
         correlationId: this.#record.correlationId,
+        sourceStatus: this.#record.currentStatus,
+        targetStatus: "FAILED",
       });
     }
     if (this.#record.retryCount >= integrationBoundaryLimits.retryAttempts) {

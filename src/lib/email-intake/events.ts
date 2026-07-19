@@ -1,7 +1,7 @@
 import type {
   IntegrationCorrelationId,
   IntegrationIdempotencyKey,
-} from "../integrations";
+} from "../integrations/contracts";
 import type { EmailIntakeStatus } from "./schemas";
 
 export const emailIntakeEventTypes = [

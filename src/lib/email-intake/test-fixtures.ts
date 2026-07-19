@@ -1,8 +1,5 @@
-import {
-  correlationIdSchema,
-  deriveMessageIdempotencyKey,
-  externalMessageIdSchema,
-} from "../integrations";
+import { deriveMessageIdempotencyKey } from "../integrations/idempotency";
+import { correlationIdSchema, externalMessageIdSchema } from "../integrations/schemas";
 import { EmailIntakeAggregate } from "./aggregate";
 
 export const correlationId = correlationIdSchema.parse("request-email-intake-1234");

@@ -9,6 +9,7 @@ import {
   type IntegrationOperation,
   type IntegrationProvider,
 } from "./contracts";
+import { containsControlCharacters } from "./validation";
 
 type IntegrationBoundaryErrorOptions = {
   category: IntegrationErrorCategory;
@@ -29,7 +30,7 @@ function normalizeCode(value: string) {
 
 function normalizeSafeMessage(value: string) {
   const message = value.trim();
-  if (!message || message.length > 240 || /[\u0000-\u001f\u007f]/.test(message)) {
+  if (!message || message.length > 240 || containsControlCharacters(message)) {
     throw new TypeError("Integration safe message is invalid");
   }
   return message;

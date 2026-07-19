@@ -40,8 +40,6 @@ export {
   type IdempotencyMaterial,
 } from "./idempotency";
 
-export { InMemoryIntegrationConnector } from "./in-memory-adapter";
-
 export {
   canRetry,
   createIntegrationEvent,
@@ -54,7 +52,6 @@ export {
 export {
   attachmentMetadataSchema,
   boundedMetadataSchema,
-  cloneBoundedJsonObject,
   correlationIdSchema,
   createExternalTicketReferenceSchema,
   externalMessageIdSchema,
