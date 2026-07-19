@@ -6,6 +6,9 @@ import { getDataBackend } from "./env";
 import { usesRelationalCoreStorage } from "./storage-routing";
 import { resolveRelationalImportSnapshotMarker } from "./import-rollback-policy";
 
+export { createEmailIntakeRepositoryForBackend, getEmailIntakeRepository } from "./email-intake/repository-factory";
+export type { EmailIntakeRepository } from "./email-intake/repository";
+
 const paths = {
   customers: "core/customers.json",
   tickets: "core/tickets.json",

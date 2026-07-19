@@ -24,7 +24,9 @@ Monthly report runtime files remain a documented deployment limitation and are n
 
 ## Integration architecture
 
-The provider-neutral integration boundary lives in `src/lib/integrations/`. It defines validated message and ticket envelopes, versioned events, stable idempotency, bounded retry metadata, safe errors, and a generic connector contract. It does not contain a live email, n8n, ServiceNow, HTTP, queue, worker, persistence, or provider implementation. See [integration boundary](docs/integration-boundary.md) before extending it in a later patch.
+The provider-neutral integration boundary lives in `src/lib/integrations/`. It defines validated message and ticket envelopes, versioned events, stable idempotency, bounded retry metadata, safe errors, and a generic connector contract.
+
+The Email Intake domain in `src/lib/email-intake/` builds on that boundary with an immutable aggregate, explicit lifecycle, audit history, domain-event objects, duplicate protection, search, and repository adapters for every existing storage backend. It still does not connect to a provider, read or send mail, publish events, schedule work, expose an API, or change UI. See the [integration boundary](docs/integration-boundary.md) and [Email Intake domain](docs/email-intake-domain.md) before extending this foundation.
 
 ## Production security setup
 

@@ -178,3 +178,40 @@ Post-modification results:
 Post-modification migration and report-template SHA-256 values exactly matched the pre-modification values recorded above. No migration was added, removed, renamed, reordered, or edited, and neither report template changed.
 
 The manual regression used an isolated temporary source copy with an empty disposable `local-json` dataset and a disposable administrator account. It did not use or mutate repository data, production data, Supabase, backups, imports, customer records, tickets, master data, accounts, reports, or settings. No test credential or hash was added to the repository.
+
+## Patch B3 - Email Intake Domain and Persistence
+
+Patch B3 starts from the supplied Golden Source `supper-source-audit-9c99d56.zip` at source commit `9c99d56`. The documented B0, B1, and B2 sections above remain append-only; no older patch was replayed.
+
+Before B3 source changes, the Golden Source was extracted into an isolated temporary directory. The minimal audit archive omitted the two tracked binary report templates, so only those approved assets were copied into the disposable verification directory. Their SHA-256 values remained `6bf1c606328e38e0af6b10a90a0ca6ea6702a0d0c4226546711b0d8d36ffefd9` and `42c3a78481508c16656e082d55bbc0ec3a8ad989b9c175788bffbaccd3440c5b`.
+
+Pre-modification results:
+
+| Command | Result |
+| --- | --- |
+| `npm ci` | PASS; 593 packages installed with the previously documented transitive deprecation warnings only. |
+| `npm test` | PASS; 16 files and 139 tests. |
+| `npm run lint` | PASS. |
+| `npm run build` | PASS; Next.js 16.2.9 production build completed. |
+| `npm run verify:migrations` | PASS; four ordered migration files verified. |
+| `npm run verify:runtime-assets` | PASS; required assets present and the optional runtime mapping override absent. |
+| `npm run verify:build-env` | PASS for the isolated `local-json` development configuration. |
+
+B3 adds an immutable provider-neutral Email Intake aggregate, lifecycle, audit entries, domain-event objects, repository contract, shared search and persistence behavior, and adapters for `local-json`, Supabase `app_store`, and the existing relational storage model. It does not add a provider, transport, API route, UI, event publisher, queue, worker, scheduler, webhook, background process, environment variable, package, SQL migration, or schema change. Detailed design and limitations are in [email-intake-domain.md](email-intake-domain.md).
+
+The four immutable migrations and both report-template assets must retain the checksums recorded above after final verification. No SQL is executed and no production or repository data is read, written, migrated, or deleted by B3 verification.
+
+Post-modification results:
+
+| Command or invariant | Result |
+| --- | --- |
+| `npm test` | PASS; 18 files and 156 tests. |
+| `npm run lint` | PASS without findings. |
+| `npm run build` | PASS; Next.js 16.2.9 compiled, completed TypeScript checks, generated 20 static pages, and finalized optimization. |
+| `npm run verify:runtime-assets` | PASS; required templates and import mapping sources are present. |
+| `npm run verify:migrations` | PASS; the same four ordered migrations remain valid. |
+| `npm run verify:build-env` | PASS for the selected local development backend. |
+| Migration inventory | PASS; all four SHA-256 values exactly match the pre-modification inventory. |
+| Report templates | PASS; both SHA-256 values exactly match the pre-modification inventory. |
+
+The B3 tests cover aggregate immutability and validation, lifecycle transitions, audit history, event objects, processor/retry metadata, stable idempotency, duplicate external-message detection, repository contracts, JSON and relational adapters, backend factory routing, search filters, deterministic sorting, pagination, and explicitly gated test deletion. All persistence tests use in-memory adapters; no Supabase or other network connection is opened.
