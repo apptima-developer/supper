@@ -1,12 +1,13 @@
 "use client";
 
-import { CheckCircle2, CloudCog, Loader2, RefreshCw, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { CheckCircle2, CloudCog, Loader2, Play, RefreshCw, SearchCheck, TriangleAlert } from "lucide-react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import type { ServiceNowConfigSummary } from "@/lib/integrations/servicenow/config";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Dialog, DialogContent } from "./ui/dialog";
 
 type SampleIncident = {
   number: string;
@@ -15,6 +16,23 @@ type SampleIncident = {
   priority?: string;
   openedAt?: string;
   assignmentGroupReference?: string;
+};
+
+type SyncSummary = {
+  runId?: string;
+  mode?: "initial" | "incremental";
+  status?: string;
+  dryRun?: boolean;
+  fetched?: number;
+  created?: number;
+  updated?: number;
+  unchanged?: number;
+  stale?: number;
+  failed?: number;
+  currentWatermark?: string;
+  watermarkTo?: string;
+  lastSuccess?: string;
+  safeErrorCategory?: string;
 };
 
 function displayTimestamp(value?: string) {
@@ -36,12 +54,33 @@ function errorCategory(body: unknown) {
 }
 
 export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSummary }) {
-  const [busy, setBusy] = useState<"test" | "load" | "">("");
+  const [busy, setBusy] = useState<"test" | "load" | "sync" | "refresh" | "">("");
   const [connection, setConnection] = useState<"idle" | "connected" | "failed">("idle");
   const [testedAt, setTestedAt] = useState<string>();
   const [lastErrorCategory, setLastErrorCategory] = useState<string>();
   const [incidents, setIncidents] = useState<SampleIncident[]>([]);
+  const [sync, setSync] = useState<SyncSummary>();
+  const [confirmMode, setConfirmMode] = useState<"initial" | "incremental">();
   const enabled = config.enabled && config.configured;
+  const syncEnabled = enabled && config.syncEnabled;
+
+  const refreshSyncStatus = useCallback(async (quiet = false) => {
+    if (!quiet) setBusy("refresh");
+    try {
+      const response = await fetch("/api/integrations/servicenow/sync", { cache: "no-store" });
+      const body: unknown = await response.json();
+      if (!response.ok) throw new Error(errorMessage(body, "Could not refresh synchronization status"));
+      const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      const runs = Array.isArray(value.runs) ? value.runs : [];
+      const latest = runs[0] && typeof runs[0] === "object" ? runs[0] as SyncSummary : {};
+      setSync({ ...latest, currentWatermark: typeof value.currentWatermark === "string" ? value.currentWatermark : undefined, lastSuccess: typeof value.lastSuccess === "string" ? value.lastSuccess : undefined });
+      if (!quiet) toast.success("Synchronization status refreshed");
+    } catch (error) {
+      if (!quiet) toast.error(error instanceof Error ? error.message : "Could not refresh synchronization status");
+    } finally {
+      if (!quiet) setBusy("");
+    }
+  }, []);
 
   async function runTest() {
     setBusy("test");
@@ -102,9 +141,32 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
     }
   }
 
+  async function runSync(mode: "initial" | "incremental", dryRun: boolean) {
+    if (busy) return;
+    setBusy("sync");
+    setConfirmMode(undefined);
+    try {
+      const response = await fetch("/api/integrations/servicenow/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, dryRun }),
+      });
+      const body: unknown = await response.json();
+      if (!response.ok) throw new Error(errorMessage(body, "ServiceNow synchronization failed"));
+      const value = body && typeof body === "object" ? body as SyncSummary : {};
+      setSync(value);
+      toast.success(`${dryRun ? "Dry run" : "Synchronization"} ${value.status || "completed"}`);
+      await refreshSyncStatus(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "ServiceNow synchronization failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
   return <Card>
     <CardHeader>
-      <div className="flex items-center gap-2"><CloudCog size={17} className="text-sky-600" /><CardTitle>ServiceNow read-only diagnostics</CardTitle></div>
+      <div className="flex items-center gap-2"><CloudCog size={17} className="text-sky-600" /><CardTitle>ServiceNow integration</CardTitle></div>
       <Badge tone={enabled ? "emerald" : config.enabled ? "amber" : "slate"}>{enabled ? "Configured" : config.enabled ? "Incomplete" : "Disabled"}</Badge>
     </CardHeader>
     <CardContent className="space-y-4">
@@ -122,6 +184,26 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
         <Button size="sm" disabled={!enabled || !!busy} onClick={loadSample}>{busy === "load" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}Load Sample Incidents</Button>
       </div>
 
+      <div className="rounded-xl border border-sky-100/80 bg-sky-50/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div><p className="text-[11px] font-semibold text-[#173b57]">Incident synchronization</p><p className="text-[10px] text-slate-400">Bounded, idempotent, and protected by a database lock.</p></div>
+          <Badge tone={syncEnabled ? "emerald" : "slate"}>{syncEnabled ? "Enabled" : "Disabled"}</Badge>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" disabled={!syncEnabled || !!busy} onClick={() => runSync("initial", true)}>{busy === "sync" ? <Loader2 size={13} className="animate-spin" /> : <SearchCheck size={13} />}Dry Run Initial Sync</Button>
+          <Button variant="outline" size="sm" disabled={!syncEnabled || !!busy} onClick={() => setConfirmMode("initial")}><Play size={13} />Run Initial Sync</Button>
+          <Button size="sm" disabled={!syncEnabled || !!busy} onClick={() => setConfirmMode("incremental")}><Play size={13} />Run Incremental Sync</Button>
+          <Button variant="ghost" size="sm" disabled={!enabled || !!busy} onClick={() => refreshSyncStatus()}>{busy === "refresh" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}Refresh Sync Status</Button>
+        </div>
+        <div className="mt-3 grid gap-2 text-[10px] sm:grid-cols-4">
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Latest run</span><p className="font-semibold text-slate-700">{sync?.status || "No run"}{sync?.dryRun ? " · dry run" : ""}</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Mode</span><p className="font-semibold capitalize text-slate-700">{sync?.mode || "-"}</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Results</span><p className="font-semibold text-slate-700">{sync?.fetched ?? 0} fetched · {sync?.created ?? 0} new · {sync?.updated ?? 0} updated</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Watermark</span><p className="truncate font-semibold text-slate-700" title={sync?.watermarkTo || sync?.currentWatermark}>{displayTimestamp(sync?.watermarkTo || sync?.currentWatermark)}</p></div>
+        </div>
+        {sync && <p className="mt-2 text-[10px] text-slate-400">Unchanged {sync.unchanged ?? 0} · stale {sync.stale ?? 0} · failed {sync.failed ?? 0} · last success {displayTimestamp(sync.lastSuccess)}{sync.safeErrorCategory ? ` · ${sync.safeErrorCategory}` : ""}</p>}
+      </div>
+
       <div className="overflow-hidden rounded-xl border border-sky-100/80">
         <div className="flex items-center justify-between bg-sky-50/50 px-3 py-2"><p className="text-[11px] font-semibold text-[#173b57]">Diagnostic sample</p><span className="text-[10px] text-slate-400">{incidents.length} results · never persisted</span></div>
         {incidents.length ? <div className="max-h-80 divide-y divide-sky-100/70 overflow-y-auto">{incidents.map((incident) => <div key={incident.number} className="space-y-1 px-3 py-3 text-[11px]">
@@ -130,6 +212,14 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
           <p className="text-[10px] text-slate-400">Opened {displayTimestamp(incident.openedAt)}{incident.assignmentGroupReference ? ` · ${incident.assignmentGroupReference}` : ""}</p>
         </div>)}</div> : <div className="px-3 py-8 text-center text-[11px] text-slate-400">No diagnostic records loaded. This action reads ServiceNow only.</div>}
       </div>
+      <Dialog open={Boolean(confirmMode)} onOpenChange={(open) => { if (!open) setConfirmMode(undefined); }}>
+        <DialogContent title={`Run ${confirmMode || ""} ServiceNow sync?`} description="This will update ServiceNow-owned ticket fields. SUPPER effort, billing, logs, and confirmed customer mapping are preserved.">
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setConfirmMode(undefined)}>Cancel</Button>
+            <Button disabled={!confirmMode || !!busy} onClick={() => confirmMode && runSync(confirmMode, false)}><Play size={14} />Confirm sync</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </CardContent>
   </Card>;
 }

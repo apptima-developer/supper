@@ -132,6 +132,31 @@ describe("ServiceNow read-only adapter", () => {
     expect(headers.get("Authorization")).toMatch(/^Basic /);
   });
 
+  it("builds trusted incremental queries with stable ordering", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse({ result: [record()] }));
+    const config = parseServiceNowConfig(basicEnv);
+    if (!config.enabled) throw new Error("expected enabled config");
+    const client = new (await import("./client")).ServiceNowReadClient(config, { fetch: fetchMock as typeof fetch });
+    const page = await client.listIncidentRecordsPage({ limit: 1, offset: 20, updatedAfter: "2026-07-20T00:00:00.000Z" }, correlationId);
+    expect(page).toHaveLength(1);
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(url.searchParams.get("sysparm_query")).toBe("sys_updated_on>=2026-07-20 00:00:00^ORDERBYsys_updated_on^ORDERBYsys_id");
+    expect(url.searchParams.get("sysparm_offset")).toBe("20");
+    expect(url.searchParams.get("sysparm_fields")?.split(",")).toEqual([...serviceNowIncidentFields]);
+  });
+
+  it("rejects an invalid Incident timestamp instead of substituting the current time", async () => {
+    const adapter = new ServiceNowReadOnlyAdapter(parseServiceNowConfig(basicEnv), { fetch: vi.fn(async () => jsonResponse({ result: [record({ sys_updated_on: "not-a-date" })] })) as typeof fetch });
+    await expect(adapter.listIncidents({ limit: 1, offset: 0 }, correlationId)).rejects.toMatchObject({ code: "SERVICENOW_INVALID_INCIDENT" });
+  });
+
+  it("rejects a provider page that exceeds the requested synchronization bound", async () => {
+    const config = parseServiceNowConfig(basicEnv);
+    if (!config.enabled) throw new Error("expected enabled config");
+    const client = new (await import("./client")).ServiceNowReadClient(config, { fetch: vi.fn(async () => jsonResponse({ result: [record(), record({ sys_id: "b".repeat(32) })] })) as typeof fetch });
+    await expect(client.listIncidentRecordsPage({ limit: 1, offset: 0, updatedAfter: "2026-07-20T00:00:00.000Z" }, correlationId)).rejects.toMatchObject({ code: "SERVICENOW_PAGE_LIMIT_EXCEEDED" });
+  });
+
   it("paginates and enforces the maximum-page guard", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ result: [record({ sys_id: "b".repeat(32) })] }));
     const config = parseServiceNowConfig({ ...basicEnv, SERVICENOW_PAGE_SIZE: "1" });

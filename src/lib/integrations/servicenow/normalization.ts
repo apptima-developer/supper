@@ -23,12 +23,13 @@ function optional(value: string) {
   return value || undefined;
 }
 
-function timestamp(value: unknown) {
+export function parseServiceNowTimestamp(value: unknown) {
   const raw = normalizeServiceNowField(value);
   if (!raw) return undefined;
   const isoLike = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw) ? `${raw.replace(" ", "T")}Z` : raw;
   const date = new Date(isoLike);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid ServiceNow timestamp");
+  return date.toISOString();
 }
 
 export function normalizeServiceNowIncident(record: RawRecord, config: ServiceNowEnabledConfig): NormalizedServiceNowIncident {
@@ -45,20 +46,23 @@ export function normalizeServiceNowIncident(record: RawRecord, config: ServiceNo
     title,
     description: optional(normalizeServiceNowField(record.description, true)),
     state: optional(normalizeServiceNowField(record.state, true)),
+    stateValue: optional(normalizeServiceNowField(record.state)),
     priority: optional(normalizeServiceNowField(record.priority, true)),
+    priorityValue: optional(normalizeServiceNowField(record.priority)),
     impact: optional(normalizeServiceNowField(record.impact, true)),
     urgency: optional(normalizeServiceNowField(record.urgency, true)),
     customerReference: optional(normalizeServiceNowField(record.company, true)),
+    customerExternalId: optional(normalizeServiceNowField(record.company)),
     callerReference: optional(normalizeServiceNowField(record.caller_id, true)),
     assignedUserReference: optional(normalizeServiceNowField(record.assigned_to, true)),
     assignmentGroupReference: optional(normalizeServiceNowField(record.assignment_group, true)),
     category: optional(normalizeServiceNowField(record.category, true)),
     subcategory: optional(normalizeServiceNowField(record.subcategory, true)),
-    openedAt: timestamp(record.opened_at),
-    resolvedAt: timestamp(record.resolved_at),
-    closedAt: timestamp(record.closed_at),
-    createdAt: timestamp(record.sys_created_on),
-    lastUpdatedAt: timestamp(record.sys_updated_on),
+    openedAt: parseServiceNowTimestamp(record.opened_at),
+    resolvedAt: parseServiceNowTimestamp(record.resolved_at),
+    closedAt: parseServiceNowTimestamp(record.closed_at),
+    createdAt: parseServiceNowTimestamp(record.sys_created_on),
+    lastUpdatedAt: parseServiceNowTimestamp(record.sys_updated_on),
     providerMetadata: { table: config.incidentTable },
   });
 }

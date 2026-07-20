@@ -73,6 +73,34 @@ export const ticketSlaPauseSchema = z.object({
 });
 export type TicketSlaPause = z.infer<typeof ticketSlaPauseSchema>;
 
+export const ticketServiceNowSchema = z.object({
+  provider: z.literal("servicenow"),
+  externalSysId: z.string().max(200),
+  externalNumber: z.string().max(100),
+  externalUrl: z.string().url().max(2_000),
+  description: z.string().max(20_000).optional(),
+  rawState: z.string().max(100).optional(),
+  rawStateValue: z.string().max(100).optional(),
+  rawPriority: z.string().max(100).optional(),
+  rawPriorityValue: z.string().max(100).optional(),
+  impact: z.string().max(100).optional(),
+  urgency: z.string().max(100).optional(),
+  subcategory: z.string().max(200).optional(),
+  companyReference: z.string().max(500).optional(),
+  companyExternalId: z.string().max(500).optional(),
+  callerReference: z.string().max(500).optional(),
+  assignedUserReference: z.string().max(500).optional(),
+  assignmentGroupReference: z.string().max(500).optional(),
+  openedAt: z.string().datetime().optional(),
+  externalCreatedAt: z.string().datetime().optional(),
+  resolvedAt: z.string().datetime().optional(),
+  closedAt: z.string().datetime().optional(),
+  externalUpdatedAt: z.string().datetime(),
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  mappingWarnings: z.array(z.string().max(80)).max(10).default([]),
+}).strict();
+export type TicketServiceNow = z.infer<typeof ticketServiceNowSchema>;
+
 export const ticketSchema = z.object({
   id: z.string(),
   issueId: z.string(),
@@ -95,6 +123,8 @@ export const ticketSchema = z.object({
   remark: z.string(),
   ticketLogs: z.array(ticketLogSchema).default([]),
   slaPauses: z.array(ticketSlaPauseSchema).default([]),
+  serviceNow: ticketServiceNowSchema.optional(),
+  requiresCustomerMapping: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

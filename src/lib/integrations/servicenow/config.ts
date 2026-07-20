@@ -38,6 +38,7 @@ export type ServiceNowConfig = ServiceNowEnabledConfig | { enabled: false };
 export type ServiceNowConfigSummary = {
   enabled: boolean;
   configured: boolean;
+  syncEnabled: boolean;
   hostname?: string;
   authMode?: "basic" | "oauth_client_credentials";
   errorCategory?: "disabled" | "configuration";
@@ -60,14 +61,15 @@ export function parseServiceNowConfig(env: Record<string, string | undefined>): 
 }
 
 export function summarizeServiceNowConfig(env: Record<string, string | undefined>): ServiceNowConfigSummary {
-  if (env.SERVICENOW_ENABLED !== "true") return { enabled: false, configured: false, errorCategory: "disabled" };
+  const syncEnabled = env.SERVICENOW_SYNC_ENABLED === "true";
+  if (env.SERVICENOW_ENABLED !== "true") return { enabled: false, configured: false, syncEnabled, errorCategory: "disabled" };
   try {
     const config = parseServiceNowConfig(env);
-    if (!config.enabled) return { enabled: false, configured: false, errorCategory: "disabled" };
-    return { enabled: true, configured: true, hostname: new URL(config.instanceUrl).hostname, authMode: config.authMode };
+    if (!config.enabled) return { enabled: false, configured: false, syncEnabled, errorCategory: "disabled" };
+    return { enabled: true, configured: true, syncEnabled, hostname: new URL(config.instanceUrl).hostname, authMode: config.authMode };
   } catch {
     let hostname: string | undefined;
     try { hostname = env.SERVICENOW_INSTANCE_URL ? new URL(env.SERVICENOW_INSTANCE_URL).hostname : undefined; } catch { hostname = undefined; }
-    return { enabled: true, configured: false, ...(hostname ? { hostname } : {}), errorCategory: "configuration" };
+    return { enabled: true, configured: false, syncEnabled, ...(hostname ? { hostname } : {}), errorCategory: "configuration" };
   }
 }

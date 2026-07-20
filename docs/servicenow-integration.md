@@ -1,4 +1,4 @@
-# ServiceNow read-only integration
+# ServiceNow integration
 
 ## AI-1.0 scope
 
@@ -64,4 +64,8 @@ Server logs may contain only provider, operation, correlation/request ID, attemp
 6. Confirm the `support_tickets` row count is unchanged.
 7. Repeat the sample load and confirm the count remains unchanged.
 
-The next milestone may design persistent incremental synchronization with explicit mappings, checkpoints, idempotency, audit, and rollback. None of that behavior is included in AI-1.0.
+## AI-1.1 synchronization boundary
+
+AI-1.1 adds an administrator-triggered Incident synchronization pipeline behind the separate `SERVICENOW_SYNC_ENABLED` switch. AI-1.0 diagnostic routes remain read-only and continue to work when synchronization is disabled. The synchronization route cannot accept a provider URL, table, field list, encoded query, credential, or caller-supplied watermark. It issues ServiceNow `GET` requests only.
+
+Synchronization persistence is supported only with `DATA_BACKEND=supabase-relational`. It uses a durable external link, bounded run history, a successful-run watermark, database lock, deterministic source hash, stale protection, and an atomic ServiceNow Incident upsert. See [ServiceNow synchronization](./servicenow-sync.md) for the schema, ownership matrix, migration procedure, and acceptance flow.

@@ -8,6 +8,7 @@ import { serviceNowAdapterListQuerySchema, serviceNowDetailResponseSchema, servi
 import { normalizeServiceNowIncident } from "./normalization";
 
 export type ServiceNowListInput = { limit: number; offset: number; number?: string; updatedAfter?: string };
+export type ServiceNowSyncPageInput = { limit: number; offset: number; updatedAfter: string };
 
 function serviceNowDate(value: string) {
   return new Date(value).toISOString().slice(0, 19).replace("T", " ");
@@ -86,6 +87,22 @@ export class ServiceNowReadClient {
       if (page.length < pageLimit) break;
     }
     return { incidents: records.slice(0, validated.limit), pageCount };
+  }
+
+  async listIncidentRecordsPage(input: ServiceNowSyncPageInput, correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
+    const validated = serviceNowAdapterListQuerySchema.pick({ limit: true, offset: true, updatedAfter: true }).required({ updatedAfter: true }).parse(input);
+    const params = new URLSearchParams({
+      sysparm_fields: serviceNowIncidentFieldList,
+      sysparm_limit: String(Math.min(validated.limit, this.config.pageSize)),
+      sysparm_offset: String(validated.offset),
+      sysparm_display_value: "all",
+      sysparm_query: `sys_updated_on>=${serviceNowDate(validated.updatedAfter)}^ORDERBYsys_updated_on^ORDERBYsys_id`,
+    });
+    const raw = await this.request("", params, "ticket.list", correlationId, signal);
+    const parsed = serviceNowListResponseSchema.safeParse(raw);
+    if (!parsed.success) throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_UNEXPECTED_RESPONSE", safeMessage: "ServiceNow returned an unexpected Incident response", retryable: false, operation: "ticket.list", correlationId, cause: parsed.error });
+    if (parsed.data.result.length > Math.min(validated.limit, this.config.pageSize)) throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_PAGE_LIMIT_EXCEEDED", safeMessage: "ServiceNow returned more Incident records than requested", retryable: false, operation: "ticket.list", correlationId });
+    return parsed.data.result;
   }
 
   async testConnection(correlationId: IntegrationCorrelationId, signal?: AbortSignal) {

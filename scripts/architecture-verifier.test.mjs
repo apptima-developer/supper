@@ -12,6 +12,7 @@ const migrations = [
   "202607170002_security_foundation_corrections.sql",
   "202607180001_fix_login_rate_limit_rpc_conflict.sql",
   "202607180002_fix_login_rate_limit_rpc_variable_conflict.sql",
+  "202607200001_servicenow_incremental_sync.sql",
 ];
 
 function write(root, relative, source = "export {};\n") {
@@ -32,6 +33,8 @@ function fixture() {
     "src/lib/integrations/normalization.ts",
     "src/lib/integrations/schemas.ts",
     "src/lib/integrations/validation.ts",
+    "src/lib/integrations/sync/contracts.ts",
+    "src/lib/integrations/sync/lock-policy.ts",
     "src/lib/email-intake/aggregate.ts",
     "src/lib/email-intake/errors.ts",
     "src/lib/email-intake/events.ts",
