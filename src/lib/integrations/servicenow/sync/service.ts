@@ -8,13 +8,14 @@ import type { SyncMode } from "../../sync/contracts";
 import { correlationIdSchema } from "../../schemas";
 import { ServiceNowReadClient } from "../client";
 import { parseServiceNowConfig } from "../config";
-import { normalizeServiceNowField, normalizeServiceNowIncident } from "../normalization";
+import { normalizeServiceNowField, normalizeServiceNowIncident, parseServiceNowTimestamp } from "../normalization";
+import { serviceNowSysIdSchema } from "../schemas";
 import { parseServiceNowSyncConfig } from "./config";
 import { mapServiceNowIncidentToTicket, type MappedServiceNowIncident } from "./mapping";
 import { readServiceNowSyncStatus, ServiceNowSyncRepository } from "./repository";
 import type { SyncRepository } from "../../sync/contracts";
 import { ServiceNowSyncUnavailableError } from "./errors";
-import { writeServiceNowSyncAudit } from "./audit";
+import { writeServiceNowSyncAuditBestEffort } from "./audit";
 
 type Dependencies = {
   env?: Record<string, string | undefined>;
@@ -61,11 +62,23 @@ export async function syncServiceNowIncidents(
     now: dependencies.now,
     createId: dependencies.createId,
     provider: {
-      fetchPage: ({ updatedAfter, limit, offset, signal }) => client.listIncidentRecordsPage({ updatedAfter, limit, offset }, correlationId, signal),
+      fetchPage: ({ windowStart, windowEnd, cursor, limit, signal }) => client.listIncidentRecordsPage({ windowStart, windowEnd, cursor, limit }, correlationId, signal),
+      cursor: (raw) => {
+        const sysId = serviceNowSysIdSchema.parse(normalizeServiceNowField(raw.sys_id));
+        const updatedAt = parseServiceNowTimestamp(raw.sys_updated_on);
+        if (!updatedAt) throw Object.assign(new Error("ServiceNow Incident is missing sys_updated_on"), { code: "SYNC_CURSOR_INVALID" });
+        return { updatedAt, sysId };
+      },
       prepare: (raw, now) => {
         const incident = normalizeServiceNowIncident(raw, serviceNowConfig);
         const mapped = mapServiceNowIncidentToTicket(incident, { ticketId: (dependencies.createId ?? (() => crypto.randomUUID()))(), now });
-        return { externalSysId: incident.externalSysId, externalNumber: incident.number, sourceUpdatedAt: mapped.externalUpdatedAt, mapped };
+        return {
+          externalSysId: incident.externalSysId,
+          externalNumber: incident.number,
+          sourceUpdatedAt: mapped.externalUpdatedAt,
+          sourceCursor: { updatedAt: mapped.externalUpdatedAt, sysId: incident.externalSysId },
+          mapped,
+        };
       },
       identify: (raw) => ({
         externalSysId: normalizeServiceNowField(raw.sys_id) || undefined,
@@ -90,11 +103,11 @@ export async function syncServiceNowIncidents(
     });
   }
   if (!input.dryRun) {
-    try {
-      await writeServiceNowSyncAudit(summary, input.session, dependencies.audit ?? writeAudit);
-    } catch (error) {
-      logServerCritical("SERVICENOW_SYNC_COMPLETED_AUDIT_FAILED", error, { requestId: input.requestId, operation: "servicenow.sync", runId: summary.runId });
-    }
+    await writeServiceNowSyncAuditBestEffort(summary, input.session, {
+      write: dependencies.audit ?? writeAudit,
+      markFailed: repository.markAuditWriteFailed?.bind(repository),
+      reportCritical: (event, error) => logServerCritical(event, error, { requestId: input.requestId, operation: "servicenow.sync", runId: summary.runId }),
+    });
   }
   return summary;
 }

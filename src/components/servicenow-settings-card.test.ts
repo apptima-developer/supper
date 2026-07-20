@@ -25,4 +25,12 @@ describe("ServiceNow Settings card synchronization controls", () => {
     expect(source).toContain("sync.safeErrorCategory");
     expect(source).not.toMatch(/clientSecret|serviceRole|authorizationHeader|password/i);
   });
+
+  it("uses status-aware notifications and renders the secondary audit warning safely", () => {
+    expect(source).toContain("serviceNowSyncPresentation(value.status)");
+    expect(source).toContain('presentation.level === "success"');
+    expect(source).toContain('presentation.level === "warning"');
+    expect(source).toContain("toast.warning(message)");
+    expect(source).toContain("secondary audit warning");
+  });
 });

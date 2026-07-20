@@ -13,6 +13,7 @@ const migrations = [
   "202607180001_fix_login_rate_limit_rpc_conflict.sql",
   "202607180002_fix_login_rate_limit_rpc_variable_conflict.sql",
   "202607200001_servicenow_incremental_sync.sql",
+  "202607200002_servicenow_sync_reliability_corrections.sql",
 ];
 
 function write(root, relative, source = "export {};\n") {

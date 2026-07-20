@@ -8,7 +8,7 @@ import { ServiceNowSyncUnavailableError } from "./errors";
 type SyncStatusResult = {
   enabled: boolean;
   running: boolean;
-  state?: { watermarkAt?: string; lastAttemptAt?: string; lastSuccessfulSyncAt?: string };
+  state?: { watermarkAt?: string; watermarkSysId?: string; lastAttemptAt?: string; lastSuccessfulSyncAt?: string };
   runs: Array<Record<string, unknown>>;
 };
 
@@ -46,9 +46,14 @@ function safeSummary(summary: SyncRunSummary) {
     failed: summary.failed,
     pages: summary.pages,
     watermarkFrom: summary.watermarkFrom,
+    watermarkFromSysId: summary.watermarkFromSysId,
     watermarkTo: summary.watermarkTo,
+    watermarkToSysId: summary.watermarkToSysId,
+    windowStart: summary.windowStart,
+    windowEnd: summary.windowEnd,
     duration: summary.duration,
     safeErrorCategory: summary.safeErrorCategory,
+    auditWarning: summary.auditWarning,
   };
 }
 
@@ -70,11 +75,18 @@ export async function handleServiceNowSyncPost(request: Request, dependencies: S
 function safeRun(row: Record<string, unknown>) {
   const number = (key: string) => typeof row[key] === "number" ? row[key] : 0;
   const text = (key: string) => typeof row[key] === "string" ? row[key] : undefined;
+  const metadata = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata as Record<string, unknown>
+    : {};
   return {
     runId: text("id"), mode: text("mode"), status: text("status"), dryRun: row.dry_run === true,
-    startedAt: text("started_at"), completedAt: text("completed_at"), watermarkFrom: text("watermark_from"), watermarkTo: text("watermark_to"),
+    startedAt: text("started_at"), completedAt: text("completed_at"),
+    watermarkFrom: text("watermark_from"), watermarkFromSysId: text("watermark_from_sys_id"),
+    watermarkTo: text("watermark_to"), watermarkToSysId: text("watermark_to_sys_id"),
+    windowStart: text("window_start_at"), windowEnd: text("window_end_at"),
     fetched: number("records_fetched"), created: number("records_created"), updated: number("records_updated"), unchanged: number("records_unchanged"),
     stale: number("records_stale"), skipped: number("records_skipped"), failed: number("records_failed"), pages: number("pages_fetched"), safeErrorCategory: text("safe_error_code")?.toLowerCase(),
+    auditWarning: metadata.auditWriteFailed === true ? "secondary_audit_write_failed" : undefined,
   };
 }
 
@@ -88,6 +100,7 @@ export async function handleServiceNowSyncGet(request: Request, dependencies: Se
       enabled: status.enabled,
       running: status.running,
       currentWatermark: status.state?.watermarkAt,
+      currentWatermarkSysId: status.state?.watermarkSysId,
       lastAttempt: status.state?.lastAttemptAt,
       lastSuccess: status.state?.lastSuccessfulSyncAt,
       runs: status.runs.slice(0, 10).map(safeRun),

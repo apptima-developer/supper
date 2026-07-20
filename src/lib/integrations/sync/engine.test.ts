@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { runSyncEngine } from "./engine";
-import type { PreparedSyncRecord, SyncDecision, SyncRepository, SyncRunItem, SyncRunSummary, SyncState } from "./contracts";
+import { compareSyncCursors, runSyncEngine } from "./engine";
+import type { PreparedSyncRecord, SyncCursor, SyncDecision, SyncRepository, SyncRunItem, SyncRunSummary, SyncState } from "./contracts";
 import { canAcquireSyncLock, canReleaseSyncLock } from "./lock-policy";
 
 type Raw = { id: string; updatedAt: string; outcome?: SyncDecision["outcome"]; invalid?: boolean };
@@ -29,19 +29,30 @@ class FakeRepository implements SyncRepository<Mapped> {
   async addRunItem(item: SyncRunItem) { this.items.push(item); }
 }
 
-function createProvider(records: Raw[], fetchOverride?: () => Promise<Raw[]>) {
-  const queries: Array<{ updatedAfter: string; limit: number; offset: number }> = [];
+type PageInput = { windowStart: string; windowEnd: string; cursor?: SyncCursor; limit: number };
+
+function createProvider(records: Raw[], fetchOverride?: (input: PageInput, call: number) => Promise<Raw[]>) {
+  const queries: PageInput[] = [];
+  let calls = 0;
   return {
     queries,
     provider: {
-      async fetchPage(input: { updatedAfter: string; limit: number; offset: number }) {
+      async fetchPage(input: PageInput) {
         queries.push(input);
-        if (fetchOverride) return fetchOverride();
-        return records.slice(input.offset, input.offset + input.limit);
+        calls += 1;
+        if (fetchOverride) return fetchOverride(input, calls);
+        return records
+          .filter((record) => new Date(record.updatedAt).getTime() >= new Date(input.windowStart).getTime())
+          .filter((record) => new Date(record.updatedAt).getTime() <= new Date(input.windowEnd).getTime())
+          .filter((record) => !input.cursor || compareSyncCursors({ updatedAt: record.updatedAt, sysId: record.id }, input.cursor) > 0)
+          .sort((left, right) => compareSyncCursors({ updatedAt: left.updatedAt, sysId: left.id }, { updatedAt: right.updatedAt, sysId: right.id }))
+          .slice(0, input.limit);
       },
+      cursor: (raw: Raw) => ({ updatedAt: new Date(raw.updatedAt).toISOString(), sysId: raw.id }),
       prepare(raw: Raw): PreparedSyncRecord<Mapped> {
         if (raw.invalid) throw Object.assign(new Error("invalid source record"), { code: "INVALID_INCIDENT" });
-        return { externalSysId: raw.id, externalNumber: `INC-${raw.id}`, sourceUpdatedAt: raw.updatedAt, mapped: raw };
+        const sourceCursor = { updatedAt: new Date(raw.updatedAt).toISOString(), sysId: raw.id };
+        return { externalSysId: raw.id, externalNumber: `INC-${raw.id}`, sourceUpdatedAt: sourceCursor.updatedAt, sourceCursor, mapped: raw };
       },
       identify: (raw: Raw) => ({ externalSysId: raw.id, externalNumber: `INC-${raw.id}` }),
     },
@@ -78,19 +89,20 @@ describe("bounded incremental synchronization engine", () => {
     const repository = new FakeRepository();
     const source = createProvider([{ id: "a", updatedAt: "2026-07-20T10:00:00.000Z" }]);
     const summary = await runSyncEngine(options(repository, source.provider));
-    expect(source.queries[0].updatedAfter).toBe("2026-06-20T12:00:00.000Z");
-    expect(summary).toMatchObject({ status: "succeeded", fetched: 1, created: 1, pages: 1, watermarkTo: "2026-07-20T10:00:00.000Z" });
-    expect(repository.completions).toEqual([expect.objectContaining({ watermarkTo: "2026-07-20T10:00:00.000Z", status: "succeeded" })]);
+    expect(source.queries[0]).toMatchObject({ windowStart: "2026-06-20T12:00:00.000Z", windowEnd: "2026-07-20T12:00:00.000Z" });
+    expect(summary).toMatchObject({ status: "succeeded", fetched: 1, created: 1, pages: 1, watermarkTo: "2026-07-20T10:00:00.000Z", watermarkToSysId: "a" });
+    expect(repository.completions).toEqual([expect.objectContaining({ watermarkTo: "2026-07-20T10:00:00.000Z", watermarkToSysId: "a", status: "succeeded" })]);
   });
 
   it("subtracts the configured overlap from an incremental watermark", async () => {
     const repository = new FakeRepository({ watermarkAt: "2026-07-20T10:00:00.000Z" });
     const source = createProvider([]);
     await runSyncEngine(options(repository, source.provider, { mode: "incremental", overlapSeconds: 120 }));
-    expect(source.queries[0].updatedAfter).toBe("2026-07-20T09:58:00.000Z");
+    expect(source.queries[0].windowStart).toBe("2026-07-20T09:58:00.000Z");
+    expect(source.queries[0].cursor).toBeUndefined();
   });
 
-  it("paginates with deterministic offsets and correct outcome counters", async () => {
+  it("paginates with a composite cursor and correct outcome counters", async () => {
     const repository = new FakeRepository();
     const source = createProvider([
       { id: "a", updatedAt: "2026-07-20T01:00:00Z", outcome: "created" },
@@ -98,7 +110,8 @@ describe("bounded incremental synchronization engine", () => {
       { id: "c", updatedAt: "2026-07-20T03:00:00Z", outcome: "unchanged" },
     ]);
     const summary = await runSyncEngine(options(repository, source.provider));
-    expect(source.queries.map((query) => query.offset)).toEqual([0, 2]);
+    expect(source.queries.map((query) => query.cursor?.sysId)).toEqual([undefined, "b"]);
+    expect(source.queries.every((query) => !("offset" in query))).toBe(true);
     expect(summary).toMatchObject({ status: "succeeded", fetched: 3, created: 1, updated: 1, unchanged: 1, pages: 2 });
     expect(repository.items.map((item) => item.outcome)).toEqual(["created", "updated", "unchanged"]);
   });
@@ -129,7 +142,7 @@ describe("bounded incremental synchronization engine", () => {
 
   it("isolates malformed individual records, marks partial, and does not advance watermark", async () => {
     const repository = new FakeRepository();
-    const source = createProvider([{ id: "bad", updatedAt: "bad", invalid: true }, { id: "good", updatedAt: "2026-07-20T02:00:00Z" }]);
+    const source = createProvider([{ id: "bad", updatedAt: "2026-07-20T01:00:00Z", invalid: true }, { id: "good", updatedAt: "2026-07-20T02:00:00Z" }]);
     const summary = await runSyncEngine(options(repository, source.provider, { pageSize: 3 }));
     expect(summary).toMatchObject({ status: "partial", failed: 1, created: 1 });
     expect(repository.items.map((item) => item.outcome)).toEqual(["failed", "created"]);
@@ -186,5 +199,55 @@ describe("bounded incremental synchronization engine", () => {
     repository.completeSuccessfulRun = vi.fn(async () => false);
     const summary = await runSyncEngine(options(repository, createProvider([{ id: "a", updatedAt: "2026-07-20T01:00:00Z" }]).provider));
     expect(summary).toMatchObject({ status: "failed", safeErrorCategory: "lock_lost" });
+  });
+
+  it("keeps a fixed source window and does not skip a record when earlier source data moves between pages", async () => {
+    const repository = new FakeRepository();
+    const pageOne = [
+      { id: "a", updatedAt: "2026-07-20T01:00:00.000Z" },
+      { id: "b", updatedAt: "2026-07-20T02:00:00.000Z" },
+    ];
+    const recordC = { id: "c", updatedAt: "2026-07-20T03:00:00.000Z" };
+    const source = createProvider([], async (input, call) => call === 1 ? pageOne : input.cursor?.sysId === "b" ? [recordC] : []);
+    const summary = await runSyncEngine(options(repository, source.provider));
+    expect(summary).toMatchObject({ status: "succeeded", fetched: 3, created: 3 });
+    expect(repository.upserts.map((record) => record.id)).toEqual(["a", "b", "c"]);
+    expect(source.queries.map(({ windowEnd }) => windowEnd)).toEqual(["2026-07-20T12:00:00.000Z", "2026-07-20T12:00:00.000Z"]);
+  });
+
+  it("crosses a page boundary inside one timestamp without a skip or duplicate", async () => {
+    const repository = new FakeRepository();
+    const timestamp = "2026-07-20T03:00:00.000Z";
+    const source = createProvider([{ id: "a", updatedAt: timestamp }, { id: "b", updatedAt: timestamp }, { id: "c", updatedAt: timestamp }]);
+    const summary = await runSyncEngine(options(repository, source.provider, { pageSize: 2 }));
+    expect(summary).toMatchObject({ status: "succeeded", fetched: 3, watermarkTo: timestamp, watermarkToSysId: "c" });
+    expect(repository.upserts.map((record) => record.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("defers records after windowEnd until a later run", async () => {
+    const repository = new FakeRepository();
+    const source = createProvider([
+      { id: "inside", updatedAt: "2026-07-20T11:59:59.000Z" },
+      { id: "later", updatedAt: "2026-07-20T12:00:01.000Z" },
+    ]);
+    const summary = await runSyncEngine(options(repository, source.provider));
+    expect(summary).toMatchObject({ status: "succeeded", fetched: 1 });
+    expect(repository.upserts.map((record) => record.id)).toEqual(["inside"]);
+  });
+
+  it("uses the stored composite cursor when overlap is zero", async () => {
+    const repository = new FakeRepository({ watermarkAt: "2026-07-20T03:00:00.000Z", watermarkSysId: "b" });
+    const source = createProvider([{ id: "a", updatedAt: "2026-07-20T03:00:00.000Z" }, { id: "c", updatedAt: "2026-07-20T03:00:00.000Z" }]);
+    await runSyncEngine(options(repository, source.provider, { mode: "incremental", overlapSeconds: 0 }));
+    expect(source.queries[0].cursor).toEqual({ updatedAt: "2026-07-20T03:00:00.000Z", sysId: "b" });
+    expect(repository.upserts.map((record) => record.id)).toEqual(["c"]);
+  });
+
+  it("uses record_failures for an otherwise completed interval", async () => {
+    const repository = new FakeRepository();
+    const source = createProvider([{ id: "failed", updatedAt: "2026-07-20T01:00:00.000Z", outcome: "failed" }]);
+    const summary = await runSyncEngine(options(repository, source.provider));
+    expect(summary).toMatchObject({ status: "partial", failed: 1, safeErrorCategory: "record_failures" });
+    expect(repository.items[0]).toMatchObject({ outcome: "failed" });
   });
 });

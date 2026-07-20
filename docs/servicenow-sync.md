@@ -16,11 +16,13 @@ No arbitrary ServiceNow query, field, table, URL, credential, or watermark cross
 
 The provider-neutral engine in `src/lib/integrations/sync/` owns pagination, bounds, counters, lock lifetime, dry-run behavior, completion status, and watermark rules. ServiceNow-specific normalization, hashing, mapping, repository calls, and orchestration live in `src/lib/integrations/servicenow/sync/`. API handlers do authorization and bounded validation only. React components never import Supabase or ServiceNow credentials.
 
-The ServiceNow client requests the existing Incident allowlist and builds the incremental encoded query internally:
+The ServiceNow client requests the existing Incident allowlist and builds a fixed-window encoded query internally. The first page is inclusive at the lower bound:
 
 ```text
-sys_updated_on>=<trusted UTC timestamp>^ORDERBYsys_updated_on^ORDERBYsys_id
+sys_updated_on>=<windowStart>^sys_updated_on<=<windowEnd>^ORDERBYsys_updated_on^ORDERBYsys_id
 ```
+
+Later pages use a composite cursor and an internally generated bounded `NQ` branch equivalent to `sys_updated_on > cursorUpdatedAt OR (sys_updated_on = cursorUpdatedAt AND sys_id > cursorSysId)`. Every branch repeats the fixed upper bound. The persistent path never sends `sysparm_offset`; browser callers cannot supply a cursor or window. AI-1.0 diagnostic sample reads retain their independent bounded offset behavior.
 
 Only ServiceNow Incident-table `GET` operations exist. Each page retains the configured timeout and caller `AbortSignal`. When OAuth client credentials is selected, the existing AI-1.0 authentication boundary still performs its standard token-endpoint POST; that is an authentication exchange, never an Incident write.
 
@@ -37,19 +39,24 @@ Migration `supabase/migrations/202607200001_servicenow_incremental_sync.sql` add
 - `support_complete_integration_sync_run(...)`: atomically marks the run successful and advances its owned watermark.
 - `support_upsert_servicenow_incident(jsonb)`: bounded atomic ticket/link create or merge.
 
+Forward-only correction `supabase/migrations/202607200002_servicenow_sync_reliability_corrections.sql` adds `watermark_sys_id`, run-level composite cursor fields, and `window_start_at` / `window_end_at`. It replaces the two existing RPC bodies without changing their signatures: successful completion persists the composite cursor, while Incident upsert performs historical-ticket reconciliation and dry-run decisions through the same database function. The original migration was not edited because its remote application state could not be proven.
+
 All new tables have RLS enabled. No anonymous or authenticated policies are added. Table access and RPC execution are granted only to `service_role`; every `SECURITY DEFINER` RPC has an explicit search path and explicit `PUBLIC`, `anon`, and `authenticated` revokes.
 
 ## External link and idempotency
 
-`sys_id` is the durable external identity. ServiceNow number is independently unique per provider. One RPC locks the current link and ticket, rejects number conflicts, then creates or merges both records in one transaction. Replaying an overlap record cannot create another ticket or link.
+`sys_id` is the durable external identity. ServiceNow number is independently unique per provider. One RPC serializes committed reconciliation with transaction-scoped advisory locks, locks affected rows, rejects conflicts, then creates or merges the ticket and link in one transaction. Replaying an overlap record cannot create another ticket or link.
 
-The source hash is SHA-256 over only normalized ServiceNow-owned fields in stable key order. It excludes secrets, raw payloads, provider metadata, sync time, and other volatile values.
+When no `sys_id` link exists, the RPC checks the ServiceNow number link and `support_tickets.issue_id`. A historical Excel ticket with the same Incident number is adopted: its ID is retained, only ServiceNow-owned fields are overlaid, and a link is created with outcome `updated` and warning `ADOPTED_EXISTING_TICKET`. It never deletes or recreates the ticket. A number linked to another `sys_id`, a `sys_id` paired with another number, a missing linked ticket, or a historical ticket already linked to an incompatible provider/record returns a bounded failed decision and performs no ticket/link write.
+
+The meaningful source hash is SHA-256 over normalized ServiceNow-owned business fields in stable key order. It excludes `sys_updated_on` / `lastUpdatedAt`, secrets, raw payloads, sync/seen timestamps, run IDs, cursors, watermarks, and transport metadata. A timestamp-only ServiceNow touch is therefore `unchanged`: the external link advances `external_updated_at`, `last_seen_at`, and `last_synced_at`, but the ticket JSON (including bounded `serviceNow.externalUpdatedAt`) is not rewritten. The next meaningful update refreshes ticket ServiceNow metadata.
 
 Outcome rules:
 
-- `created`: no external link existed and ticket/link were inserted atomically.
+- `created`: no external link or matching historical ticket existed and ticket/link were inserted atomically.
+- `updated` with `ADOPTED_EXISTING_TICKET`: a compatible historical ticket was linked without replacing its ID or SUPPER-owned data.
 - `stale`: source `sys_updated_on` is older than the linked external timestamp.
-- `unchanged`: meaningful source fields hash identically; last-seen timestamps may move forward.
+- `unchanged`: meaningful source fields hash identically; link observation/source timestamps may move forward without a ticket rewrite.
 - `updated`: source is meaningfully changed and is not stale.
 - Equal timestamp with a different hash updates safely and records `SAME_TIMESTAMP_CHANGED`.
 
@@ -96,23 +103,25 @@ Invalid non-empty timestamps fail that record and are never replaced with the cu
 
 ## Initial and incremental modes
 
-Initial mode starts at `now - SERVICENOW_SYNC_INITIAL_LOOKBACK_DAYS`; it never scans the entire Incident table. Incremental mode starts at the latest successful watermark minus `SERVICENOW_SYNC_OVERLAP_SECONDS`. If no successful watermark exists, incremental mode uses the same bounded initial lookback.
+Initial mode captures `windowStart = runStart - SERVICENOW_SYNC_INITIAL_LOOKBACK_DAYS` and a fixed `windowEnd = trusted runStart`; it never scans the entire Incident table. Incremental mode uses the latest successful `(watermark_at, watermark_sys_id)` cursor and subtracts the overlap from the time lower bound. With overlap, the lower interval is deliberately replayed; with zero overlap, the stored composite cursor is exclusive. If a legacy state has no `watermark_sys_id`, the timestamp boundary is replayed inclusively rather than risking a skip.
+
+Every page is ordered by `sys_updated_on`, then `sys_id`, and starts strictly after the previous page cursor. Records updated after the fixed `windowEnd` belong to the next run, so provider mutation cannot shift offsets and skip another record. Page cursors must be strictly increasing and remain inside the source window; otherwise the run fails safely without advancing the durable cursor.
 
 Runs stop at configured page/record limits, provider timeout, abort, provider-wide failure, or lock-expiration risk. The configured lock TTL must exceed the provider timeout plus a safety margin; the engine refreshes its own token before page and record work approaches that margin. Reaching a configured bound with a full page produces `partial` and does not pretend the interval completed.
 
-The watermark advances to the greatest valid processed `sys_updated_on` only when a committed run completed the source interval, every record was deterministic, no record failed, and the run still owns the lock. Successful run completion and watermark advancement happen in one database RPC transaction, preventing a checkpoint from reporting success without its run record. It never advances for dry-run, partial, failed, aborted, timed-out, malformed-page, truncated, or lock-lost runs. `last_attempt_at` moves for each committed attempt, including a blocked lock attempt; `last_successful_sync_at` moves only with a successful committed watermark.
+The composite watermark advances to the greatest processed `(sys_updated_on, sys_id)` only when a committed run completed the fixed source interval, every record was deterministic, no record failed, and the run still owns the lock. Successful run completion and cursor advancement happen in one database RPC transaction. It never advances for dry-run, partial, failed, aborted, timed-out, malformed-page, truncated, or lock-lost runs. `last_attempt_at` moves for each committed attempt, including a blocked lock attempt; `last_successful_sync_at` moves only with successful completion.
 
 ## Locking and failure isolation
 
 The state row is also a database-backed lease. Acquisition succeeds for an empty/expired lock or the same refreshing token. Release requires the matching token. Long runs refresh before expiry; loss of ownership prevents watermark advancement. TTL remains the final safety boundary if release fails.
 
-One malformed Incident creates a bounded `failed` run item, processing continues, the run becomes `partial`, and the watermark stays put. Authentication, timeout, connectivity, abort, malformed page shape, or storage failure stops the run. Stored and returned errors contain stable categories/codes only, never provider bodies, stack traces, records, descriptions, credentials, tokens, or headers.
+One malformed Incident creates a bounded `failed` run item, processing continues, the run becomes `partial` with `record_failures`, and the watermark stays put. A configured page/record bound before interval completion is `partial` / `bounded_truncation`; unavailable lock is `blocked` / `lock_conflict`; lost lock is `failed` / `lock_lost`. Authentication, timeout, connectivity, abort, malformed page shape/cursor, or storage failure stops the run. Stored and returned errors contain stable categories/codes only, never provider bodies, stack traces, records, descriptions, credentials, tokens, or headers.
 
 ## Dry run
 
-Dry-run validates configuration, observes the current lock without mutating it, fetches and normalizes ServiceNow records, calculates mappings/merge outcomes, and stores one summary marked `dry_run=true`. It does not acquire or modify sync state, write tickets or external links, advance a watermark, create permanent run items, or write the general audit log.
+Dry-run validates configuration, observes the current lock without mutating it, fetches/normalizes records, and calls the same reconciliation RPC with `dryRun=true`. The RPC inspects links by `sys_id` and number plus the canonical `issue_id`, so created/adopted/unchanged/stale/conflict categories match commit behavior. It stores one summary marked `dry_run=true`, but does not acquire or modify sync state, write tickets/links, advance a watermark, create run items, or write the general audit log.
 
-A committed manual run writes one bounded SUPPER audit entry with actor, provider, mode, run ID, status, created/updated/failed counters, watermark, and timestamp. Unchanged records do not create general audit rows.
+`integration_sync_runs` is the authoritative durable run audit and `integration_sync_run_items` is authoritative per-record traceability. A committed manual run additionally attempts one bounded, human-facing `support_audit_log` entry. That secondary write is best-effort: failure never changes a committed synchronization result, emits a safe critical server event, attempts to set `metadata.auditWriteFailed=true`, and exposes only `secondary_audit_write_failed` in status responses. Unchanged records do not create general audit rows.
 
 ## Environment
 
@@ -133,15 +142,16 @@ Bounds are: lookback 1–365 days, overlap 0–900 seconds, records 1–5000, pa
 
 ## Manual migration procedure
 
-This migration must not be applied automatically unless the linked target is proven to be the isolated `supper-ai-dev` project. The source delivery intentionally leaves remote DDL unapplied.
+These migrations must not be applied automatically unless the linked target is proven to be the isolated `supper-ai-dev` project. Remote application of `202607200001` could not be proven during AI-1.1.1, so the original file remains immutable and the source delivery adds forward-only correction `202607200002`. Remote DDL remains intentionally unapplied.
 
 1. In Supabase, open the isolated **supper-ai-dev** project and verify its displayed project ref against the approved AI-development ref. Stop if it is the production project or if the ref is uncertain.
 2. Open **SQL Editor → New query** in that verified project.
-3. Open local file `supabase/migrations/202607200001_servicenow_incremental_sync.sql` and paste the complete, unchanged SQL into the editor.
-4. Review that the script begins with `begin;`, ends with `commit;`, creates only the AI-1.1 tables/functions, and contains no `delete`, `truncate`, or destructive business-data statement.
-5. Run once. A safe rerun is idempotent where practical and records migration version `202607200001`.
-6. Run the safe acceptance queries below.
-7. Add the six sync environment values to the `ai_development` Vercel Preview only, redeploy that branch, verify readiness, then change `SERVICENOW_SYNC_ENABLED=true` and redeploy.
+3. Run the first safe query below to check `support_schema_migrations` for versions `202607200001` and `202607200002`.
+4. If `202607200001` is absent, paste and run the complete unchanged `supabase/migrations/202607200001_servicenow_incremental_sync.sql` first. If it is present, do not rerun or edit it.
+5. Paste and run the complete unchanged `supabase/migrations/202607200002_servicenow_sync_reliability_corrections.sql` after `202607200001` exists.
+6. Review each script starts with `begin;`, ends with `commit;`, and contains no ticket/link deletion, truncation, or destructive business-data statement.
+7. Run the full safe acceptance checklist. Version `202607200002` must exist and `watermark_sys_id` / fixed-window columns must be visible.
+8. Add the six sync environment values to the `ai_development` Vercel Preview only, redeploy, verify readiness, then change `SERVICENOW_SYNC_ENABLED=true` and redeploy.
 
 Do not use the service-role REST API for DDL. Do not run the SQL against production.
 
@@ -152,7 +162,15 @@ These queries read schema and bounded operational counts only:
 ```sql
 select version, description, applied_at
 from public.support_schema_migrations
-where version = '202607200001';
+where version in ('202607200001', '202607200002')
+order by version;
+
+select table_name, column_name, data_type
+from information_schema.columns
+where table_schema = 'public'
+  and ((table_name = 'integration_sync_state' and column_name = 'watermark_sys_id')
+    or (table_name = 'integration_sync_runs' and column_name in ('watermark_from_sys_id', 'watermark_to_sys_id', 'window_start_at', 'window_end_at')))
+order by table_name, column_name;
 
 select table_name
 from information_schema.tables
@@ -175,22 +193,24 @@ order by routine_name;
 
 select count(*) as ticket_count from public.support_tickets;
 select count(*) as external_link_count from public.external_ticket_links;
-select provider, stream, watermark_at, last_attempt_at, last_successful_sync_at
+select provider, stream, watermark_at, watermark_sys_id, last_attempt_at, last_successful_sync_at
 from public.integration_sync_state
 where provider = 'servicenow' and stream = 'incident';
 ```
 
 ## Manual acceptance
 
-1. Record `select count(*) from public.support_tickets;` before testing.
-2. Sign in to the `ai_development` Preview as an administrator and open **Settings → ServiceNow**.
-3. Run **Dry Run Initial Sync**. Confirm fetched counters appear and the ticket count and watermark remain unchanged.
-4. Run **Run Initial Sync** and confirm. Verify `INC0010001` appears once in `support_tickets` and once in `external_ticket_links`, a successful run exists, and no customer was created.
-5. Run **Run Incremental Sync** immediately. Verify the outcome is unchanged and no duplicate exists.
-6. Change `INC0010001` short description in the PDI, run incremental again, and verify the same SUPPER ticket ID is updated.
-7. Change a SUPPER-owned effort, chargeable, log/note, or confirmed customer field in SUPPER. Change the Incident again and run incremental. Verify external fields update and the SUPPER-owned value remains.
-8. Refresh sync status in the card and confirm the latest safe summary and successful timestamp.
-9. Review ServiceNow Incident-table network operations and confirm this milestone contains no Incident POST, PATCH, PUT, or DELETE. An OAuth token exchange POST may exist when that authentication mode is configured.
+1. Create or retain a historical SUPPER ticket whose `issue_id` is `INC0010001`; record its ID and set representative owner/effort, MD, chargeable/non-charge reason, project/customer mapping, manual note/log, and optional AI/unknown JSON values.
+2. Record bounded counts for `support_tickets` and `external_ticket_links`, then sign in to the `ai_development` Preview as administrator and open **Settings → ServiceNow**.
+3. Run **Dry Run Initial Sync**. Confirm `INC0010001` is `updated` with adopted warning rather than created, while ticket/link counts and watermark remain unchanged.
+4. Run **Run Initial Sync**. Confirm the recorded historical ticket ID remains, exactly one ServiceNow link is created, no duplicate ticket/customer exists, and every SUPPER-owned test value remains.
+5. Run **Run Incremental Sync** immediately. Confirm `unchanged`, the composite `(watermark_at, watermark_sys_id)` is present, and no duplicate exists.
+6. Cause a timestamp-only provider touch without changing imported business fields. Run incremental and confirm `unchanged`; the link `external_updated_at` advances while ticket JSON/manual data does not change.
+7. Change the Incident short description. Run incremental and confirm `updated`, same ticket/link IDs, and preserved SUPPER fields.
+8. Create multiple PDI records sharing `sys_updated_on` around one page boundary and mutate an earlier record after page one. Confirm each source-window record is processed once, after-window changes defer, and overlap replay creates no duplicates.
+9. Trigger two committed runs concurrently. Confirm one proceeds and one is `blocked` / `lock_conflict`.
+10. Confirm UI notifications: succeeded is success; partial/blocked are warning; failed is error. If secondary audit is unavailable, confirm the committed result remains and only the sanitized audit warning appears.
+11. Review Incident-table network operations and confirm no Incident POST, PATCH, PUT, or DELETE exists. OAuth token exchange POST may exist for authentication only.
 
 The current PDI uses a dedicated integration user with the temporary `itil` role. Basic auth is limited to isolated PDI development; OAuth client credentials is the hardened direction.
 
@@ -198,4 +218,4 @@ The current PDI uses a dedicated integration user with the temporary `itil` role
 
 There is no fake cross-system transaction and no automatic rollback of ServiceNow changes because SUPPER never writes ServiceNow. Do not drop the new tables/functions while sync is enabled or a lease is active. A database rollback would require disabling sync, confirming no active lock, preserving run/link state for audit, and performing a separately reviewed manual migration. Existing tickets are never deleted by this migration or engine.
 
-PDI availability, role breadth, and ServiceNow offset pagination remain development limitations. A run that reaches a bound is intentionally partial. Customer mapping, richer operations history, manual link repair, and lock/run administration belong to AI-1.2 Integration Operations UI.
+PDI availability and temporary role breadth remain development limitations. Persistent synchronization no longer uses mutable offset pagination; the diagnostic sample reader still uses bounded offsets by design. A run that reaches a bound is intentionally partial. Customer mapping, richer operations history, manual link repair, and lock/run administration belong to AI-1.2 Integration Operations UI.

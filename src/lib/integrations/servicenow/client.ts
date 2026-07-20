@@ -1,5 +1,7 @@
 import type { IntegrationCorrelationId, IntegrationOperation } from "../contracts";
+import type { SyncCursor } from "../sync/contracts";
 import { isIntegrationBoundaryError } from "../errors";
+import { z } from "zod";
 import type { ServiceNowEnabledConfig } from "./config";
 import { getServiceNowAuthorization } from "./auth";
 import { mapServiceNowHttpError, serviceNowError } from "./errors";
@@ -8,10 +10,39 @@ import { serviceNowAdapterListQuerySchema, serviceNowDetailResponseSchema, servi
 import { normalizeServiceNowIncident } from "./normalization";
 
 export type ServiceNowListInput = { limit: number; offset: number; number?: string; updatedAfter?: string };
-export type ServiceNowSyncPageInput = { limit: number; offset: number; updatedAfter: string };
+export type ServiceNowSyncPageInput = { limit: number; windowStart: string; windowEnd: string; cursor?: SyncCursor };
+
+const serviceNowSyncPageSchema = z.object({
+  limit: z.number().int().min(1).max(1_000),
+  windowStart: z.string().datetime({ offset: true }),
+  windowEnd: z.string().datetime({ offset: true }),
+  cursor: z.object({
+    updatedAt: z.string().datetime({ offset: true }),
+    sysId: serviceNowSysIdSchema,
+  }).optional(),
+}).strict().superRefine((value, context) => {
+  if (new Date(value.windowStart).getTime() > new Date(value.windowEnd).getTime()) {
+    context.addIssue({ code: "custom", message: "Synchronization window is invalid", path: ["windowStart"] });
+  }
+  if (value.cursor && (new Date(value.cursor.updatedAt).getTime() < new Date(value.windowStart).getTime() || new Date(value.cursor.updatedAt).getTime() > new Date(value.windowEnd).getTime())) {
+    context.addIssue({ code: "custom", message: "Synchronization cursor is outside its window", path: ["cursor"] });
+  }
+});
 
 function serviceNowDate(value: string) {
   return new Date(value).toISOString().slice(0, 19).replace("T", " ");
+}
+
+export function buildServiceNowSyncEncodedQuery(input: Omit<ServiceNowSyncPageInput, "limit">) {
+  const validated = serviceNowSyncPageSchema.parse({ ...input, limit: 1 });
+  const start = serviceNowDate(validated.windowStart);
+  const end = serviceNowDate(validated.windowEnd);
+  if (!validated.cursor) {
+    return `sys_updated_on>=${start}^sys_updated_on<=${end}^ORDERBYsys_updated_on^ORDERBYsys_id`;
+  }
+  const cursorAt = serviceNowDate(validated.cursor.updatedAt);
+  const common = `sys_updated_on>=${start}^sys_updated_on<=${end}`;
+  return `${common}^sys_updated_on>${cursorAt}^NQ${common}^sys_updated_on=${cursorAt}^sys_id>${validated.cursor.sysId}^ORDERBYsys_updated_on^ORDERBYsys_id`;
 }
 
 export class ServiceNowReadClient {
@@ -90,13 +121,12 @@ export class ServiceNowReadClient {
   }
 
   async listIncidentRecordsPage(input: ServiceNowSyncPageInput, correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
-    const validated = serviceNowAdapterListQuerySchema.pick({ limit: true, offset: true, updatedAfter: true }).required({ updatedAfter: true }).parse(input);
+    const validated = serviceNowSyncPageSchema.parse(input);
     const params = new URLSearchParams({
       sysparm_fields: serviceNowIncidentFieldList,
       sysparm_limit: String(Math.min(validated.limit, this.config.pageSize)),
-      sysparm_offset: String(validated.offset),
       sysparm_display_value: "all",
-      sysparm_query: `sys_updated_on>=${serviceNowDate(validated.updatedAfter)}^ORDERBYsys_updated_on^ORDERBYsys_id`,
+      sysparm_query: buildServiceNowSyncEncodedQuery(validated),
     });
     const raw = await this.request("", params, "ticket.list", correlationId, signal);
     const parsed = serviceNowListResponseSchema.safeParse(raw);

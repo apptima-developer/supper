@@ -27,3 +27,29 @@ export async function writeServiceNowSyncAudit(
   });
   return true;
 }
+
+export async function writeServiceNowSyncAuditBestEffort(
+  summary: SyncRunSummary,
+  session: Session,
+  dependencies: {
+    write: (entry: Omit<Audit, "id" | "createdAt">) => Promise<unknown>;
+    markFailed?: (runId: string) => Promise<void>;
+    reportCritical: (event: "SERVICENOW_SYNC_COMPLETED_AUDIT_FAILED" | "SERVICENOW_SYNC_AUDIT_MARKER_FAILED", error: unknown) => void;
+  },
+) {
+  try {
+    await writeServiceNowSyncAudit(summary, session, dependencies.write);
+    return undefined;
+  } catch (error) {
+    summary.auditWarning = "secondary_audit_write_failed";
+    dependencies.reportCritical("SERVICENOW_SYNC_COMPLETED_AUDIT_FAILED", error);
+    if (dependencies.markFailed) {
+      try {
+        await dependencies.markFailed(summary.runId);
+      } catch (markerError) {
+        dependencies.reportCritical("SERVICENOW_SYNC_AUDIT_MARKER_FAILED", markerError);
+      }
+    }
+    return summary.auditWarning;
+  }
+}

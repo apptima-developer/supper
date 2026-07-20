@@ -34,7 +34,6 @@ export function serviceNowSourceFields(incident: NormalizedServiceNowIncident) {
     resolvedAt: incident.resolvedAt,
     closedAt: incident.closedAt,
     createdAt: incident.createdAt,
-    lastUpdatedAt: incident.lastUpdatedAt,
     externalUrl: incident.externalUrl,
   };
 }

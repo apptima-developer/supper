@@ -10,6 +10,7 @@ const summary: SyncRunSummary = {
   runId: "run-1", mode: "initial", dryRun: true, status: "succeeded", fetched: 1,
   created: 1, updated: 0, unchanged: 0, stale: 0, skipped: 0, failed: 0, pages: 1,
   watermarkFrom: "2026-07-01T00:00:00.000Z", watermarkTo: "2026-07-20T00:00:00.000Z",
+  watermarkToSysId: "a".repeat(32), windowStart: "2026-07-01T00:00:00.000Z", windowEnd: "2026-07-20T00:00:01.000Z",
   startedAt: "2026-07-20T00:00:00.000Z", completedAt: "2026-07-20T00:00:01.000Z", duration: 1000,
 };
 
@@ -47,6 +48,7 @@ describe("ServiceNow synchronization API", () => {
     expect(deps.startSync).toHaveBeenCalledWith(expect.objectContaining({ mode: "initial", dryRun: true, session: admin }));
     const body = await response.json();
     expect(body).toMatchObject({ runId: "run-1", status: "succeeded", fetched: 1, created: 1 });
+    expect(body).toMatchObject({ watermarkToSysId: "a".repeat(32), windowStart: summary.windowStart, windowEnd: summary.windowEnd });
     expect(JSON.stringify(body)).not.toMatch(/short_description|description|authorization|password|token|sysparm_query/i);
   });
 
@@ -73,5 +75,23 @@ describe("ServiceNow synchronization API", () => {
     expect(body.running).toBe(true);
     expect(body.runs).toHaveLength(10);
     expect(body.runs[0]).toMatchObject({ runId: "run-0", fetched: 0 });
+  });
+
+  it("exposes only the sanitized secondary-audit marker from run metadata", async () => {
+    const deps = dependencies(admin);
+    deps.getStatus = vi.fn(async () => ({
+      enabled: true,
+      running: false,
+      state: { watermarkAt: summary.watermarkTo, watermarkSysId: summary.watermarkToSysId },
+      runs: [{
+        id: "run-audit-warning", mode: "incremental", status: "succeeded", dry_run: false,
+        metadata: { auditWriteFailed: true, privateDatabaseError: "must not escape" },
+      }],
+    }));
+    const body = await (await handleServiceNowSyncGet(new Request("https://app.example.com/api/integrations/servicenow/sync"), deps)).json();
+    expect(body).toMatchObject({ currentWatermarkSysId: "a".repeat(32) });
+    expect(body.runs[0]).toMatchObject({ status: "succeeded", auditWarning: "secondary_audit_write_failed" });
+    expect(JSON.stringify(body)).not.toContain("privateDatabaseError");
+    expect(JSON.stringify(body)).not.toContain("must not escape");
   });
 });

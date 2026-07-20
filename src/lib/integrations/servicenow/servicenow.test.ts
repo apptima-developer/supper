@@ -132,17 +132,33 @@ describe("ServiceNow read-only adapter", () => {
     expect(headers.get("Authorization")).toMatch(/^Basic /);
   });
 
-  it("builds trusted incremental queries with stable ordering", async () => {
+  it("builds a fixed-window keyset query without offset paging", async () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse({ result: [record()] }));
     const config = parseServiceNowConfig(basicEnv);
     if (!config.enabled) throw new Error("expected enabled config");
     const client = new (await import("./client")).ServiceNowReadClient(config, { fetch: fetchMock as typeof fetch });
-    const page = await client.listIncidentRecordsPage({ limit: 1, offset: 20, updatedAfter: "2026-07-20T00:00:00.000Z" }, correlationId);
+    const page = await client.listIncidentRecordsPage({
+      limit: 1,
+      windowStart: "2026-07-20T00:00:00.000Z",
+      windowEnd: "2026-07-20T12:00:00.000Z",
+      cursor: { updatedAt: "2026-07-20T03:00:00.000Z", sysId },
+    }, correlationId);
     expect(page).toHaveLength(1);
     const url = new URL(String(fetchMock.mock.calls[0][0]));
-    expect(url.searchParams.get("sysparm_query")).toBe("sys_updated_on>=2026-07-20 00:00:00^ORDERBYsys_updated_on^ORDERBYsys_id");
-    expect(url.searchParams.get("sysparm_offset")).toBe("20");
+    expect(url.searchParams.get("sysparm_query")).toBe(`sys_updated_on>=2026-07-20 00:00:00^sys_updated_on<=2026-07-20 12:00:00^sys_updated_on>2026-07-20 03:00:00^NQsys_updated_on>=2026-07-20 00:00:00^sys_updated_on<=2026-07-20 12:00:00^sys_updated_on=2026-07-20 03:00:00^sys_id>${sysId}^ORDERBYsys_updated_on^ORDERBYsys_id`);
+    expect(url.searchParams.has("sysparm_offset")).toBe(false);
     expect(url.searchParams.get("sysparm_fields")?.split(",")).toEqual([...serviceNowIncidentFields]);
+  });
+
+  it("uses an inclusive lower bound on the first fixed-window page", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse({ result: [] }));
+    const config = parseServiceNowConfig(basicEnv);
+    if (!config.enabled) throw new Error("expected enabled config");
+    const client = new (await import("./client")).ServiceNowReadClient(config, { fetch: fetchMock as typeof fetch });
+    await client.listIncidentRecordsPage({ limit: 10, windowStart: "2026-07-20T00:00:00.000Z", windowEnd: "2026-07-20T12:00:00.000Z" }, correlationId);
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(url.searchParams.get("sysparm_query")).toBe("sys_updated_on>=2026-07-20 00:00:00^sys_updated_on<=2026-07-20 12:00:00^ORDERBYsys_updated_on^ORDERBYsys_id");
+    expect(url.searchParams.has("sysparm_offset")).toBe(false);
   });
 
   it("rejects an invalid Incident timestamp instead of substituting the current time", async () => {
@@ -154,7 +170,7 @@ describe("ServiceNow read-only adapter", () => {
     const config = parseServiceNowConfig(basicEnv);
     if (!config.enabled) throw new Error("expected enabled config");
     const client = new (await import("./client")).ServiceNowReadClient(config, { fetch: vi.fn(async () => jsonResponse({ result: [record(), record({ sys_id: "b".repeat(32) })] })) as typeof fetch });
-    await expect(client.listIncidentRecordsPage({ limit: 1, offset: 0, updatedAfter: "2026-07-20T00:00:00.000Z" }, correlationId)).rejects.toMatchObject({ code: "SERVICENOW_PAGE_LIMIT_EXCEEDED" });
+    await expect(client.listIncidentRecordsPage({ limit: 1, windowStart: "2026-07-20T00:00:00.000Z", windowEnd: "2026-07-20T12:00:00.000Z" }, correlationId)).rejects.toMatchObject({ code: "SERVICENOW_PAGE_LIMIT_EXCEEDED" });
   });
 
   it("paginates and enforces the maximum-page guard", async () => {

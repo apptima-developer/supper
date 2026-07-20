@@ -76,7 +76,9 @@ describe("ServiceNow Incident mapping", () => {
 
   it("hashes only stable normalized source fields", () => {
     expect(hashServiceNowIncident(incident())).toBe(hashServiceNowIncident({ ...incident(), providerMetadata: { table: "different-nonsource-value" } }));
+    expect(hashServiceNowIncident(incident())).toBe(hashServiceNowIncident(incident({ lastUpdatedAt: "2026-07-21T09:30:00.000Z" })));
     expect(hashServiceNowIncident(incident({ title: "Changed" }))).not.toBe(hashServiceNowIncident(incident()));
+    expect(hashServiceNowIncident(incident({ stateValue: "6", state: "Resolved" }))).not.toBe(hashServiceNowIncident(incident()));
   });
 
   it("bounds a long external description and records a mapping warning", () => {
@@ -94,6 +96,7 @@ describe("ServiceNow ownership merge policy", () => {
     owner: "support-agent", ownerEfforts: [{ owner: "support-agent", hours: 2.5 }], mdUsed: 0.3125,
     chargeable: true, remark: "Manual resolution note", ticketLogs: [{ id: "log-1", message: "Manual log", actor: "admin", createdAt: "2026-07-20T00:00:00.000Z", attachments: [] }],
     aiClassification: "manual-ai-value", aiConfidence: 0.93, billingNotes: "Keep this",
+    nonChargeReason: "Manual decision", projectMapping: "project-legacy", unknownOperationalValue: { preserve: true },
   } as Ticket & Record<string, unknown>;
 
   it("updates ServiceNow-owned fields and preserves SUPPER billing, effort, notes, customer mapping, and AI annotations", () => {
@@ -103,8 +106,11 @@ describe("ServiceNow ownership merge policy", () => {
       issueTitle: "New external title", customerKey: "confirmed-project-key", owner: "support-agent",
       ownerEfforts: [{ hours: 2.5 }], mdUsed: 0.3125, chargeable: true, remark: "Manual resolution note",
       aiClassification: "manual-ai-value", aiConfidence: 0.93, billingNotes: "Keep this", requiresCustomerMapping: false,
+      nonChargeReason: "Manual decision", projectMapping: "project-legacy", unknownOperationalValue: { preserve: true },
     });
     expect(result.ticket.ticketLogs).toHaveLength(1);
+    expect(result.ticket.id).toBe(existing.id);
+    expect(result.ticket.createdAt).toBe(existing.createdAt);
   });
 
   it("ignores stale and identical source data", () => {
@@ -114,5 +120,14 @@ describe("ServiceNow ownership merge policy", () => {
 
   it("updates equal-timestamp changed content with a bounded warning", () => {
     expect(mergeServiceNowIncidentIntoTicket(existing, incoming, { externalUpdatedAt: incoming.externalUpdatedAt, sourceHash: "0".repeat(64) })).toMatchObject({ outcome: "updated", warningCode: "SAME_TIMESTAMP_CHANGED" });
+  });
+
+  it("treats a timestamp-only provider touch as unchanged without rewriting ticket business data", () => {
+    const timestampOnly = mapped({ lastUpdatedAt: "2026-07-21T04:00:00.000Z" });
+    expect(timestampOnly.sourceHash).toBe(mapped().sourceHash);
+    const result = mergeServiceNowIncidentIntoTicket(existing, timestampOnly, { externalUpdatedAt: "2026-07-20T01:00:00.000Z", sourceHash: timestampOnly.sourceHash });
+    expect(result).toEqual({ outcome: "unchanged", ticket: existing });
+    expect(result.ticket.id).toBe(existing.id);
+    expect(result.ticket.serviceNow?.externalUpdatedAt).toBe(existing.serviceNow?.externalUpdatedAt);
   });
 });

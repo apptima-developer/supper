@@ -4,6 +4,7 @@ import { CheckCircle2, CloudCog, Loader2, Play, RefreshCw, SearchCheck, Triangle
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import type { ServiceNowConfigSummary } from "@/lib/integrations/servicenow/config";
+import { serviceNowSyncPresentation } from "@/lib/integrations/servicenow/sync/presentation";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -33,6 +34,7 @@ type SyncSummary = {
   watermarkTo?: string;
   lastSuccess?: string;
   safeErrorCategory?: string;
+  auditWarning?: string;
 };
 
 function displayTimestamp(value?: string) {
@@ -155,7 +157,11 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
       if (!response.ok) throw new Error(errorMessage(body, "ServiceNow synchronization failed"));
       const value = body && typeof body === "object" ? body as SyncSummary : {};
       setSync(value);
-      toast.success(`${dryRun ? "Dry run" : "Synchronization"} ${value.status || "completed"}`);
+      const presentation = serviceNowSyncPresentation(value.status);
+      const message = `${dryRun ? "Dry run" : "Synchronization"} ${presentation.label.toLowerCase()}`;
+      if (presentation.level === "success") toast.success(message);
+      else if (presentation.level === "warning") toast.warning(message);
+      else toast.error(message);
       await refreshSyncStatus(true);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "ServiceNow synchronization failed");
@@ -163,6 +169,8 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
       setBusy("");
     }
   }
+
+  const syncPresentation = serviceNowSyncPresentation(sync?.status);
 
   return <Card>
     <CardHeader>
@@ -196,12 +204,12 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
           <Button variant="ghost" size="sm" disabled={!enabled || !!busy} onClick={() => refreshSyncStatus()}>{busy === "refresh" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}Refresh Sync Status</Button>
         </div>
         <div className="mt-3 grid gap-2 text-[10px] sm:grid-cols-4">
-          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Latest run</span><p className="font-semibold text-slate-700">{sync?.status || "No run"}{sync?.dryRun ? " · dry run" : ""}</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Latest run</span><p className="mt-0.5"><Badge tone={sync ? syncPresentation.tone : "slate"}>{sync ? syncPresentation.label : "No run"}</Badge>{sync?.dryRun ? <span className="ml-1.5 text-slate-500">dry run</span> : null}</p></div>
           <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Mode</span><p className="font-semibold capitalize text-slate-700">{sync?.mode || "-"}</p></div>
           <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Results</span><p className="font-semibold text-slate-700">{sync?.fetched ?? 0} fetched · {sync?.created ?? 0} new · {sync?.updated ?? 0} updated</p></div>
           <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Watermark</span><p className="truncate font-semibold text-slate-700" title={sync?.watermarkTo || sync?.currentWatermark}>{displayTimestamp(sync?.watermarkTo || sync?.currentWatermark)}</p></div>
         </div>
-        {sync && <p className="mt-2 text-[10px] text-slate-400">Unchanged {sync.unchanged ?? 0} · stale {sync.stale ?? 0} · failed {sync.failed ?? 0} · last success {displayTimestamp(sync.lastSuccess)}{sync.safeErrorCategory ? ` · ${sync.safeErrorCategory}` : ""}</p>}
+        {sync && <p className="mt-2 text-[10px] text-slate-400">Unchanged {sync.unchanged ?? 0} · stale {sync.stale ?? 0} · failed {sync.failed ?? 0} · last success {displayTimestamp(sync.lastSuccess)}{sync.safeErrorCategory ? ` · ${sync.safeErrorCategory}` : ""}{sync.auditWarning ? " · secondary audit warning" : ""}</p>}
       </div>
 
       <div className="overflow-hidden rounded-xl border border-sky-100/80">
