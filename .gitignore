@@ -66,3 +66,6 @@ blob-report/
 
 *.sqlite
 *.db
+
+# Local source packages created for external code review.
+supper-source-audit-*.zip
