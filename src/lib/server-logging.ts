@@ -1,6 +1,6 @@
 import { isValidRequestId } from "./request-id";
 
-const sensitiveKeyPattern = /(password|passwordhash|secret|pepper|token|authorization|cookie|api[_-]?key|service[_-]?role|dataurl|base64|filecontent|email|username|actor|ticket[_-]?title|customer[_-]?name|report[_-]?rows)/i;
+const sensitiveKeyPattern = /(password|passwordhash|secret|pepper|token|authorization|cookie|api[_-]?key|service[_-]?role|dataurl|base64|filecontent|email|username|actor|title|customer[_-]?(?:name|reference)|report[_-]?rows|short[_-]?description|description|caller|assigned[_-]?(?:to|user)|assignment[_-]?group|incident[_-]?(?:record|payload))/i;
 
 function sanitize(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (depth > 4) return "[truncated]";

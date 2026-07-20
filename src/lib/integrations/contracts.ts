@@ -5,6 +5,9 @@ export const integrationOperations = [
   "message.receive",
   "message.normalize",
   "ticket.link",
+  "provider.test",
+  "ticket.list",
+  "ticket.read",
   "event.handle",
 ] as const;
 export type IntegrationOperation = (typeof integrationOperations)[number];
