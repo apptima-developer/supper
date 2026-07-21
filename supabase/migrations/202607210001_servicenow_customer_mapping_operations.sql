@@ -46,6 +46,59 @@ create table if not exists public.integration_customer_mapping_events (
   constraint integration_customer_mapping_events_metadata_check check (jsonb_typeof(metadata) = 'object' and octet_length(metadata::text) <= 8192)
 );
 
+-- Ticket JSON uses the same millisecond UTC representation as Date.toISOString().
+create or replace function public.support_canonical_utc_iso(p_value timestamptz)
+returns text
+language sql
+immutable
+strict
+set search_path = pg_catalog, pg_temp
+as $$
+  select to_char(p_value at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+$$;
+
+-- Keep the SQL identity algorithm byte-for-byte compatible with the TypeScript
+-- ServiceNow customer identity helper, including its 500-character input bound.
+create or replace function public.support_servicenow_external_customer_key(p_external_customer_id text)
+returns text
+language sql
+immutable
+set search_path = pg_catalog, pg_temp
+as $$
+  select case
+    when coalesce(btrim(p_external_customer_id), '') = '' then 'servicenow-unmapped:unknown'
+    when left(btrim(p_external_customer_id), 500) ~* '^[a-f0-9]{32}$'
+      then 'servicenow-unmapped:' || lower(left(btrim(p_external_customer_id), 500))
+    else 'servicenow-unmapped:ref-' || left(
+      encode(sha256(convert_to(left(btrim(p_external_customer_id), 500), 'UTF8')), 'hex'),
+      24
+    )
+  end
+$$;
+
+-- Identity precedence matches serviceNowCustomerIdentityFromTicket(): explicit
+-- metadata key, relational unmapped key, externalCustomerId, companyExternalId.
+create or replace function public.support_servicenow_ticket_customer_key(p_customer_key text, p_data jsonb)
+returns text
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  select case
+    when p_data#>>'{serviceNow,provider}' <> 'servicenow' then null
+    when coalesce(p_data#>>'{serviceNow,externalCustomerKey}', '') ~ '^servicenow-unmapped:[a-z0-9-]+$'
+      and length(p_data#>>'{serviceNow,externalCustomerKey}') <= 600
+      then p_data#>>'{serviceNow,externalCustomerKey}'
+    when coalesce(p_customer_key, '') ~ '^servicenow-unmapped:[a-z0-9-]+$'
+      and length(p_customer_key) <= 600
+      then p_customer_key
+    else public.support_servicenow_external_customer_key(coalesce(
+      nullif(p_data#>>'{serviceNow,externalCustomerId}', ''),
+      nullif(p_data#>>'{serviceNow,companyExternalId}', '')
+    ))
+  end
+$$;
+
 create index if not exists integration_customer_mappings_provider_active_idx
   on public.integration_customer_mappings(provider, active);
 create index if not exists integration_customer_mappings_customer_key_idx
@@ -64,6 +117,9 @@ create index if not exists integration_customer_mapping_events_created_at_idx
 create index if not exists support_tickets_servicenow_external_customer_idx
   on public.support_tickets ((data#>>'{serviceNow,externalCustomerKey}'))
   where data#>>'{serviceNow,provider}' = 'servicenow';
+create index if not exists support_tickets_servicenow_customer_identity_idx
+  on public.support_tickets (public.support_servicenow_ticket_customer_key(customer_key, data))
+  where data#>>'{serviceNow,provider}' = 'servicenow';
 
 alter table public.integration_customer_mappings enable row level security;
 alter table public.integration_customer_mapping_events enable row level security;
@@ -72,6 +128,90 @@ revoke all privileges on table public.integration_customer_mappings from public,
 revoke all privileges on table public.integration_customer_mapping_events from public, anon, authenticated;
 grant select, insert, update on table public.integration_customer_mappings to service_role;
 grant select, insert on table public.integration_customer_mapping_events to service_role;
+
+-- Exact source lookup avoids depending on the bounded operations candidate list
+-- and returns only sanitized aggregate fields, never raw Ticket JSON.
+create or replace function public.support_get_servicenow_customer_source(p_external_customer_key text)
+returns table (
+  mapping_id text,
+  external_customer_key text,
+  external_customer_id text,
+  external_customer_name text,
+  mappable boolean,
+  mapped boolean,
+  active_mapping boolean,
+  mapped_customer_key text,
+  mapped_customer_name text,
+  ticket_count integer,
+  open_ticket_count integer,
+  first_seen_at text,
+  last_seen_at text,
+  example_incidents text[]
+)
+language plpgsql
+security definer
+stable
+set search_path = public, pg_temp
+as $$
+begin
+  if coalesce(p_external_customer_key, '') !~ '^servicenow-unmapped:[a-z0-9-]+$'
+    or length(p_external_customer_key) > 600 then
+    raise exception using errcode = '22023', message = 'INVALID_SERVICENOW_CUSTOMER_KEY';
+  end if;
+  if p_external_customer_key = 'servicenow-unmapped:unknown' then
+    raise exception using errcode = '22023', message = 'SERVICENOW_UNKNOWN_CUSTOMER_NOT_MAPPABLE';
+  end if;
+
+  return query
+  with mapping_source as (
+    select source.*
+    from public.integration_customer_mappings source
+    where source.provider = 'servicenow'
+      and source.external_customer_key = p_external_customer_key
+    limit 1
+  ), matching_tickets as (
+    select ticket.*
+    from public.support_tickets ticket
+    where public.support_servicenow_ticket_customer_key(ticket.customer_key, ticket.data) = p_external_customer_key
+  ), latest_ticket as (
+    select ticket.data, ticket.updated_at
+    from matching_tickets ticket
+    order by ticket.updated_at desc, ticket.id
+    limit 1
+  ), ticket_summary as (
+    select count(*)::integer as ticket_count,
+      count(*) filter (where coalesce(ticket.kanban_status, '') not in ('resolved', 'closed', 'cancelled'))::integer as open_ticket_count,
+      min(coalesce(nullif(ticket.data->>'createdAt', ''), nullif(ticket.data#>>'{serviceNow,externalCreatedAt}', ''))) as first_seen_at,
+      max(coalesce(nullif(ticket.data#>>'{serviceNow,externalUpdatedAt}', ''), public.support_canonical_utc_iso(ticket.updated_at))) as last_seen_at
+    from matching_tickets ticket
+  )
+  select source.id,
+    p_external_customer_key,
+    coalesce(source.external_customer_id, latest.data#>>'{serviceNow,externalCustomerId}', latest.data#>>'{serviceNow,companyExternalId}'),
+    coalesce(nullif(source.external_customer_name, ''), nullif(latest.data#>>'{serviceNow,externalCustomerName}', ''), nullif(latest.data#>>'{serviceNow,companyReference}', ''), 'Unmapped ServiceNow customer'),
+    true,
+    source.id is not null,
+    coalesce(source.active, false),
+    source.customer_key,
+    target.customer_name,
+    summary.ticket_count,
+    summary.open_ticket_count,
+    summary.first_seen_at,
+    summary.last_seen_at,
+    array(
+      select ticket.issue_id
+      from matching_tickets ticket
+      where coalesce(ticket.issue_id, '') <> ''
+      order by ticket.updated_at desc, ticket.issue_id
+      limit 3
+    )
+  from ticket_summary summary
+  left join mapping_source source on true
+  left join latest_ticket latest on true
+  left join public.support_customers target on target.customer_key = source.customer_key
+  where source.id is not null or summary.ticket_count > 0;
+end;
+$$;
 
 create or replace function public.support_apply_integration_customer_mapping(p_payload jsonb)
 returns table (
@@ -89,6 +229,7 @@ set search_path = public, pg_temp
 as $$
 declare
   v_now timestamptz;
+  v_now_iso text;
   v_mapping public.integration_customer_mappings%rowtype;
   v_target public.support_customers%rowtype;
   v_action text;
@@ -117,7 +258,7 @@ begin
     or length(coalesce(p_payload->>'actorUserId', '')) not between 1 and 200
     or length(coalesce(p_payload->>'requestId', '')) not between 8 and 200
     or length(coalesce(p_payload->>'correlationId', '')) not between 8 and 200
-    or p_payload->>'appliedAt' is null then
+    or coalesce(p_payload->>'appliedAt', '') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' then
     if p_payload->>'externalCustomerKey' = 'servicenow-unmapped:unknown' then
       raise exception using errcode = '22023', message = 'SERVICENOW_UNKNOWN_CUSTOMER_NOT_MAPPABLE';
     end if;
@@ -125,6 +266,7 @@ begin
   end if;
 
   v_now := (p_payload->>'appliedAt')::timestamptz;
+  v_now_iso := public.support_canonical_utc_iso(v_now);
   perform pg_advisory_xact_lock(hashtextextended('integration-customer-mapping:servicenow:' || (p_payload->>'externalCustomerKey'), 0));
 
   select * into v_target
@@ -181,13 +323,8 @@ begin
     with matching as (
     select ticket.id
     from public.support_tickets ticket
-    where ticket.data#>>'{serviceNow,provider}' = 'servicenow'
-      and (
-        ticket.data#>>'{serviceNow,externalCustomerKey}' = p_payload->>'externalCustomerKey'
-        or ticket.customer_key = p_payload->>'externalCustomerKey'
-        or (nullif(p_payload->>'externalCustomerId', '') is not null
-          and ticket.data#>>'{serviceNow,companyExternalId}' = p_payload->>'externalCustomerId')
-      )
+    where public.support_servicenow_ticket_customer_key(ticket.customer_key, ticket.data)
+      = p_payload->>'externalCustomerKey'
     for update
   ), updated as (
     update public.support_tickets ticket
@@ -199,12 +336,13 @@ begin
           'requiresCustomerMapping', false,
           'serviceNow', coalesce(ticket.data->'serviceNow', '{}'::jsonb) || jsonb_build_object(
             'externalCustomerKey', p_payload->>'externalCustomerKey',
-            'externalCustomerId', nullif(p_payload->>'externalCustomerId', ''),
             'externalCustomerName', coalesce(p_payload->>'externalCustomerName', ''),
             'customerMappingId', v_mapping_id,
-            'customerMappingAppliedAt', v_now
-          ),
-          'updatedAt', v_now
+            'customerMappingAppliedAt', v_now_iso
+          ) || case when nullif(p_payload->>'externalCustomerId', '') is not null
+            then jsonb_build_object('externalCustomerId', p_payload->>'externalCustomerId')
+            else '{}'::jsonb end,
+          'updatedAt', v_now_iso
         ),
         updated_at = v_now
     from matching
@@ -238,6 +376,7 @@ as $$
 declare
   v_mapping public.integration_customer_mappings%rowtype;
   v_now timestamptz;
+  v_action text;
 begin
   if p_payload is null
     or jsonb_typeof(p_payload) <> 'object'
@@ -248,7 +387,7 @@ begin
     or length(coalesce(p_payload->>'actorUserId', '')) not between 1 and 200
     or length(coalesce(p_payload->>'requestId', '')) not between 8 and 200
     or length(coalesce(p_payload->>'correlationId', '')) not between 8 and 200
-    or p_payload->>'appliedAt' is null then
+    or coalesce(p_payload->>'appliedAt', '') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' then
     raise exception using errcode = '22023', message = 'INVALID_MAPPING_DEACTIVATION_PAYLOAD';
   end if;
   v_now := (p_payload->>'appliedAt')::timestamptz;
@@ -263,6 +402,7 @@ begin
   where id = p_payload->>'mappingId' and provider = 'servicenow' for update;
 
   if v_mapping.active then
+    v_action := 'deactivated';
     update public.integration_customer_mappings set active = false,
       updated_by_user_id = p_payload->>'actorUserId', updated_at = v_now where id = v_mapping.id;
     insert into public.integration_customer_mapping_events (
@@ -273,8 +413,10 @@ begin
       v_mapping.customer_key, v_mapping.customer_key, 0, p_payload->>'actorUserId', p_payload->>'requestId',
       p_payload->>'correlationId', v_now, '{}'::jsonb
     );
+  else
+    v_action := 'unchanged';
   end if;
-  return query select v_mapping.id, 'deactivated'::text, v_mapping.customer_key, 0, false;
+  return query select v_mapping.id, v_action, v_mapping.customer_key, 0, false;
 end;
 $$;
 
@@ -292,16 +434,17 @@ declare
   v_target public.support_customers%rowtype;
   v_external_key text;
   v_ticket public.support_tickets%rowtype;
-  v_now timestamptz := now();
   v_dry_run boolean;
+  v_expected_external_id text;
+  v_expected_external_name text;
+  v_mapping_applied_iso text;
+  v_requires_mapping_update boolean;
 begin
   if p_payload is null or jsonb_typeof(p_payload) <> 'object' or octet_length(p_payload::text) > 32768 then
     raise exception using errcode = '22023', message = 'INVALID_SERVICENOW_INCIDENT_PAYLOAD';
   end if;
-  v_external_key := coalesce(
-    nullif(p_payload#>>'{ticket,serviceNow,externalCustomerKey}', ''),
-    nullif(p_payload#>>'{ticket,customerKey}', ''),
-    'servicenow-unmapped:unknown'
+  v_external_key := public.support_servicenow_ticket_customer_key(
+    p_payload#>>'{ticket,customerKey}', p_payload->'ticket'
   );
   v_dry_run := coalesce(p_payload->>'dryRun', 'false')::boolean;
   if not v_dry_run then
@@ -325,28 +468,66 @@ begin
 
   select * into v_ticket from public.support_tickets where id = v_result.ticket_id for update;
   if v_ticket.id is not null and (v_ticket.customer_key like 'servicenow-unmapped:%' or v_ticket.customer_key = v_target.customer_key) then
-    update public.support_tickets
-    set customer_key = v_target.customer_key,
-        customer_name = v_target.customer_name,
-        data = v_ticket.data || jsonb_build_object(
-          'customerKey', v_target.customer_key,
-          'customerName', v_target.customer_name,
-          'requiresCustomerMapping', false,
-          'serviceNow', coalesce(v_ticket.data->'serviceNow', '{}'::jsonb) || jsonb_build_object(
-            'externalCustomerKey', v_external_key,
-            'externalCustomerId', nullif(p_payload#>>'{ticket,serviceNow,externalCustomerId}', ''),
-            'externalCustomerName', coalesce(p_payload#>>'{ticket,serviceNow,externalCustomerName}', ''),
-            'customerMappingId', v_mapping.id,
-            'customerMappingAppliedAt', v_now
-          ),
-          'updatedAt', v_now
-        ),
-        updated_at = v_now
-    where id = v_ticket.id;
+    v_expected_external_id := coalesce(
+      nullif(p_payload#>>'{ticket,serviceNow,externalCustomerId}', ''),
+      nullif(p_payload#>>'{ticket,serviceNow,companyExternalId}', ''),
+      v_mapping.external_customer_id
+    );
+    v_expected_external_name := coalesce(
+      nullif(p_payload#>>'{ticket,serviceNow,externalCustomerName}', ''),
+      nullif(p_payload#>>'{ticket,serviceNow,companyReference}', ''),
+      v_mapping.external_customer_name,
+      ''
+    );
+    v_mapping_applied_iso := public.support_canonical_utc_iso(v_mapping.updated_at);
+    v_requires_mapping_update := v_ticket.customer_key is distinct from v_target.customer_key
+      or v_ticket.customer_name is distinct from v_target.customer_name
+      or v_ticket.data->>'customerKey' is distinct from v_target.customer_key
+      or v_ticket.data->>'customerName' is distinct from v_target.customer_name
+      or v_ticket.data->>'requiresCustomerMapping' is distinct from 'false'
+      or v_ticket.data#>>'{serviceNow,externalCustomerKey}' is distinct from v_external_key
+      or (v_expected_external_id is not null
+        and v_ticket.data#>>'{serviceNow,externalCustomerId}' is distinct from v_expected_external_id)
+      or v_ticket.data#>>'{serviceNow,externalCustomerName}' is distinct from v_expected_external_name
+      or v_ticket.data#>>'{serviceNow,customerMappingId}' is distinct from v_mapping.id
+      or v_ticket.data#>>'{serviceNow,customerMappingAppliedAt}' is distinct from v_mapping_applied_iso;
+
+    if v_requires_mapping_update then
+      update public.support_tickets
+      set customer_key = v_target.customer_key,
+          customer_name = v_target.customer_name,
+          data = v_ticket.data || jsonb_build_object(
+            'customerKey', v_target.customer_key,
+            'customerName', v_target.customer_name,
+            'requiresCustomerMapping', false,
+            'serviceNow', coalesce(v_ticket.data->'serviceNow', '{}'::jsonb) || jsonb_build_object(
+              'externalCustomerKey', v_external_key,
+              'externalCustomerName', v_expected_external_name,
+              'customerMappingId', v_mapping.id,
+              'customerMappingAppliedAt', v_mapping_applied_iso
+            ) || case when v_expected_external_id is not null
+              then jsonb_build_object('externalCustomerId', v_expected_external_id)
+              else '{}'::jsonb end
+          )
+      where id = v_ticket.id;
+    end if;
   end if;
   return query select v_result.outcome::text, v_result.ticket_id::text, v_result.warning_code::text;
 end;
 $$;
+
+revoke all privileges on function public.support_canonical_utc_iso(timestamptz) from public;
+revoke execute on function public.support_canonical_utc_iso(timestamptz) from anon, authenticated;
+grant execute on function public.support_canonical_utc_iso(timestamptz) to service_role;
+revoke all privileges on function public.support_servicenow_external_customer_key(text) from public;
+revoke execute on function public.support_servicenow_external_customer_key(text) from anon, authenticated;
+grant execute on function public.support_servicenow_external_customer_key(text) to service_role;
+revoke all privileges on function public.support_servicenow_ticket_customer_key(text, jsonb) from public;
+revoke execute on function public.support_servicenow_ticket_customer_key(text, jsonb) from anon, authenticated;
+grant execute on function public.support_servicenow_ticket_customer_key(text, jsonb) to service_role;
+revoke all privileges on function public.support_get_servicenow_customer_source(text) from public;
+revoke execute on function public.support_get_servicenow_customer_source(text) from anon, authenticated;
+grant execute on function public.support_get_servicenow_customer_source(text) to service_role;
 
 revoke all privileges on function public.support_apply_integration_customer_mapping(jsonb) from public;
 revoke execute on function public.support_apply_integration_customer_mapping(jsonb) from anon, authenticated;

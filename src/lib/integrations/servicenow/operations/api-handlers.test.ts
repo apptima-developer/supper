@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import type { Session } from "../../../auth";
-import { handleServiceNowCustomerMappingsGet, handleServiceNowCustomerMappingsPost, handleServiceNowRunsGet } from "./api-handlers";
+import { handleServiceNowCustomerMappingsGet, handleServiceNowCustomerMappingsPost, handleServiceNowMappingDeactivatePost, handleServiceNowRunsGet } from "./api-handlers";
 import type { ServiceNowOperationsRepository } from "./repository";
 
 const admin: Session = { userId: "admin-id", username: "admin", name: "Admin", role: "admin", authVersion: 1 };
@@ -54,5 +54,13 @@ describe("ServiceNow operations API security", () => {
     const response = await handleServiceNowCustomerMappingsPost(request, { getSession: async () => admin, repository: {} as ServiceNowOperationsRepository });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "SERVICENOW_UNKNOWN_CUSTOMER_NOT_MAPPABLE" });
+  });
+
+  it("returns an unchanged deactivation result without claiming another deactivation", async () => {
+    const deactivate = vi.fn(async () => ({ mappingId: "mapping-id-00000001", action: "unchanged" as const, customerKey: "customer-a", affectedTicketCount: 0, active: false }));
+    const request = new Request("https://app.test/api/integrations/servicenow/customer-mappings/mapping-id-00000001/deactivate", { method: "POST" });
+    const response = await handleServiceNowMappingDeactivatePost(request, "mapping-id-00000001", { getSession: async () => admin, repository: {} as ServiceNowOperationsRepository, deactivate });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ action: "unchanged", active: false, affectedTicketCount: 0 });
   });
 });

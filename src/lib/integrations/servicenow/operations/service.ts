@@ -82,6 +82,7 @@ export async function getServiceNowOperationsSummary(
     runsLast24Hours: recent.all, failedOrPartialRunsLast24Hours: recent.failedOrPartial,
     unmappedCustomerSourceCount: unmapped.total,
     unmappedTicketCount: unmapped.matchingTicketCount,
+    mappingCandidatesTruncated: unmapped.truncated,
     activeMappingCount: mappings.active, inactiveMappingCount: mappings.inactive,
   };
 }

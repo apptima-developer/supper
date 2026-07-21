@@ -11,7 +11,7 @@ describe("ServiceNow customer identity", () => {
 
   it("hashes non-sys-id references deterministically", () => {
     const first = deriveServiceNowCustomerIdentity({ externalCustomerId: "legacy-company-reference" });
-    expect(first.externalCustomerKey).toMatch(/^servicenow-unmapped:ref-[a-f0-9]{24}$/);
+    expect(first.externalCustomerKey).toBe("servicenow-unmapped:ref-015e4c36608f0e88de389e10");
     expect(deriveServiceNowCustomerIdentity({ externalCustomerId: "legacy-company-reference" }).externalCustomerKey).toBe(first.externalCustomerKey);
   });
 

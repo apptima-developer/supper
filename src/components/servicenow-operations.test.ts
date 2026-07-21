@@ -17,6 +17,12 @@ describe("ServiceNow Operations UI boundary", () => {
     expect(source).toContain("hidden overflow-x-auto");
   });
 
+  it("warns when mapping candidates are bounded and reports repeated deactivation truthfully", () => {
+    expect(source).toContain("Results are bounded for operational safety. Some sources or totals may not be shown.");
+    expect(source).toContain("Customer mapping was already inactive; no changes were made");
+    expect(source).toContain('result.action === "deactivated"');
+  });
+
   it("does not render raw JSON, browser alerts, or ServiceNow credentials", () => {
     expect(source).not.toContain("JSON.stringify(selectedRun");
     expect(source).not.toContain("alert(");

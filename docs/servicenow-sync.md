@@ -123,6 +123,12 @@ Dry-run validates configuration, observes the current lock without mutating it, 
 
 `integration_sync_runs` is the authoritative durable run audit and `integration_sync_run_items` is authoritative per-record traceability. A committed manual run additionally attempts one bounded, human-facing `support_audit_log` entry. That secondary write is best-effort: failure never changes a committed synchronization result, emits a safe critical server event, attempts to set `metadata.auditWriteFailed=true`, and exposes only `secondary_audit_write_failed` in status responses. Unchanged records do not create general audit rows.
 
+## Customer-mapping replay semantics
+
+The AI-1.2.1 wrapper uses the same customer identity precedence as TypeScript: explicit ServiceNow external key, relational deterministic unmapped key, `externalCustomerId`, then legacy `companyExternalId`. Active mapping metadata is restored after meaningful base updates, but `customerMappingAppliedAt` always remains the canonical millisecond UTC time of the latest explicit mapping create/change/reactivation. It is never replaced by the synchronization time.
+
+An identical fully mapped replay returns the base `unchanged` outcome and does not update `support_tickets.data`, relational `updated_at`, Ticket `updatedAt`, mapping-applied time, mapping row, mapping event, or general mapping audit. External-link observation timestamps retain accepted AI-1.1 behavior. When title, state, or priority changes, the ServiceNow-owned field changes while customer assignment, mapping ID/time, and SUPPER-owned fields remain intact.
+
 ## Environment
 
 Configure only the isolated `ai_development` Vercel Preview environment:
@@ -219,3 +225,5 @@ The current PDI uses a dedicated integration user with the temporary `itil` role
 There is no fake cross-system transaction and no automatic rollback of ServiceNow changes because SUPPER never writes ServiceNow. Do not drop the new tables/functions while sync is enabled or a lease is active. A database rollback would require disabling sync, confirming no active lock, preserving run/link state for audit, and performing a separately reviewed manual migration. Existing tickets are never deleted by this migration or engine.
 
 PDI availability and temporary role breadth remain development limitations. Persistent synchronization no longer uses mutable offset pagination; the diagnostic sample reader still uses bounded offsets by design. A run that reaches a bound is intentionally partial. AI-1.2 now provides bounded run inspection and stable company-to-customer mapping; see [ServiceNow operations](./servicenow-operations.md) and [ServiceNow customer mapping](./servicenow-customer-mapping.md). Manual link repair and lock administration remain out of scope.
+
+After AI-1.2.1 acceptance, development proceeds to **AI-1.3 Unified Intake, Identity, Message, and File Core**. LINE OA integration remains deferred until that provider-neutral foundation is accepted.

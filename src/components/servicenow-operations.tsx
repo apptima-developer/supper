@@ -13,7 +13,7 @@ import { Input } from "./ui/input";
 import { PaginationControls } from "./ui/pagination-controls";
 
 type Tab = "overview" | "runs" | "mappings" | "diagnostics";
-type PageResult<T> = { items: T[]; total: number; page: number; limit: number };
+type PageResult<T> = { items: T[]; total: number; page: number; limit: number; truncated?: boolean };
 type TargetCustomer = { customerKey: string; customerName: string; projectCode?: string };
 type RunDetail = { run: ServiceNowRunSummary; items: ServiceNowRunItem[]; nextItemCursor?: number };
 
@@ -206,8 +206,10 @@ export function ServiceNowOperations({ diagnosticsAvailable }: { diagnosticsAvai
     if (!deactivateCandidate?.mappingId) return;
     setBusy("deactivate");
     try {
-      const result = await api<{ auditWarning?: string }>(`/api/integrations/servicenow/customer-mappings/${encodeURIComponent(deactivateCandidate.mappingId)}/deactivate`, { method: "POST" });
-      toast.success("Customer mapping deactivated; existing ticket assignments were preserved");
+      const result = await api<{ action: "deactivated" | "unchanged"; auditWarning?: string }>(`/api/integrations/servicenow/customer-mappings/${encodeURIComponent(deactivateCandidate.mappingId)}/deactivate`, { method: "POST" });
+      toast.success(result.action === "deactivated"
+        ? "Customer mapping deactivated; existing ticket assignments were preserved"
+        : "Customer mapping was already inactive; no changes were made");
       if (result.auditWarning) toast.warning("Deactivation succeeded, but the secondary audit write needs attention");
       setDeactivateCandidate(undefined);
       await Promise.all([loadMappings(1), loadSummary()]);
@@ -243,7 +245,7 @@ export function ServiceNowOperations({ diagnosticsAvailable }: { diagnosticsAvai
         <Stat label="Configuration" value={summary?.config.configured ? "Ready" : "Attention"} detail={summary?.config.hostname || "Not configured"} />
         <Stat label="Sync state" value={summary?.syncRunning ? "Running" : summary?.syncEnabled ? "Idle" : "Disabled"} detail={`Last success ${timestamp(summary?.lastSuccess)}`} />
         <Stat label="Runs / 24h" value={summary?.runsLast24Hours ?? 0} detail={`${summary?.failedOrPartialRunsLast24Hours ?? 0} failed or partial`} />
-        <Stat label="Unmapped" value={summary?.unmappedCustomerSourceCount ?? 0} detail={`${summary?.unmappedTicketCount ?? 0} tickets`} />
+        <Stat label="Unmapped" value={summary?.unmappedCustomerSourceCount ?? 0} detail={`${summary?.unmappedTicketCount ?? 0} tickets${summary?.mappingCandidatesTruncated ? " · bounded" : ""}`} />
         <Stat label="Active mappings" value={summary?.activeMappingCount ?? 0} detail={`${summary?.inactiveMappingCount ?? 0} inactive`} />
       </div>
       <Card><CardHeader><div className="flex items-center gap-2"><CloudCog size={17} className="text-sky-600" /><CardTitle>ServiceNow controls</CardTitle></div><Badge tone={summary?.config.configured ? "emerald" : "amber"}>{summary?.config.configured ? "Configured" : "Needs attention"}</Badge></CardHeader>
@@ -281,6 +283,7 @@ export function ServiceNowOperations({ diagnosticsAvailable }: { diagnosticsAvai
 
     {tab === "mappings" && <Card><CardHeader><CardTitle>Customer mapping queue</CardTitle><span className="text-[10px] text-slate-400">{mappings.total} ServiceNow sources</span></CardHeader><CardContent className="space-y-3">
       <div className="grid gap-2 md:grid-cols-[1fr_200px_auto]"><Input value={mappingSearch} onChange={(event) => setMappingSearch(event.target.value)} placeholder="Search ServiceNow company or stable key" /><select className="h-9 rounded-lg border border-sky-100 bg-white px-3 text-[11px] dark:border-slate-700 dark:bg-slate-900" value={mappingStatus} onChange={(event) => setMappingStatus(event.target.value)}><option value="all">All</option><option value="unmapped">Unmapped</option><option value="mapped">Mapped</option><option value="inactive">Inactive</option></select><Button variant="outline" size="sm" onClick={() => setAppliedMappingSearch(mappingSearch)}>Search</Button></div>
+      {mappings.truncated && <div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100"><TriangleAlert size={15} className="shrink-0" /><p>Results are bounded for operational safety. Some sources or totals may not be shown. Use exact source search or refine the filter.</p></div>}
       <div className="space-y-2">{mappings.items.map((candidate) => <div key={candidate.externalCustomerKey} className="grid gap-3 rounded-xl border border-sky-100/80 bg-white/55 p-3 md:grid-cols-[1.4fr_1fr_120px_1fr_auto] md:items-center dark:border-slate-700 dark:bg-slate-900/55">
         <div><div className="flex flex-wrap items-center gap-2"><p className="font-semibold text-[#173b57] dark:text-slate-100">{candidate.mappable ? candidate.externalCustomerName : "Needs ServiceNow company"}</p><Badge tone={candidate.activeMapping ? "emerald" : candidate.mapped ? "amber" : "slate"}>{candidate.activeMapping ? "Mapped" : candidate.mapped ? "Inactive" : "Unmapped"}</Badge></div><p className="mt-1 max-w-md truncate text-[10px] text-slate-400" title={candidate.externalCustomerKey}>{candidate.externalCustomerKey}</p></div>
         <div><p className="text-[10px] text-slate-400">SUPPER customer</p><p className="text-[11px] font-medium">{candidate.mappedCustomerName || "-"}</p></div>

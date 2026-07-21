@@ -18,9 +18,12 @@ const mappingResultSchema = z.object({
 });
 
 const deactivationResultSchema = z.object({
-  mapping_id: z.string(), action: z.literal("deactivated"), customer_key: z.string(),
+  mapping_id: z.string(), action: z.enum(["deactivated", "unchanged"]), customer_key: z.string(),
   affected_ticket_count: z.number().int().nonnegative(), active: z.boolean(),
 });
+
+export const serviceNowTicketCandidateScanLimit = 10_000;
+export const serviceNowMappingCandidateScanLimit = 2_000;
 
 async function client() {
   return (await import("../../../supabaseAdmin")).supabaseAdmin;
@@ -78,8 +81,16 @@ type MappingRow = {
   external_customer_name?: string; customer_key?: string; active?: boolean;
 };
 
+function mappingStatusMatches(item: ServiceNowMappingCandidate, status: MappingFilters["status"]) {
+  if (status === "mapped") return item.mapped && item.activeMapping;
+  if (status === "unmapped") return !item.activeMapping;
+  if (status === "inactive") return item.mapped && !item.activeMapping;
+  return true;
+}
+
 export function aggregateServiceNowCustomerMappings(
   ticketRows: TicketSourceRow[], mappingRows: MappingRow[], customerNames: Map<string, string>, filters: MappingFilters,
+  bounds: { ticketBoundReached?: boolean; mappingBoundReached?: boolean } = {},
 ) {
   const byKey = new Map<string, ServiceNowMappingCandidate>();
   for (const row of ticketRows) {
@@ -135,9 +146,7 @@ export function aggregateServiceNowCustomerMappings(
 
   const search = filters.search.toLocaleLowerCase();
   const filtered = [...byKey.values()].filter((item) => {
-    if (filters.status === "mapped" && (!item.mapped || !item.activeMapping)) return false;
-    if (filters.status === "unmapped" && item.activeMapping) return false;
-    if (filters.status === "inactive" && (!item.mapped || item.activeMapping)) return false;
+    if (!mappingStatusMatches(item, filters.status)) return false;
     return !search || item.externalCustomerName.toLocaleLowerCase().includes(search) || item.externalCustomerKey.toLocaleLowerCase().includes(search);
   }).sort((a, b) => {
     const aRank = !a.activeMapping && a.mappable ? 0 : a.activeMapping ? 1 : 2;
@@ -149,6 +158,31 @@ export function aggregateServiceNowCustomerMappings(
     items: filtered.slice(offset, offset + filters.limit), total: filtered.length,
     matchingTicketCount: filtered.reduce((sum, item) => sum + item.ticketCount, 0),
     page: filters.page, limit: filters.limit,
+    truncated: bounds.ticketBoundReached === true || bounds.mappingBoundReached === true,
+  };
+}
+
+function exactMappingSource(row: JsonRecord): ServiceNowMappingCandidate | undefined {
+  const externalCustomerKey = text(row, "external_customer_key");
+  if (!externalCustomerKey) return undefined;
+  const examples = Array.isArray(row.example_incidents)
+    ? row.example_incidents.filter((value): value is string => typeof value === "string").slice(0, 3)
+    : [];
+  return {
+    mappingId: text(row, "mapping_id"),
+    externalCustomerKey,
+    externalCustomerId: text(row, "external_customer_id"),
+    externalCustomerName: text(row, "external_customer_name") || "Unmapped ServiceNow customer",
+    mappable: row.mappable === true,
+    mapped: row.mapped === true,
+    activeMapping: row.active_mapping === true,
+    mappedCustomerKey: text(row, "mapped_customer_key"),
+    mappedCustomerName: text(row, "mapped_customer_name"),
+    ticketCount: number(row, "ticket_count"),
+    openTicketCount: number(row, "open_ticket_count"),
+    firstSeenAt: text(row, "first_seen_at"),
+    lastSeenAt: text(row, "last_seen_at"),
+    exampleIncidents: examples,
   };
 }
 
@@ -204,19 +238,37 @@ export class ServiceNowOperationsRepository {
   }
 
   async listMappingCandidates(filters: MappingFilters) {
+    if (/^servicenow-unmapped:[a-z0-9-]+$/.test(filters.search)
+      && filters.search !== "servicenow-unmapped:unknown") {
+      const source = await this.getMappingSource(filters.search);
+      const items = source && mappingStatusMatches(source, filters.status) ? [source] : [];
+      return {
+        items, total: items.length, matchingTicketCount: items.reduce((sum, item) => sum + item.ticketCount, 0),
+        page: filters.page, limit: filters.limit, truncated: false,
+      };
+    }
     const db = await client();
     const [tickets, mappings, customers] = await Promise.all([
-      must("Could not read ServiceNow ticket sources", db.from("support_tickets").select("id,issue_id,customer_key,customer_name,kanban_status,data,updated_at").eq("issue_type", "Incident").limit(10_000)),
-      must("Could not read customer mappings", db.from("integration_customer_mappings").select("id,external_customer_key,external_customer_id,external_customer_name,customer_key,active").eq("provider", "servicenow").limit(2_000)),
+      must("Could not read ServiceNow ticket sources", db.from("support_tickets").select("id,issue_id,customer_key,customer_name,kanban_status,data,updated_at", { count: "exact" }).eq("issue_type", "Incident").limit(serviceNowTicketCandidateScanLimit)),
+      must("Could not read customer mappings", db.from("integration_customer_mappings").select("id,external_customer_key,external_customer_id,external_customer_name,customer_key,active", { count: "exact" }).eq("provider", "servicenow").limit(serviceNowMappingCandidateScanLimit)),
       must("Could not read mapped customer names", db.from("support_customers").select("customer_key,customer_name").limit(10_000)),
     ]);
     const names = new Map(((customers.data || []) as JsonRecord[]).flatMap((row) => text(row, "customer_key") ? [[text(row, "customer_key")!, text(row, "customer_name") || ""] as const] : []));
-    return aggregateServiceNowCustomerMappings((tickets.data || []) as TicketSourceRow[], (mappings.data || []) as MappingRow[], names, filters);
+    const ticketRows = (tickets.data || []) as TicketSourceRow[];
+    const mappingRows = (mappings.data || []) as MappingRow[];
+    return aggregateServiceNowCustomerMappings(ticketRows, mappingRows, names, filters, {
+      ticketBoundReached: ticketRows.length >= serviceNowTicketCandidateScanLimit || (tickets.count || 0) > ticketRows.length,
+      mappingBoundReached: mappingRows.length >= serviceNowMappingCandidateScanLimit || (mappings.count || 0) > mappingRows.length,
+    });
   }
 
   async getMappingSource(externalCustomerKey: string) {
-    const result = await this.listMappingCandidates({ page: 1, limit: 100, status: "all", search: externalCustomerKey });
-    return result.items.find((item) => item.externalCustomerKey === externalCustomerKey);
+    const db = await client();
+    const result = await must("Could not resolve ServiceNow customer source", db.rpc("support_get_servicenow_customer_source", {
+      p_external_customer_key: externalCustomerKey,
+    }));
+    const row = Array.isArray(result.data) ? result.data[0] : result.data;
+    return row && typeof row === "object" && !Array.isArray(row) ? exactMappingSource(row as JsonRecord) : undefined;
   }
 
   async getMapping(mappingId: string) {

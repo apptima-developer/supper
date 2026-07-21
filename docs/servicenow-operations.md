@@ -43,10 +43,12 @@ Run summaries contain fixed-window timestamps, composite watermarks, counters, d
 
 The new relational tables have RLS enabled, no anon/authenticated policy, and service-role-only grants. Every mapping RPC is `SECURITY DEFINER` with an explicit `public, pg_temp` search path and explicit execution revokes from `PUBLIC`, `anon`, and `authenticated`.
 
-Current candidate aggregation is bounded to 10,000 Incident rows and 2,000 mapping rows per request. The UI returns no more than 100 candidates. No customer is created automatically. Missing-company sources remain visible but cannot be mapped.
+Current candidate aggregation is bounded to 10,000 Incident rows and 2,000 mapping rows per request. The UI returns no more than 100 candidates and shows a warning when returned totals may be incomplete. A full canonical source key uses exact server-side lookup and does not depend on the candidate page. No customer is created automatically. Missing-company sources remain visible but cannot be mapped.
 
-The next milestone is **AI-2.0 Controlled ServiceNow Write Loop**. It must be separately designed and reviewed; AI-1.2 performs no ServiceNow write.
+Applying a mapping resolves source metadata again on the server. First deactivation reports `deactivated`; repeated or concurrent duplicate deactivation reports `unchanged`, creates no second audit/event, and the toast explicitly says no changes were made.
+
+After AI-1.2.1 acceptance, the next milestone is **AI-1.3 Unified Intake, Identity, Message, and File Core**. LINE OA begins only after that provider-neutral foundation is accepted. This milestone performs no ServiceNow write.
 
 ## Manual acceptance
 
-After applying migration `202607210001` to the verified isolated `supper-ai-dev` project, deploy `ai_development`, sign in as an administrator, and open the Operations page. Verify overview counters, the existing connection/sample/manual-sync actions, run filtering/detail, the mapping and remapping preservation flow, deactivation, and the disabled unknown-company action. Repeat incremental sync to confirm idempotency and inspect browser network activity to confirm Incident-table requests remain GET-only.
+After applying migration `202607210001` to the verified isolated `supper-ai-dev` project, deploy `ai_development`, sign in as an administrator, and open the Operations page. Verify overview counters, the existing connection/sample/manual-sync actions, run filtering/detail, and the bounded-results warning. Map a company, capture complete Ticket JSON/relational `updated_at`/mapping-applied time/event count, then run unchanged incremental sync and confirm every captured value is identical. Change title, state, or priority and confirm only ServiceNow-owned fields move. Verify exact canonical-key search, legacy `externalCustomerId` and `companyExternalId`, explicit remap, deactivation twice (`deactivated`, then `unchanged`), the disabled unknown-company action, and GET-only Incident traffic.

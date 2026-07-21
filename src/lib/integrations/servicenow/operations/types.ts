@@ -76,6 +76,7 @@ export type ServiceNowOperationsSummary = {
   failedOrPartialRunsLast24Hours: number;
   unmappedCustomerSourceCount: number;
   unmappedTicketCount: number;
+  mappingCandidatesTruncated: boolean;
   activeMappingCount: number;
   inactiveMappingCount: number;
 };
