@@ -24,6 +24,10 @@ SERVICENOW_PAGE_SIZE=100
 SERVICENOW_INCIDENT_TABLE=incident
 ```
 
+Boolean flags accept only `true` or `false` after lowercasing and removing harmless surrounding ASCII whitespace. Authentication mode is normalized the same way and must be `basic` or `oauth_client_credentials`; aliases such as `yes`, `1`, or `enabled` are rejected. Non-secret URL, username, client ID, numeric, and table-name inputs ignore surrounding whitespace. Passwords and client secrets remain byte-exact and are never trimmed, lowercased, logged, or returned.
+
+In an `APP_ENV=ai-development` Vercel Preview only, an administrator can use **Settings → ServiceNow → Diagnose Configuration**. The guarded endpoint reports presence, normalized flags, hostname-only URL validation, bounded field issues, branch, and a 12-character commit. It returns `404` outside AI development, in production, without a session, or without Settings permission; it never calls ServiceNow or returns credential values.
+
 OAuth client credentials are also supported with `SERVICENOW_AUTH_MODE=oauth_client_credentials`, `SERVICENOW_CLIENT_ID`, and `SERVICENOW_CLIENT_SECRET`. Tokens are validated, cached only in server memory, and refreshed before expiry. Tokens are never persisted.
 
 When `SERVICENOW_ENABLED=false`, SUPPER builds and operates normally. URL validation requires HTTPS, except explicit HTTP localhost test instances. Table names, timeouts, page sizes, credentials, and auth-mode requirements are validated with Zod. No ServiceNow credential uses a `NEXT_PUBLIC_` prefix.
@@ -39,8 +43,9 @@ The known acceptance Incident is `INC0010001`, short description `Test API integ
 - `POST /api/integrations/servicenow/test`
 - `GET /api/integrations/servicenow/incidents?limit=10&offset=0`
 - `GET /api/integrations/servicenow/incidents/[sysId]`
+- `GET /api/integrations/servicenow/diagnostics` (AI-development non-production only)
 
-All routes require a current SUPPER session and `settings:manage` permission. The list accepts only bounded `limit`, `offset`, `number`, and `updatedAfter` inputs. A browser cannot supply a table, field list, encoded ServiceNow query, instance URL, authentication mode, or credential.
+All routes require a current SUPPER session and `settings:manage` permission. The runtime diagnostics route additionally hides behind the AI-development/non-production guard and otherwise returns generic `404`. The list accepts only bounded `limit`, `offset`, `number`, and `updatedAfter` inputs. A browser cannot supply a table, field list, encoded ServiceNow query, instance URL, authentication mode, or credential.
 
 Requests use correlation IDs, bounded timeout/abort handling, bounded pagination, and a maximum-page guard. Provider 400/401/403/404/409/429/5xx, network, timeout, abort, malformed JSON, and unexpected response shapes map to stable safe error categories.
 
@@ -59,10 +64,11 @@ Server logs may contain only provider, operation, correlation/request ID, attemp
 1. Deploy `ai_development` as Vercel Preview with AI-development Supabase and ServiceNow values.
 2. Sign in with the guarded AI-development administrator.
 3. Open **Settings** and confirm the sanitized host/auth status.
-4. Click **Test Connection**.
-5. Click **Load Sample Incidents** and confirm `INC0010001` / `Test API integration` appears.
-6. Confirm the `support_tickets` row count is unchanged.
-7. Repeat the sample load and confirm the count remains unchanged.
+4. Click **Diagnose Configuration** and confirm the displayed branch/short commit match the Preview, both enabled flags are normalized as expected, required credential presence is `Yes`, and configuration validity is `Valid`. If not, correct only the listed safe issue paths in Preview variables and redeploy.
+5. Click **Test Connection**.
+6. Click **Load Sample Incidents** and confirm `INC0010001` / `Test API integration` appears.
+7. Confirm the `support_tickets` row count is unchanged.
+8. Repeat the sample load and confirm the count remains unchanged.
 
 ## AI-1.1 synchronization boundary
 

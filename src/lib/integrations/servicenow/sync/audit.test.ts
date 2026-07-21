@@ -18,6 +18,12 @@ describe("ServiceNow synchronization configuration and audit", () => {
     expect(parseServiceNowSyncConfig({})).toEqual({ enabled: false, initialLookbackDays: 30, overlapSeconds: 120, maxRecords: 1000, maxPages: 20, lockTtlSeconds: 300 });
   });
 
+  it("normalizes the sync flag and numeric whitespace without accepting aliases", () => {
+    expect(parseServiceNowSyncConfig({ SERVICENOW_SYNC_ENABLED: " TRUE ", SERVICENOW_SYNC_MAX_RECORDS: " 50 " })).toMatchObject({ enabled: true, maxRecords: 50 });
+    expect(parseServiceNowSyncConfig({ SERVICENOW_SYNC_ENABLED: " False " })).toMatchObject({ enabled: false });
+    expect(() => parseServiceNowSyncConfig({ SERVICENOW_SYNC_ENABLED: "enabled" })).toThrow();
+  });
+
   it("rejects unsafe synchronization bounds", () => {
     expect(() => parseServiceNowSyncConfig({ SERVICENOW_SYNC_MAX_RECORDS: "5001" })).toThrow();
     expect(() => parseServiceNowSyncConfig({ SERVICENOW_SYNC_LOCK_TTL_SECONDS: "29" })).toThrow();

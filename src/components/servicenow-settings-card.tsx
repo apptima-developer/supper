@@ -4,6 +4,7 @@ import { CheckCircle2, CloudCog, Loader2, Play, RefreshCw, SearchCheck, Triangle
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import type { ServiceNowConfigSummary } from "@/lib/integrations/servicenow/config";
+import type { SafeServiceNowRuntimeDiagnostics } from "@/lib/integrations/servicenow/diagnostics-types";
 import { serviceNowSyncPresentation } from "@/lib/integrations/servicenow/sync/presentation";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -55,13 +56,28 @@ function errorCategory(body: unknown) {
   return typeof category === "string" && /^[a-z_]{1,40}$/.test(category) ? category : "request";
 }
 
-export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSummary }) {
-  const [busy, setBusy] = useState<"test" | "load" | "sync" | "refresh" | "">("");
+function diagnosticsFromBody(body: unknown) {
+  if (!body || typeof body !== "object") return undefined;
+  const diagnostics = (body as Record<string, unknown>).diagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") return undefined;
+  const value = diagnostics as Record<string, unknown>;
+  if (!value.deployment || !value.serviceNow || !value.synchronization) return undefined;
+  return diagnostics as SafeServiceNowRuntimeDiagnostics;
+}
+
+function SafeBooleanBadge({ value }: { value: boolean | null }) {
+  if (value === null) return <Badge tone="amber">Invalid</Badge>;
+  return <Badge tone={value ? "emerald" : "slate"}>{value ? "Yes" : "No"}</Badge>;
+}
+
+export function ServiceNowSettingsCard({ config, diagnosticsAvailable = false }: { config: ServiceNowConfigSummary; diagnosticsAvailable?: boolean }) {
+  const [busy, setBusy] = useState<"test" | "load" | "sync" | "refresh" | "diagnose" | "">("");
   const [connection, setConnection] = useState<"idle" | "connected" | "failed">("idle");
   const [testedAt, setTestedAt] = useState<string>();
   const [lastErrorCategory, setLastErrorCategory] = useState<string>();
   const [incidents, setIncidents] = useState<SampleIncident[]>([]);
   const [sync, setSync] = useState<SyncSummary>();
+  const [diagnostics, setDiagnostics] = useState<SafeServiceNowRuntimeDiagnostics>();
   const [confirmMode, setConfirmMode] = useState<"initial" | "incremental">();
   const enabled = config.enabled && config.configured;
   const syncEnabled = enabled && config.syncEnabled;
@@ -143,6 +159,26 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
     }
   }
 
+  async function diagnoseConfiguration() {
+    if (busy) return;
+    setBusy("diagnose");
+    try {
+      const response = await fetch("/api/integrations/servicenow/diagnostics", { cache: "no-store" });
+      const body: unknown = await response.json();
+      if (!response.ok) throw new Error(errorMessage(body, "Configuration diagnostics are unavailable"));
+      const safeDiagnostics = diagnosticsFromBody(body);
+      if (!safeDiagnostics) throw new Error("Configuration diagnostics returned an invalid response");
+      setDiagnostics(safeDiagnostics);
+      const valid = safeDiagnostics.serviceNow.configurationValid && safeDiagnostics.synchronization.configurationValid;
+      if (valid) toast.success("ServiceNow configuration is valid");
+      else toast.warning("ServiceNow configuration needs attention");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not diagnose ServiceNow configuration");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function runSync(mode: "initial" | "incremental", dryRun: boolean) {
     if (busy) return;
     setBusy("sync");
@@ -190,7 +226,30 @@ export function ServiceNowSettingsCard({ config }: { config: ServiceNowConfigSum
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" size="sm" disabled={!enabled || !!busy} onClick={runTest}>{busy === "test" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}Test Connection</Button>
         <Button size="sm" disabled={!enabled || !!busy} onClick={loadSample}>{busy === "load" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}Load Sample Incidents</Button>
+        {diagnosticsAvailable && <Button variant="ghost" size="sm" disabled={!!busy} onClick={diagnoseConfiguration}>{busy === "diagnose" ? <Loader2 size={13} className="animate-spin" /> : <SearchCheck size={13} />}Diagnose Configuration</Button>}
       </div>
+
+      {diagnosticsAvailable && diagnostics && <div className="rounded-xl border border-sky-100/80 bg-sky-50/35 p-3 text-[10px]">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div><p className="text-[11px] font-semibold text-[#173b57]">Safe runtime diagnostics</p><p className="text-slate-400">Presence and validation state only. Credentials are never returned.</p></div>
+          <Badge tone={diagnostics.serviceNow.configurationValid && diagnostics.synchronization.configurationValid ? "emerald" : "amber"}>{diagnostics.serviceNow.configurationValid && diagnostics.synchronization.configurationValid ? "Valid" : "Needs attention"}</Badge>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Deployment</span><p className="mt-0.5 font-semibold text-slate-700">{diagnostics.deployment.gitBranch || "-"} · {diagnostics.deployment.commitSha || "-"}</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">ServiceNow enabled</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.serviceNow.enabledNormalized} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Authentication mode</span><p className="mt-0.5 font-semibold text-slate-700">{diagnostics.serviceNow.authModeNormalized || "Invalid"}</p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Username present</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.serviceNow.usernamePresent && diagnostics.serviceNow.usernameNonEmptyAfterTrim} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Password present</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.serviceNow.passwordPresent && diagnostics.serviceNow.passwordNonEmpty} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Instance URL valid</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.serviceNow.instanceUrlValid} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Configuration valid</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.serviceNow.configurationValid} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Sync enabled</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.synchronization.enabledNormalized} /></p></div>
+          <div className="rounded-lg border border-sky-100 bg-white/60 p-2"><span className="text-slate-400">Sync configuration valid</span><p className="mt-1"><SafeBooleanBadge value={diagnostics.synchronization.configurationValid} /></p></div>
+        </div>
+        {[...diagnostics.serviceNow.validationIssues, ...diagnostics.synchronization.validationIssues].length > 0 && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/80 p-2 text-amber-900">
+          <p className="font-semibold">Validation issues</p>
+          <ul className="mt-1 space-y-1">{[...diagnostics.serviceNow.validationIssues, ...diagnostics.synchronization.validationIssues].map((issue, index) => <li key={`${issue.path}-${issue.code}-${index}`}><span className="font-semibold">{issue.path}</span>: {issue.message}</li>)}</ul>
+        </div>}
+      </div>}
 
       <div className="rounded-xl border border-sky-100/80 bg-sky-50/35 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

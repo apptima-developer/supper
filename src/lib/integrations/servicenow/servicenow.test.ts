@@ -4,7 +4,7 @@ import { isIntegrationBoundaryError } from "../errors";
 import { redactSensitive } from "../../server-logging";
 import { buildServiceNowBasicAuthorization, clearServiceNowOAuthTokenCache, getServiceNowAuthorization } from "./auth";
 import { ServiceNowReadOnlyAdapter } from "./adapter";
-import { parseServiceNowConfig } from "./config";
+import { parseServiceNowConfig, summarizeServiceNowConfig } from "./config";
 import { serviceNowIncidentFields } from "./field-mapping";
 
 const correlationId = correlationIdSchema.parse("request-servicenow-1234");
@@ -42,17 +42,42 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe("ServiceNow configuration", () => {
   it("supports a disabled configuration without credentials", () => {
+    expect(parseServiceNowConfig({})).toEqual({ enabled: false });
+    expect(parseServiceNowConfig({ SERVICENOW_ENABLED: "   " })).toEqual({ enabled: false });
     expect(parseServiceNowConfig({ SERVICENOW_ENABLED: "false" })).toEqual({ enabled: false });
+    expect(parseServiceNowConfig({ SERVICENOW_ENABLED: " FALSE " })).toEqual({ enabled: false });
+  });
+
+  it("normalizes non-secret flags and fields while preserving password bytes", () => {
+    const password = "  byte-exact-password  ";
+    const config = parseServiceNowConfig({
+      ...basicEnv,
+      SERVICENOW_ENABLED: " TRUE ",
+      SERVICENOW_AUTH_MODE: " BASIC ",
+      SERVICENOW_INSTANCE_URL: "  https://dev12345.service-now.com  ",
+      SERVICENOW_USERNAME: "  machine-user  ",
+      SERVICENOW_PASSWORD: password,
+      SERVICENOW_TIMEOUT_MS: " 1000 ",
+      SERVICENOW_PAGE_SIZE: " 2 ",
+      SERVICENOW_INCIDENT_TABLE: " incident ",
+    });
+    expect(config).toMatchObject({ enabled: true, authMode: "basic", instanceUrl: "https://dev12345.service-now.com", username: "machine-user", password });
+  });
+
+  it("rejects unsupported boolean-like values instead of guessing", () => {
+    expect(() => parseServiceNowConfig({ ...basicEnv, SERVICENOW_ENABLED: "yes" })).toThrow();
+    expect(() => parseServiceNowConfig({ ...basicEnv, SERVICENOW_ENABLED: "1" })).toThrow();
   });
 
   it("validates Basic and OAuth configurations", () => {
     expect(parseServiceNowConfig(basicEnv)).toMatchObject({ enabled: true, authMode: "basic", pageSize: 2 });
+    const clientSecret = "  byte-exact-client-secret  ";
     expect(parseServiceNowConfig({
       ...basicEnv,
       SERVICENOW_AUTH_MODE: "oauth_client_credentials",
       SERVICENOW_CLIENT_ID: "client-id",
-      SERVICENOW_CLIENT_SECRET: "client-secret",
-    })).toMatchObject({ enabled: true, authMode: "oauth_client_credentials", clientId: "client-id" });
+      SERVICENOW_CLIENT_SECRET: clientSecret,
+    })).toMatchObject({ enabled: true, authMode: "oauth_client_credentials", clientId: "client-id", clientSecret });
   });
 
   it("rejects missing credentials, invalid URLs, and unsafe table names", () => {
@@ -60,6 +85,18 @@ describe("ServiceNow configuration", () => {
     expect(() => parseServiceNowConfig({ ...basicEnv, SERVICENOW_INSTANCE_URL: "http://service-now.example.com" })).toThrow(/HTTPS/);
     expect(() => parseServiceNowConfig({ ...basicEnv, SERVICENOW_INCIDENT_TABLE: "incident^DELETE" })).toThrow();
     expect(parseServiceNowConfig({ ...basicEnv, SERVICENOW_INSTANCE_URL: "http://localhost:3001" })).toMatchObject({ enabled: true });
+  });
+
+  it("keeps parser and summary normalization in agreement", () => {
+    const normalizedEnv = { ...basicEnv, SERVICENOW_ENABLED: " True ", SERVICENOW_AUTH_MODE: " BASIC ", SERVICENOW_SYNC_ENABLED: " TRUE " };
+    const parsed = parseServiceNowConfig(normalizedEnv);
+    const summary = summarizeServiceNowConfig(normalizedEnv);
+    expect(parsed).toMatchObject({ enabled: true, authMode: "basic" });
+    expect(summary).toMatchObject({ enabled: true, configured: true, authMode: "basic", syncEnabled: true });
+
+    const invalid = { ...normalizedEnv, SERVICENOW_PASSWORD: "" };
+    expect(() => parseServiceNowConfig(invalid)).toThrow();
+    expect(summarizeServiceNowConfig(invalid)).toMatchObject({ enabled: true, configured: false, authMode: "basic" });
   });
 });
 
