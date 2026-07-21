@@ -1,6 +1,7 @@
 "use client";
 
-import { CheckCircle2, CloudCog, Loader2, Play, RefreshCw, SearchCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle2, CloudCog, ExternalLink, Loader2, Play, RefreshCw, SearchCheck, TriangleAlert } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import type { ServiceNowConfigSummary } from "@/lib/integrations/servicenow/config";
@@ -224,6 +225,7 @@ export function ServiceNowSettingsCard({ config, diagnosticsAvailable = false }:
       {lastErrorCategory && <div className="rounded-xl border border-rose-100 bg-rose-50/70 px-3 py-2 text-[11px] text-rose-700">Safe error category: <span className="font-semibold">{lastErrorCategory}</span></div>}
 
       <div className="flex flex-wrap gap-2">
+        <Button asChild size="sm"><Link href="/settings/integrations/servicenow"><ExternalLink size={13} />Open Operations</Link></Button>
         <Button variant="outline" size="sm" disabled={!enabled || !!busy} onClick={runTest}>{busy === "test" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}Test Connection</Button>
         <Button size="sm" disabled={!enabled || !!busy} onClick={loadSample}>{busy === "load" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}Load Sample Incidents</Button>
         {diagnosticsAvailable && <Button variant="ghost" size="sm" disabled={!!busy} onClick={diagnoseConfiguration}>{busy === "diagnose" ? <Loader2 size={13} className="animate-spin" /> : <SearchCheck size={13} />}Diagnose Configuration</Button>}

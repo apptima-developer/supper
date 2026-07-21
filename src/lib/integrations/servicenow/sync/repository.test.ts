@@ -37,6 +37,8 @@ describe("ServiceNow reconciliation repository parity", () => {
     await expect(repository.preview(mapped)).resolves.toMatchObject({ outcome, ticketId: "historical-ticket-id", warningCode: expectedWarning });
     await expect(repository.upsert(mapped)).resolves.toMatchObject({ outcome, ticketId: "historical-ticket-id", warningCode: expectedWarning });
     expect(rpc).toHaveBeenCalledTimes(2);
+    expect(rpc.mock.calls[0][0]).toBe("support_upsert_servicenow_incident_with_mapping");
+    expect(rpc.mock.calls[1][0]).toBe("support_upsert_servicenow_incident_with_mapping");
     const previewPayload = rpc.mock.calls[0][1].p_payload;
     const committedPayload = rpc.mock.calls[1][1].p_payload;
     expect(previewPayload).toMatchObject({ dryRun: true, externalNumber: "INC0010001" });

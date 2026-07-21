@@ -75,3 +75,9 @@ Server logs may contain only provider, operation, correlation/request ID, attemp
 AI-1.1 adds an administrator-triggered Incident synchronization pipeline behind the separate `SERVICENOW_SYNC_ENABLED` switch. AI-1.0 diagnostic routes remain read-only and continue to work when synchronization is disabled. The synchronization route cannot accept a provider URL, table, field list, encoded query, credential, or caller-supplied watermark. It issues ServiceNow `GET` requests only.
 
 Synchronization persistence is supported only with `DATA_BACKEND=supabase-relational`. AI-1.1.1 reconciles historical Excel tickets by canonical Incident number, preserves their SUPPER ID and manual fields, and creates the durable ServiceNow `sys_id` link atomically. Persistent synchronization uses a fixed source window and composite `(sys_updated_on, sys_id)` keyset cursor; only the diagnostic sample route retains bounded offset paging. See [ServiceNow synchronization](./servicenow-sync.md) for conflict rules, schema, ownership matrix, migration procedure, and acceptance flow.
+
+## AI-1.2 operations and customer mapping
+
+AI-1.2 adds a protected administrator [Operations page](./servicenow-operations.md) and provider-neutral [customer mapping](./servicenow-customer-mapping.md). Stable ServiceNow company identity maps to an existing active `support_customers` row; applying or changing a mapping atomically reassigns only linked ServiceNow tickets while preserving SUPPER-owned data. Future manual synchronization uses active mappings automatically. Deactivation retains history and leaves existing ticket assignments unchanged.
+
+This layer remains read-only toward ServiceNow. It adds no schedule, customer creation, raw provider response viewer, or ServiceNow Incident write method.

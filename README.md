@@ -28,7 +28,7 @@ The provider-neutral integration boundary lives in `src/lib/integrations/`. It d
 
 The Email Intake domain in `src/lib/email-intake/` builds on that boundary with an immutable aggregate, explicit lifecycle, audit history, domain-event objects, duplicate protection, search, and repository adapters for every existing storage backend. It still does not connect to a provider, read or send mail, publish events, schedule work, expose an API, or change UI. See the [integration boundary](docs/integration-boundary.md) and [Email Intake domain](docs/email-intake-domain.md) before extending this foundation.
 
-The isolated `ai_development` Preview adds a guarded administrator bootstrap and a server-only, read-only ServiceNow Incident diagnostic slice. It does not synchronize or persist provider records. See [AI-development bootstrap](docs/ai-development-bootstrap.md) and [ServiceNow integration](docs/servicenow-integration.md).
+The isolated `ai_development` Preview includes guarded ServiceNow diagnostics, administrator-triggered read-only Incident synchronization, sanitized operations history, and stable mapping from ServiceNow companies to existing SUPPER customers. It never writes ServiceNow or creates customers automatically. See [AI-development bootstrap](docs/ai-development-bootstrap.md), [ServiceNow integration](docs/servicenow-integration.md), [operations](docs/servicenow-operations.md), and [customer mapping](docs/servicenow-customer-mapping.md).
 
 Patch B3.5 makes those boundaries mechanically verifiable, narrows public module surfaces, and adds a read-only active-data integrity check without changing backend routing. See [architecture consolidation](docs/architecture-consolidation.md).
 

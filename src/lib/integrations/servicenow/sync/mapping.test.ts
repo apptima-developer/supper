@@ -56,7 +56,9 @@ describe("ServiceNow Incident mapping", () => {
 
   it("creates a stable unmapped customer key without creating customer data", () => {
     expect(mapped().ticket).toMatchObject({ customerKey: `servicenow-unmapped:${"b".repeat(32)}`, customerName: "Customer A", requiresCustomerMapping: true });
+    expect(mapped().ticket.serviceNow).toMatchObject({ externalCustomerKey: `servicenow-unmapped:${"b".repeat(32)}`, externalCustomerId: "b".repeat(32), externalCustomerName: "Customer A" });
     expect(mapped({ customerReference: undefined, customerExternalId: undefined }).ticket.customerKey).toBe("servicenow-unmapped:unknown");
+    expect(mapped({ customerReference: "Display only", customerExternalId: undefined }).linkMetadata.mappingWarnings).toContain("MISSING_COMPANY");
     expect(mapped({ customerExternalId: "Customer A" }).ticket.customerKey).toMatch(/^servicenow-unmapped:ref-[a-f0-9]{24}$/);
   });
 

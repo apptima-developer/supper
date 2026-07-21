@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Ticket } from "../../../types";
+import { deriveServiceNowCustomerIdentity } from "../customer-identity";
 import type { NormalizedServiceNowIncident } from "../schemas";
 import { hashServiceNowIncident } from "./hash";
 
@@ -42,13 +42,6 @@ export function mapServiceNowState(stateValue?: string, stateDisplay?: string) {
   return { status: "00 - Open", kanbanStatus: "open" as const, warning: (token ? "UNKNOWN_STATE" : "MISSING_STATE") as ServiceNowMappingWarning };
 }
 
-function stableCompanyId(incident: NormalizedServiceNowIncident) {
-  const raw = incident.customerExternalId?.trim();
-  if (!raw) return "unknown";
-  if (/^[a-f0-9]{32}$/i.test(raw)) return raw.toLowerCase();
-  return `ref-${createHash("sha256").update(raw).digest("hex").slice(0, 24)}`;
-}
-
 export function mapServiceNowIncidentToTicket(
   incident: NormalizedServiceNowIncident,
   options: { ticketId: string; now: string },
@@ -56,12 +49,15 @@ export function mapServiceNowIncidentToTicket(
   if (!incident.lastUpdatedAt) throw new Error("ServiceNow Incident is missing sys_updated_on");
   const priority = mapServiceNowPriority(incident.priorityValue, incident.priority);
   const state = mapServiceNowState(incident.stateValue, incident.state);
-  const warnings = [priority.warning, state.warning, incident.customerExternalId || incident.customerReference ? undefined : "MISSING_COMPANY"]
+  const warnings = [priority.warning, state.warning, incident.customerExternalId ? undefined : "MISSING_COMPANY"]
     .filter((value): value is ServiceNowMappingWarning => Boolean(value));
   if (incident.description && incident.description.length > 4_000) warnings.push("DESCRIPTION_TRUNCATED");
-  const customerId = stableCompanyId(incident);
-  const customerKey = `servicenow-unmapped:${customerId}`;
-  const customerName = incident.customerReference || "Unmapped ServiceNow customer";
+  const customerIdentity = deriveServiceNowCustomerIdentity({
+    externalCustomerId: incident.customerExternalId,
+    externalCustomerName: incident.customerReference,
+  });
+  const customerKey = customerIdentity.externalCustomerKey;
+  const customerName = customerIdentity.externalCustomerName;
   const sourceHash = hashServiceNowIncident(incident);
   const createdAt = incident.createdAt || incident.openedAt || incident.lastUpdatedAt;
   const openedAt = incident.openedAt || createdAt;
@@ -109,6 +105,9 @@ export function mapServiceNowIncidentToTicket(
         subcategory: incident.subcategory,
         companyReference: incident.customerReference,
         companyExternalId: incident.customerExternalId,
+        externalCustomerKey: customerIdentity.externalCustomerKey,
+        externalCustomerId: customerIdentity.externalCustomerId,
+        externalCustomerName: customerIdentity.externalCustomerName,
         callerReference: incident.callerReference,
         assignedUserReference: incident.assignedUserReference,
         assignmentGroupReference: incident.assignmentGroupReference,

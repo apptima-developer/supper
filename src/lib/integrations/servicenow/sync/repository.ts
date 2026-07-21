@@ -131,13 +131,13 @@ export class ServiceNowSyncRepository implements SyncRepository<MappedServiceNow
 
   async preview(mapped: MappedServiceNowIncident): Promise<SyncDecision> {
     const db = await client();
-    const data = await must("Could not preview ServiceNow Incident", db.rpc("support_upsert_servicenow_incident", { p_payload: incidentPayload(mapped, true) }));
+    const data = await must("Could not preview ServiceNow Incident", db.rpc("support_upsert_servicenow_incident_with_mapping", { p_payload: incidentPayload(mapped, true) }));
     return decisionFromRpc(data);
   }
 
   async upsert(mapped: MappedServiceNowIncident): Promise<SyncDecision> {
     const db = await client();
-    const data = await must("Could not upsert ServiceNow Incident", db.rpc("support_upsert_servicenow_incident", { p_payload: incidentPayload(mapped, false) }));
+    const data = await must("Could not upsert ServiceNow Incident", db.rpc("support_upsert_servicenow_incident_with_mapping", { p_payload: incidentPayload(mapped, false) }));
     return decisionFromRpc(data);
   }
 
