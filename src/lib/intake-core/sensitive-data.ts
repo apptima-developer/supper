@@ -13,8 +13,26 @@ const sensitivePhrases = new Set([
   "supabase service role key", "service role key", "authentication credential",
 ]);
 
+const compactSensitiveConcepts = new Set([
+  "authorization", "authenticationcredential", "cookie", "password", "passphrase", "secret", "token", "bearer",
+  "accesstoken", "refreshtoken", "bearertoken", "apikey", "privatekey", "clientsecret", "channelsecret",
+  "channelaccesstoken", "signedurl", "signeddownloadurl", "signaturesecret", "webhooksecret", "sessionsecret",
+  "servicerolekey", "supabaseservicerolekey",
+]);
+
+const compoundCompactConcepts = [
+  "authorization", "authenticationcredential", "credential", "password", "passphrase", "accesstoken",
+  "refreshtoken", "bearertoken", "apikey", "privatekey", "clientsecret", "channelsecret",
+  "channelaccesstoken", "signeddownloadurl", "signaturesecret", "webhooksecret", "sessionsecret",
+  "servicerolekey", "supabaseservicerolekey",
+] as const;
+
 const forbiddenProviderPayloadKeys = new Set([
   "raw payload", "webhook body", "raw headers", "authorization headers", "complete profile", "raw event",
+]);
+
+const compactForbiddenProviderPayloadKeys = new Set([
+  "rawpayload", "webhookbody", "rawheaders", "authorizationheaders", "completeprofile", "rawevent",
 ]);
 
 function hasWellFormedUnicode(value: string) {
@@ -43,17 +61,26 @@ export function normalizeIntakeJsonKey(value: string): string | undefined {
     .trim();
 }
 
+export function compactIntakeJsonKey(value: string): string | undefined {
+  const normalized = normalizeIntakeJsonKey(value);
+  return normalized ? normalized.replace(/[^a-z0-9]/g, "") : undefined;
+}
+
 export function classifyIntakeJsonKey(value: string): IntakeJsonKeyClassification {
   if (value === "__proto__" || value === "constructor" || value === "prototype") return "invalid";
   const normalized = normalizeIntakeJsonKey(value);
   if (!normalized) return "invalid";
-  if (forbiddenProviderPayloadKeys.has(normalized)) return "forbidden-provider-payload";
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  if (forbiddenProviderPayloadKeys.has(normalized) || compactForbiddenProviderPayloadKeys.has(compact)) return "forbidden-provider-payload";
   const words = normalized.split(" ");
   if (words.some((word) => sensitiveWords.has(word))) return "sensitive";
   if (words.includes("signed") && words.includes("url")) return "sensitive";
   for (const phrase of sensitivePhrases) {
     if (` ${normalized} `.includes(` ${phrase} `)) return "sensitive";
   }
+  if (compactSensitiveConcepts.has(compact)
+    || compoundCompactConcepts.some((concept) => compact.includes(concept))
+    || compact.startsWith("bearer")) return "sensitive";
   return "safe";
 }
 
@@ -93,7 +120,7 @@ export function findUnsafeIntakeJsonKey(value: unknown): { path: Array<string | 
 export function assertNoSensitiveIntakeData(value: unknown) {
   const found = findUnsafeIntakeJsonKey(value);
   if (!found) return;
-  if (found.classification === "sensitive") throw new TypeError("Credentials are not accepted in Unified Intake JSON");
+  if (found.classification === "sensitive") throw new TypeError("INTAKE_SENSITIVE_DATA_REJECTED: Credentials are not accepted in Unified Intake JSON");
   if (found.classification === "forbidden-provider-payload") throw new TypeError("Raw provider payload fields are not accepted in Unified Intake JSON");
   throw new TypeError("Unified Intake JSON contains an invalid key");
 }

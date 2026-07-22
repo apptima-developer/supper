@@ -1,5 +1,8 @@
 export type IntakeErrorCode =
   | "INTAKE_PAYLOAD_INVALID"
+  | "INTAKE_SENSITIVE_DATA_REJECTED"
+  | "INTAKE_CANONICAL_NUMBER_INVALID"
+  | "INTAKE_TARGET_REFERENCE_INVALID"
   | "INTAKE_CHANNEL_UNAVAILABLE"
   | "INTAKE_IDENTITY_HASH_MISMATCH"
   | "INTAKE_EVENT_REPLAY_MISMATCH"
@@ -20,6 +23,9 @@ export type IntakeErrorCode =
 
 const errorCatalogue: Readonly<Record<IntakeErrorCode, { status: number; message: string }>> = Object.freeze({
   INTAKE_PAYLOAD_INVALID: { status: 400, message: "Unified intake payload is invalid" },
+  INTAKE_SENSITIVE_DATA_REJECTED: { status: 400, message: "Credential-bearing fields are not accepted" },
+  INTAKE_CANONICAL_NUMBER_INVALID: { status: 400, message: "Canonical JSON numbers must be safe integers" },
+  INTAKE_TARGET_REFERENCE_INVALID: { status: 422, message: "The target reference contract is invalid" },
   INTAKE_CHANNEL_UNAVAILABLE: { status: 422, message: "The intake channel is unavailable" },
   INTAKE_IDENTITY_HASH_MISMATCH: { status: 409, message: "The intake identity material does not match" },
   INTAKE_EVENT_REPLAY_MISMATCH: { status: 409, message: "The event identifier was already used with different material" },

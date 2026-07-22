@@ -136,7 +136,7 @@ describe("health diagnostics", () => {
 
 describe("structured server logging", () => {
   it("redacts nested values, arrays, errors, circular values, BigInt, and long strings", () => {
-    const circular: Record<string, unknown> = { count: 12n, invalidDate: new Date(Number.NaN) };
+    const circular: Record<string, unknown> = { count: BigInt(12), invalidDate: new Date(Number.NaN) };
     circular.self = circular;
     const redacted = redactSensitive({
       password: "plain-password",
@@ -180,6 +180,6 @@ describe("structured server logging", () => {
     expect(JSON.stringify(entry)).not.toContain("hidden-key");
 
     output.mockImplementation(() => { throw new Error("console unavailable"); });
-    expect(() => logServerError("diagnostic_event", { value: 1n })).not.toThrow();
+    expect(() => logServerError("diagnostic_event", { value: BigInt(1) })).not.toThrow();
   });
 });

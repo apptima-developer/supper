@@ -1,0 +1,19 @@
+[
+  { "name": "null", "input": null, "valid": true, "serialized": "null", "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b" },
+  { "name": "true", "input": true, "valid": true, "serialized": "true", "sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b" },
+  { "name": "false", "input": false, "valid": true, "serialized": "false", "sha256": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa" },
+  { "name": "string", "input": "SUPPER", "valid": true, "serialized": "\"SUPPER\"", "sha256": "2705d6aaad180216b6afd0abdd0f4f9515e0edf0cd77865fca5952714ff88629" },
+  { "name": "zero", "input": 0, "valid": true, "serialized": "0", "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9" },
+  { "name": "negative-zero", "input": -0, "sqlInput": "-0", "valid": true, "serialized": "0", "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9" },
+  { "name": "one", "input": 1, "valid": true, "serialized": "1", "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b" },
+  { "name": "negative-one", "input": -1, "valid": true, "serialized": "-1", "sha256": "1bad6b8cf97131fceab8543e81f7757195fbb1d36b376ee994ad1cf17699c464" },
+  { "name": "maximum-safe-integer", "input": 9007199254740991, "valid": true, "serialized": "9007199254740991", "sha256": "f40b423c2dd95ff2b2f027e22208f438cf7242862e5e746860e697308c9add26" },
+  { "name": "minimum-safe-integer", "input": -9007199254740991, "valid": true, "serialized": "-9007199254740991", "sha256": "4c933a456bb8f2e9894b2d0b26480439cd72d52fb8a27cbf8fd7f323f22c7815" },
+  { "name": "reordered-object-a", "input": { "omega": "last", "nested": { "z": null, "a": true }, "alpha": 1 }, "valid": true, "serialized": "{\"alpha\":1,\"nested\":{\"a\":true,\"z\":null},\"omega\":\"last\"}", "sha256": "7f1c67b75ba057c66b545d1b88d09fcadd0a1303cc7db30264b0d440f69e2479" },
+  { "name": "reordered-object-b", "input": { "alpha": 1, "nested": { "a": true, "z": null }, "omega": "last" }, "valid": true, "serialized": "{\"alpha\":1,\"nested\":{\"a\":true,\"z\":null},\"omega\":\"last\"}", "sha256": "7f1c67b75ba057c66b545d1b88d09fcadd0a1303cc7db30264b0d440f69e2479" },
+  { "name": "array", "input": [null, true, 0, -1, "x"], "valid": true, "serialized": "[null,true,0,-1,\"x\"]", "sha256": "f7face2e27b290a14b18e7760e7ed329c2507e7c618fc38c42413e6f095f1c4d" },
+  { "name": "unicode", "input": "สวัสดี😀", "valid": true, "serialized": "\"สวัสดี😀\"", "sha256": "e0ff957b0806b339c7993ce58340f5b0758b709cce290c843ba5a1958511e739" },
+  { "name": "normalized-safe-exponent", "input": 1e3, "sqlInput": "1e3", "valid": true, "serialized": "1000", "sha256": "40510175845988f13f6162ed8526f0b09f73384467fa855e1e79b44a56562a58" },
+  { "name": "fractional", "input": 1.5, "valid": false },
+  { "name": "unsafe-integer", "input": 9007199254740992, "valid": false }
+]

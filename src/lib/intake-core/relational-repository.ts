@@ -327,13 +327,13 @@ export class RelationalIntakeCoreRepository implements IntakeCoreRepository {
 
   async acceptInboundEvent(input: AcceptInboundEvent): Promise<AcceptInboundEventResult> {
     requireRelational();
-    const result = await must("Could not accept normalized intake event", supabaseAdmin.rpc("support_accept_intake_event", { p_payload: input }));
+    const result = await must("Could not accept normalized intake event", supabaseAdmin.rpc("support_accept_intake_event_v2", { p_payload: input }));
     return acceptInboundEventResultSchema.parse(rpcRow(result.data));
   }
 
   async applyIdentityBinding(input: IdentityBindingInput) {
     requireRelational();
-    const result = await must("Could not apply intake identity binding", supabaseAdmin.rpc("support_apply_intake_identity_binding", { p_payload: input }));
+    const result = await must("Could not apply intake identity binding", supabaseAdmin.rpc("support_apply_intake_identity_binding_v2", { p_payload: input }));
     return identityBindingResultSchema.parse(rpcRow(result.data));
   }
 
@@ -352,14 +352,14 @@ export class RelationalIntakeCoreRepository implements IntakeCoreRepository {
 
   async transitionConversation(input: ConversationTransitionInput) {
     requireRelational();
-    const result = await must("Could not transition intake conversation", supabaseAdmin.rpc("support_transition_intake_conversation", { p_payload: input }));
+    const result = await must("Could not transition intake conversation", supabaseAdmin.rpc("support_transition_intake_conversation_v2", { p_payload: input }));
     const row = rpcRow(result.data);
     return conversationSummarySchema.parse({ ...row, last_activity_at: canonical(row.last_activity_at), closed_at: canonical(row.closed_at), updated_at: canonical(row.updated_at) });
   }
 
   async enqueueOutbox(input: EnqueueOutboxInput) {
     requireRelational();
-    const result = await must("Could not enqueue integration command", supabaseAdmin.rpc("support_enqueue_integration_outbox", { p_payload: input }));
+    const result = await must("Could not enqueue integration command", supabaseAdmin.rpc("support_enqueue_integration_outbox_v2", { p_payload: input }));
     return enqueueOutboxResultSchema.parse(rpcRow(result.data));
   }
 

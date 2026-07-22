@@ -19,6 +19,7 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
     customerName: "ACME",
     issueTitle: "Issue",
     issueType: "Incident",
+    category: "",
     severity: "Medium",
     owner: "Agent",
     ownerEfforts: [],

@@ -37,6 +37,7 @@ describe("unified intake read API boundary", () => {
     const body = await response.json();
     expect(body.messages.items[0]).toEqual({ messageId: "message-1", textPreview: "safe" });
     expect(JSON.stringify(body)).not.toMatch(/bodyHtml|providerLocator|storageObjectKey/i);
+    expect(JSON.stringify(body)).not.toMatch(/targetReferences|callerId|companyId/i);
   });
 
   it("independently bounds Message and Attachment detail pages", async () => {

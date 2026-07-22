@@ -116,3 +116,44 @@ Expected: two ordered migration rows, RLS true for every listed intake table, `s
 The correction adds canonical event/message/attachment verification, recursive credential-key rejection, strict metadata allowlists, bounded read-model RPCs, scoped advisory locking, accepted-event redelivery counters, append-only Conversation/Session history, Conversation compare-and-swap transitions, validation-before-cast helpers, and truthful existing-outbox status. It does not move or delete intake rows, call a provider, create a Ticket, add attachment bytes, or start a worker.
 
 Do not use REST/service-role endpoints for DDL. Do not run this migration against production as part of AI-1.3 acceptance. Roll application code forward if a problem is found; do not delete intake rows or drop the new tables casually.
+
+## Applying AI-1.3.2 replay corrections
+
+Migrations `202607220001` and `202607220002` remain immutable. Apply the new forward-only, idempotent `supabase/migrations/202607220003_unified_intake_core_replay_corrections.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220003`, backfills immutable Attachment source hashes and initial delivery rows without deleting intake state, and adds service-role-only v2 RPCs. Repository verification never connects to Supabase.
+
+1. Confirm the selected project name/ref is `supper-ai-dev`, not production, and take the normal recovery checkpoint.
+2. Deploy no application code yet. Run `npm ci`, the full test/lint/build suite, `npm run verify:migrations`, and `npm run verify:intake-core-sql` from the exact commit. The SQL verifier uses a disposable local PostgreSQL cluster.
+3. Confirm migration rows `202607220001` and `202607220002` exist. If either is absent, stop and follow the prior section in order; never edit or replay an already-applied immutable file.
+4. In the isolated project's SQL editor, paste and execute the complete unmodified `202607220003_unified_intake_core_replay_corrections.sql` once. Do not concatenate it with another migration or use a REST endpoint for DDL.
+5. Run the checks below. Confirm three ordered versions; RLS on `intake_event_deliveries`; no browser-role grants; `service_role` execution on every v2 RPC; and no null Attachment source hash.
+6. Deploy the exact `ai_development` commit to Vercel Preview and execute the smoke tests in [Unified Intake Core](unified-intake-core.md). Do not merge to `main` during this acceptance.
+
+```sql
+select version, description
+from public.support_schema_migrations
+where version in ('202607220001', '202607220002', '202607220003')
+order by version;
+
+select relname, relrowsecurity
+from pg_class
+where relnamespace = 'public'::regnamespace
+  and relname in ('intake_attachments', 'intake_events', 'intake_event_deliveries')
+order by relname;
+
+select routine_name, grantee, privilege_type
+from information_schema.routine_privileges
+where routine_schema = 'public'
+  and routine_name in (
+    'support_accept_intake_event_v2',
+    'support_apply_intake_identity_binding_v2',
+    'support_transition_intake_conversation_v2',
+    'support_enqueue_integration_outbox_v2'
+  )
+order by routine_name, grantee;
+
+select count(*) as attachments_missing_source_hash
+from public.intake_attachments
+where source_material_hash is null;
+```
+
+Expected: versions `202607220001`, `202607220002`, and `202607220003`; RLS true; only `service_role` has v2 execution; and `attachments_missing_source_hash=0`. Roll application behavior forward if correction is needed. Do not drop the delivery ledger, overwrite source hashes, or delete replay state.

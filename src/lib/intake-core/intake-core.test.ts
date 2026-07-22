@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAggregate } from "@/lib/email-intake/test-fixtures";
 import {
-  canonicalIntakeEventMaterial, canonicalIntakeMessageMaterial, canonicalSerializeIntakeMaterial,
+  canonicalIntakeAttachmentSourceHash, canonicalIntakeEventMaterial, canonicalIntakeMessageMaterial, canonicalSerializeIntakeMaterial,
   hashCanonicalIntakeMaterial, prepareCanonicalIntakeEvent,
 } from "./canonical-material";
+import canonicalVectors from "./canonical-vectors.json";
 import { mapEmailIntakeToUnifiedCommand } from "./email-compatibility";
 import { maskExternalIdentity } from "./identity";
 import { assertConversationTransition, statusAfterOrdinaryMessage, transitionConversation } from "./conversation";
@@ -12,7 +13,7 @@ import { classifyIntakeJsonKey, findUnsafeIntakeJsonKey } from "./sensitive-data
 import { IntakeCoreError, intakeErrorFromUnknown, serializeIntakeError } from "./errors";
 import {
   acceptInboundEventInputSchema, attachmentInputSchema, canonicalTimestampSchema,
-  enqueueOutboxInputSchema, intakeIdentifierSchema, sessionTransitionInputSchema,
+  enqueueOutboxInputSchema, intakeIdentifierSchema, sessionTransitionInputSchema, targetReferencesSchema,
 } from "./schemas";
 
 const timestamp = "2026-07-22T00:00:00.000Z";
@@ -31,11 +32,17 @@ function eventInput() {
 
 describe("recursive Unified Intake sensitive-data policy", () => {
   it.each([
-    "clientSecret", "Client-Secret", "client_secret", "channelAccessToken", "serviceNowPassword",
-    "authorizationHeader", "x-api-key", "oauthClientSecret", "refreshTokenValue", "signedDownloadUrl",
+    "clientSecret", "Client-Secret", "client_secret", "channelAccessToken", "serviceNowPassword", "authorizationHeader",
+    "x-api-key", "oauthClientSecret", "refreshTokenValue", "signedDownloadUrl", "apikey", "xapikey", "clientsecret",
+    "channelsecret", "accesstoken", "refreshtoken", "bearertoken", "servicerolekey", "supabaseservicerolekey",
+    "webhooksecret", "sessionsecret", "signedurl", "signeddownloadurl", "authenticationcredential",
   ])("rejects compound credential key %s", (key) => {
     expect(classifyIntakeJsonKey(key)).toBe("sensitive");
     expect(findUnsafeIntakeJsonKey({ safe: [{ nested: { [key]: "value" } }] })?.classification).toBe("sensitive");
+  });
+
+  it.each(["tokenizer", "secretariat", "monkey", "keyboard"])('does not overmatch safe compact word %s', (key) => {
+    expect(classifyIntakeJsonKey(key)).toBe("safe");
   });
 
   it("rejects raw provider payload keys and Unicode/control tricks", () => {
@@ -54,6 +61,30 @@ describe("recursive Unified Intake sensitive-data policy", () => {
 });
 
 describe("canonical event, message, and attachment material", () => {
+  it("matches the committed cross-language canonical vectors", () => {
+    for (const vector of canonicalVectors) {
+      if (!vector.valid) {
+        expect(() => canonicalSerializeIntakeMaterial(vector.input as never), vector.name).toThrow(/INTAKE_CANONICAL_NUMBER_INVALID/);
+        continue;
+      }
+      expect(canonicalSerializeIntakeMaterial(vector.input as never), vector.name).toBe(vector.serialized);
+      expect(hashCanonicalIntakeMaterial(vector.input as never), vector.name).toBe(vector.sha256);
+    }
+  });
+
+  it("keeps immutable Attachment source identity independent from local lifecycle state", () => {
+    const source = acceptInboundEventInputSchema.parse(eventInput()).attachments[0];
+    const baseline = canonicalIntakeAttachmentSourceHash(source);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, storageStatus: "stored" })).toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, scanStatus: "clean" })).toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, retentionUntil: "2027-07-22T00:00:00.000Z" })).toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, storageObjectKey: "opaque-local-key" } as typeof source & { storageObjectKey: string })).toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, fileName: "changed.txt" })).not.toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, declaredSize: source.declaredSize + 1 })).not.toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, sha256: "a".repeat(64) })).not.toBe(baseline);
+    expect(canonicalIntakeAttachmentSourceHash({ ...source, externalAttachmentId: "changed-id" })).not.toBe(baseline);
+  });
+
   it("is deterministic, stable across key order, and preserves meaningful body whitespace", () => {
     const first = prepareCanonicalIntakeEvent(eventInput());
     const reordered = prepareCanonicalIntakeEvent({ ...eventInput(), message: { ...eventInput().message, structuredContent: { beta: 2, alpha: 1 } } });
@@ -133,6 +164,22 @@ describe("unified intake domain validation", () => {
     }
   });
 
+  it("uses one strict nested provider-neutral target reference contract", () => {
+    expect(targetReferencesSchema.parse({ servicenow: { callerId: "6816f79abc", companyId: "abc123" } })).toEqual({
+      servicenow: { callerId: "6816f79abc", companyId: "abc123" },
+    });
+    expect(targetReferencesSchema.parse({ internal: {} })).toEqual({ internal: {} });
+    expect(() => targetReferencesSchema.parse({ unknown: { userId: "one" } })).toThrow();
+    expect(() => targetReferencesSchema.parse({ servicenow: { rawPayload: {} } })).toThrow();
+    expect(() => targetReferencesSchema.parse({ servicenow: { clientsecret: "no" } })).toThrow(/INTAKE_SENSITIVE_DATA_REJECTED/);
+    expect(() => targetReferencesSchema.parse({ servicenow: { callerId: "https://example.test/id" } })).toThrow(/not URLs/);
+  });
+
+  it("rejects fractional and unsafe integers throughout arbitrary JSON", () => {
+    expect(() => acceptInboundEventInputSchema.parse({ ...eventInput(), message: { ...eventInput().message, structuredContent: { score: 1.5 } } })).toThrow(/INTAKE_CANONICAL_NUMBER_INVALID/);
+    expect(() => enqueueOutboxInputSchema.parse({ id: "outbox-number", targetProvider: "internal", commandType: "notification.send", idempotencyKey: "number-key", payload: { unsafe: 9007199254740992 }, availableAt: timestamp, correlationId, metadata: {} })).toThrow(/INTAKE_CANONICAL_NUMBER_INVALID/);
+  });
+
   it("masks external identities without exposing the complete value", () => {
     const full = "Uabcdef0123456789xyz";
     const masked = maskExternalIdentity(full);
@@ -150,8 +197,10 @@ describe("intake state machines", () => {
     expect(statusAfterOrdinaryMessage("open", "inbound")).toBe("awaiting_agent");
     expect(() => transitionConversation({ status: "open", version: 2, expectedVersion: 1, targetStatus: "closed", actorUserId: "admin", correlationId, occurredAt: timestamp })).toThrow(/version conflict/i);
     const transitioned = transitionConversation({ status: "open", version: 2, expectedVersion: 2, targetStatus: "closed", actorUserId: "admin", correlationId, occurredAt: timestamp });
-    expect(transitioned).toMatchObject({ status: "closed", version: 3, history: { fromStatus: "open", toStatus: "closed", fromVersion: 2, toVersion: 3 } });
-    expect(Object.isFrozen(transitioned.history)).toBe(true);
+    expect(transitioned).toMatchObject({ action: "changed", status: "closed", version: 3, history: { fromStatus: "open", toStatus: "closed", fromVersion: 2, toVersion: 3 } });
+    expect(transitioned.history && Object.isFrozen(transitioned.history)).toBe(true);
+    const unchanged = transitionConversation({ status: "open", version: 2, expectedVersion: 2, targetStatus: "open", actorUserId: "admin", correlationId, occurredAt: timestamp });
+    expect(unchanged).toEqual({ action: "unchanged", status: "open", version: 2, history: null });
   });
 
   it("accepts only documented session transitions and treats confirmation as domain state only", () => {
@@ -166,6 +215,7 @@ describe("bounded intake errors", () => {
   it("maps every catalogued error to an explicit safe response", () => {
     const codes = [
       "INTAKE_PAYLOAD_INVALID", "INTAKE_CHANNEL_UNAVAILABLE", "INTAKE_IDENTITY_HASH_MISMATCH",
+      "INTAKE_SENSITIVE_DATA_REJECTED", "INTAKE_CANONICAL_NUMBER_INVALID", "INTAKE_TARGET_REFERENCE_INVALID",
       "INTAKE_EVENT_REPLAY_MISMATCH", "INTAKE_MESSAGE_REPLAY_MISMATCH", "INTAKE_ATTACHMENT_REPLAY_MISMATCH",
       "INTAKE_REPLY_MESSAGE_INVALID", "INTAKE_CONVERSATION_NOT_FOUND", "INTAKE_CONVERSATION_VERSION_CONFLICT",
       "INTAKE_CONVERSATION_TRANSITION_INVALID", "INTAKE_SESSION_NOT_FOUND", "INTAKE_SESSION_VERSION_CONFLICT",

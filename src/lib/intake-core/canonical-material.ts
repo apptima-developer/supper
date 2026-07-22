@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { hashExternalIdentity } from "./identity";
+import { assertCanonicalIntakeNumbers } from "./canonical-json";
 import {
   acceptInboundEventInputSchema, acceptInboundEventSchema,
   type AcceptInboundEvent, type AcceptInboundEventInput, type AttachmentInput,
@@ -13,7 +14,7 @@ function canonicalJson(value: unknown, depth: number, ancestors: WeakSet<object>
   if (value === null) return "null";
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Canonical intake material contains a non-finite number");
+    if (!Number.isSafeInteger(value)) throw new TypeError("INTAKE_CANONICAL_NUMBER_INVALID: Canonical JSON numbers must be safe integers");
     return JSON.stringify(Object.is(value, -0) ? 0 : value);
   }
   if (value === undefined || typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
@@ -41,6 +42,7 @@ function canonicalJson(value: unknown, depth: number, ancestors: WeakSet<object>
 }
 
 export function canonicalSerializeIntakeMaterial(value: JsonValue) {
+  assertCanonicalIntakeNumbers(value);
   const serialized = canonicalJson(value, 0, new WeakSet());
   if (Buffer.byteLength(serialized, "utf8") > 1024 * 1024) throw new TypeError("Canonical intake material is too large");
   return serialized;
@@ -58,20 +60,18 @@ export function canonicalIntakeAttachmentMaterial(attachment: AttachmentInput) {
     declaredSize: attachment.declaredSize,
     sha256: attachment.sha256 ?? null,
     providerLocator: attachment.providerLocator ?? null,
-    storageStatus: attachment.storageStatus,
-    scanStatus: attachment.scanStatus,
-    retentionUntil: attachment.retentionUntil ?? null,
     metadata: attachment.metadata,
   } satisfies JsonValue;
 }
 
+export function canonicalIntakeAttachmentSourceHash(attachment: AttachmentInput) {
+  return hashCanonicalIntakeMaterial(canonicalIntakeAttachmentMaterial(attachment));
+}
+
 function canonicalAttachments(input: AcceptInboundEventInput) {
   return input.attachments
-    .map(canonicalIntakeAttachmentMaterial)
-    .sort((left, right) => Buffer.compare(
-      Buffer.from(canonicalSerializeIntakeMaterial(left), "utf8"),
-      Buffer.from(canonicalSerializeIntakeMaterial(right), "utf8"),
-    ));
+    .map(canonicalIntakeAttachmentSourceHash)
+    .sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
 }
 
 export function canonicalIntakeMessageMaterial(input: AcceptInboundEventInput) {

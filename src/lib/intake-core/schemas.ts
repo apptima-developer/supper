@@ -8,6 +8,7 @@ import {
   outboxStatuses, sessionStatuses,
 } from "./contracts";
 import { assertNoSensitiveIntakeData } from "./sensitive-data";
+import { assertCanonicalIntakeNumbers } from "./canonical-json";
 
 export const intakeLimits = Object.freeze({
   identifierCharacters: 200, displayNameCharacters: 200, channelKeyCharacters: 120,
@@ -66,6 +67,8 @@ function boundedJson(maxBytes: number, rejectUnsafeKeys = true) {
       try { assertNoSensitiveIntakeData(value); }
       catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe JSON key" }); }
     }
+    try { assertCanonicalIntakeNumbers(value); }
+    catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "INTAKE_CANONICAL_NUMBER_INVALID" }); }
   });
 }
 
@@ -75,6 +78,8 @@ function strictMetadata<T extends z.ZodRawShape>(shape: T) {
     try { assertNoSensitiveIntakeData(value); }
     catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe metadata" }); }
     if (encodedBytes(value) > 16 * 1024) context.addIssue({ code: "custom", message: "Metadata is too large" });
+    try { assertCanonicalIntakeNumbers(value); }
+    catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "INTAKE_CANONICAL_NUMBER_INVALID" }); }
   }).pipe(z.object(shape).strict());
 }
 
@@ -148,13 +153,24 @@ export const acceptInboundEventSchema = acceptInboundEventBase.transform((value,
 
 export const acceptInboundEventResultSchema = z.object({ action: z.enum(["accepted", "duplicate", "duplicate_message"]), event_id: z.string(), identity_id: z.string(), conversation_id: z.string(), message_id: z.string(), attachment_count: z.number().int().nonnegative(), session_id: z.string().nullable(), delivery_count: z.number().int().positive() }).strict();
 
-const targetReferenceValue = intakeIdentifierSchema("targetReference", 1_000);
-export const targetReferencesSchema = z.object({
-  email: targetReferenceValue.optional(), n8n: targetReferenceValue.optional(), servicenow: targetReferenceValue.optional(), internal: targetReferenceValue.optional(), line: targetReferenceValue.optional(), web: targetReferenceValue.optional(), freshservice: targetReferenceValue.optional(),
-}).strict().superRefine((value, context) => {
+const targetReferenceValue = intakeIdentifierSchema("targetReference", 500)
+  .refine((value) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(value), "Target references must be bounded identifiers, not URLs");
+const targetReferenceObjectSchema = z.object({
+  userId: targetReferenceValue.optional(), contactId: targetReferenceValue.optional(), callerId: targetReferenceValue.optional(),
+  companyId: targetReferenceValue.optional(), accountId: targetReferenceValue.optional(), projectId: targetReferenceValue.optional(),
+  groupId: targetReferenceValue.optional(),
+}).strict();
+const targetReferencesShapeSchema = z.object({
+  email: targetReferenceObjectSchema.optional(), n8n: targetReferenceObjectSchema.optional(),
+  servicenow: targetReferenceObjectSchema.optional(), internal: targetReferenceObjectSchema.optional(),
+  line: targetReferenceObjectSchema.optional(), web: targetReferenceObjectSchema.optional(),
+  freshservice: targetReferenceObjectSchema.optional(),
+}).strict();
+export const targetReferencesSchema = z.unknown().superRefine((value, context) => {
+  if (encodedBytes(value) > 16 * 1024) context.addIssue({ code: "custom", message: "Target references are too large" });
   try { assertNoSensitiveIntakeData(value); }
   catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe target reference" }); }
-});
+}).pipe(targetReferencesShapeSchema);
 
 export const identityBindingInputSchema = z.object({ bindingId: bindingIdSchema, eventId: eventIdSchema, identityId: identityIdSchema, customerKey: intakeIdentifierSchema("customerKey", 600), projectCode: z.string().trim().max(200).default(""), allowedSystems: z.array(intakeIdentifierSchema("systemKey", 200)).max(50).default([]), targetReferences: targetReferencesSchema.default({}), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata: bindingMetadataSchema }).strict();
 export const revokeBindingInputSchema = z.object({ identityId: identityIdSchema, actorUserId: intakeIdentifierSchema("actorUserId"), eventId: eventIdSchema, requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata: bindingMetadataSchema }).strict();
@@ -164,7 +180,7 @@ export const sessionTransitionInputSchema = z.object({ eventId: eventIdSchema, s
 export const sessionSummarySchema = z.object({ id: z.string(), conversation_id: z.string(), status: z.enum(sessionStatuses), version: z.number().int().positive(), state_data: sessionStateSchema, missing_fields: z.array(z.string()), started_at: canonicalTimestampSchema, expires_at: canonicalTimestampSchema.nullable(), confirmed_at: canonicalTimestampSchema.nullable(), cancelled_at: canonicalTimestampSchema.nullable(), failed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
 
 export const conversationTransitionInputSchema = z.object({ eventId: eventIdSchema, conversationId: conversationIdSchema, expectedVersion: z.number().int().positive(), targetStatus: z.enum(conversationStatuses), explicitReopen: z.boolean().default(false), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, occurredAt: canonicalTimestampSchema, metadata: conversationMetadataSchema }).strict();
-export const conversationSummarySchema = z.object({ id: z.string(), status: z.enum(conversationStatuses), version: z.number().int().positive(), last_activity_at: canonicalTimestampSchema, closed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
+export const conversationSummarySchema = z.object({ action: z.enum(["changed", "unchanged"]), id: z.string(), status: z.enum(conversationStatuses), version: z.number().int().positive(), last_activity_at: canonicalTimestampSchema, closed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
 
 export const enqueueOutboxInputSchema = z.object({ id: outboxIdSchema, targetProvider: integrationProviderSchema, commandType: z.enum(outboxCommandTypes), idempotencyKey: intakeIdentifierSchema("idempotencyKey", 300), channelId: channelIdSchema.optional(), conversationId: conversationIdSchema.optional(), messageId: messageIdSchema.optional(), ticketId: intakeIdentifierSchema("ticketId").optional(), payload: safeOutboxPayloadSchema, availableAt: canonicalTimestampSchema, maxAttempts: z.number().int().min(1).max(20).default(5), correlationId: correlationIdSchema, requestId: correlationIdSchema.optional(), metadata: outboxMetadataSchema }).strict();
 export const enqueueOutboxResultSchema = z.object({ action: z.enum(["created", "unchanged"]), command_id: z.string(), status: z.enum(outboxStatuses), attempt_count: z.number().int().min(0).max(20) }).strict();

@@ -17,6 +17,7 @@ const migrations = [
   "202607210001_servicenow_customer_mapping_operations.sql",
   "202607220001_unified_intake_core.sql",
   "202607220002_unified_intake_core_corrections.sql",
+  "202607220003_unified_intake_core_replay_corrections.sql",
 ];
 
 function write(root, relative, source = "export {};\n") {
@@ -44,7 +45,8 @@ function fixture() {
     "src/lib/email-intake/events.ts",
     "src/lib/email-intake/repository.ts",
     "src/lib/email-intake/schemas.ts",
-    "src/lib/intake-core/contracts.ts",
+  "src/lib/intake-core/contracts.ts",
+  "src/lib/intake-core/canonical-json.ts",
     "src/lib/intake-core/canonical-material.ts",
     "src/lib/intake-core/conversation.ts",
     "src/lib/intake-core/email-compatibility.ts",

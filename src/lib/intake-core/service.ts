@@ -1,7 +1,7 @@
 import type { DataBackend } from "@/lib/env";
 import { getDataBackend } from "@/lib/env";
 import { prepareCanonicalIntakeEvent } from "./canonical-material";
-import { IntakeCoreError } from "./errors";
+import { IntakeCoreError, intakeErrorFromUnknown, type IntakeErrorCode } from "./errors";
 import type { IntakeCoreRepository } from "./repository";
 import {
   conversationAttachmentListQuerySchema,
@@ -9,7 +9,13 @@ import {
   enqueueOutboxInputSchema, eventListQuerySchema, identityBindingInputSchema, identityListQuerySchema,
   intakeChannelListQuerySchema, outboxListQuerySchema, revokeBindingInputSchema, sessionListQuerySchema,
   sessionTransitionInputSchema,
+  targetReferencesSchema,
 } from "./schemas";
+
+function validationError(error: unknown, fallback: IntakeErrorCode) {
+  const mapped = intakeErrorFromUnknown(error);
+  return mapped.code === "INTAKE_STORAGE_ERROR" ? new IntakeCoreError(fallback, undefined, undefined, { cause: error }) : mapped;
+}
 
 export class IntakeCoreService {
   constructor(private readonly repository: IntakeCoreRepository, private readonly backend: () => DataBackend = getDataBackend) {}
@@ -34,13 +40,21 @@ export class IntakeCoreService {
     try { return this.repository.acceptInboundEvent(prepareCanonicalIntakeEvent(input)); }
     catch (error) {
       if (error instanceof IntakeCoreError) throw error;
-      throw new IntakeCoreError("INTAKE_PAYLOAD_INVALID", undefined, undefined, { cause: error });
+      throw validationError(error, "INTAKE_PAYLOAD_INVALID");
     }
   }
 
-  bind(input: unknown) { this.requireRelational(); return this.repository.applyIdentityBinding(identityBindingInputSchema.parse(input)); }
+  bind(input: unknown) {
+    this.requireRelational();
+    try {
+      if (input && typeof input === "object" && "targetReferences" in input) {
+        targetReferencesSchema.parse((input as { targetReferences?: unknown }).targetReferences);
+      }
+      return this.repository.applyIdentityBinding(identityBindingInputSchema.parse(input));
+    } catch (error) { throw validationError(error, "INTAKE_TARGET_REFERENCE_INVALID"); }
+  }
   revoke(input: unknown) { this.requireRelational(); return this.repository.revokeIdentityBinding(revokeBindingInputSchema.parse(input)); }
-  transitionSession(input: unknown) { this.requireRelational(); return this.repository.transitionSession(sessionTransitionInputSchema.parse(input)); }
-  transitionConversation(input: unknown) { this.requireRelational(); return this.repository.transitionConversation(conversationTransitionInputSchema.parse(input)); }
-  enqueue(input: unknown) { this.requireRelational(); return this.repository.enqueueOutbox(enqueueOutboxInputSchema.parse(input)); }
+  transitionSession(input: unknown) { this.requireRelational(); try { return this.repository.transitionSession(sessionTransitionInputSchema.parse(input)); } catch (error) { throw validationError(error, "INTAKE_PAYLOAD_INVALID"); } }
+  transitionConversation(input: unknown) { this.requireRelational(); try { return this.repository.transitionConversation(conversationTransitionInputSchema.parse(input)); } catch (error) { throw validationError(error, "INTAKE_PAYLOAD_INVALID"); } }
+  enqueue(input: unknown) { this.requireRelational(); try { return this.repository.enqueueOutbox(enqueueOutboxInputSchema.parse(input)); } catch (error) { throw validationError(error, "INTEGRATION_OUTBOX_PAYLOAD_INVALID"); } }
 }

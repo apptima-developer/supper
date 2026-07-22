@@ -4,7 +4,7 @@ import { proxy } from "./proxy";
 import { GET as live } from "./app/api/health/live/route";
 import { GET as ready } from "./app/api/health/ready/route";
 
-function request(path: string, init?: RequestInit) {
+function request(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(`https://app.example.test${path}`, init);
 }
 

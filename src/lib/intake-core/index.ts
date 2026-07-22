@@ -13,7 +13,8 @@ export {
   outboxListQuerySchema, revokeBindingInputSchema, sessionStateSchema, sessionTransitionInputSchema, sha256Schema,
 } from "./schemas";
 export {
-  canonicalIntakeAttachmentMaterial, canonicalIntakeEventMaterial, canonicalIntakeMessageMaterial,
+  canonicalIntakeAttachmentMaterial, canonicalIntakeAttachmentSourceHash, canonicalIntakeEventMaterial, canonicalIntakeMessageMaterial,
   canonicalSerializeIntakeMaterial, hashCanonicalIntakeMaterial, prepareCanonicalIntakeEvent,
 } from "./canonical-material";
+export { assertCanonicalIntakeNumbers, MAX_CANONICAL_SAFE_INTEGER, MIN_CANONICAL_SAFE_INTEGER } from "./canonical-json";
 export { assertNoSensitiveIntakeData, classifyIntakeJsonKey, findUnsafeIntakeJsonKey, normalizeIntakeJsonKey } from "./sensitive-data";

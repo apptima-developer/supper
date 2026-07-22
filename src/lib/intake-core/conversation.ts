@@ -45,6 +45,9 @@ export function transitionConversation(input: {
     || !canonicalTimestampSchema.safeParse(input.occurredAt).success) {
     throw new IntakeCoreError("INTAKE_PAYLOAD_INVALID", "Conversation transition context is invalid");
   }
+  if (input.status === input.targetStatus) {
+    return Object.freeze({ action: "unchanged" as const, status: input.status, version: input.version, history: null });
+  }
   const history = Object.freeze({
     fromStatus: input.status,
     toStatus: input.targetStatus,
@@ -54,5 +57,5 @@ export function transitionConversation(input: {
     fromVersion: input.version,
     toVersion: input.version + 1,
   });
-  return Object.freeze({ status: input.targetStatus, version: input.version + 1, history });
+  return Object.freeze({ action: "changed" as const, status: input.targetStatus, version: input.version + 1, history });
 }
