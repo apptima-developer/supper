@@ -14,8 +14,8 @@ function fakeRepository() {
       deliveries += 1;
       return { action: deliveries === 1 ? "accepted" : "duplicate", event_id: "event-1", identity_id: "identity-1", conversation_id: "conversation-1", message_id: "message-1", attachment_count: 1, session_id: "session-1", delivery_count: deliveries };
     }),
-    listConversationMessages: vi.fn(async () => [{ messageId: "message-1" }]),
-    listConversationAttachments: vi.fn(async () => [{ attachmentId: "attachment-1" }]),
+    listConversationMessages: vi.fn(async () => ({ items: [{ messageId: "message-1" }], total: 1, page: 1, limit: 100, hasNext: false })),
+    listConversationAttachments: vi.fn(async () => ({ items: [{ attachmentId: "attachment-1" }], total: 1, page: 1, limit: 100, hasNext: false })),
     findSession: vi.fn(async () => ({ status: "collecting" })),
   } as unknown as IntakeCoreRepository;
   return { repository, service: new IntakeCoreService(repository, () => "supabase-relational") };

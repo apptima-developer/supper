@@ -1,29 +1,32 @@
 import type {
-  AcceptInboundEvent, AcceptInboundEventResult, EnqueueOutboxInput, IdentityBindingInput,
-  ListQuery, RevokeBindingInput, SessionTransitionInput,
+  AcceptInboundEvent, AcceptInboundEventResult, ChannelListQuery, ChildListQuery,
+  ConversationListQuery, ConversationTransitionInput, EnqueueOutboxInput, EventListQuery,
+  IdentityBindingInput, IdentityListQuery, OutboxListQuery, RevokeBindingInput,
+  SessionListQuery, SessionTransitionInput,
 } from "./schemas";
 import type { IntakeOperationsSummary } from "./presentation";
 
-export type PageResult<T> = { items: T[]; total: number; page: number; limit: number };
+export type PageResult<T> = { items: T[]; total: number; page: number; limit: number; hasNext: boolean };
 
 export interface IntakeCoreRepository {
   getOperationsSummary(): Promise<IntakeOperationsSummary>;
-  listChannels(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listChannels(query: ChannelListQuery): Promise<PageResult<Record<string, unknown>>>;
   findChannel(id: string): Promise<Record<string, unknown> | undefined>;
-  listIdentities(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listIdentities(query: IdentityListQuery): Promise<PageResult<Record<string, unknown>>>;
   findIdentity(id: string): Promise<Record<string, unknown> | undefined>;
-  listConversations(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listConversations(query: ConversationListQuery): Promise<PageResult<Record<string, unknown>>>;
   findConversation(id: string): Promise<Record<string, unknown> | undefined>;
-  listConversationMessages(conversationId: string): Promise<Record<string, unknown>[]>;
-  listConversationAttachments(conversationId: string): Promise<Record<string, unknown>[]>;
-  listSessions(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listConversationMessages(conversationId: string, query: ChildListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listConversationAttachments(conversationId: string, query: ChildListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listSessions(query: SessionListQuery): Promise<PageResult<Record<string, unknown>>>;
   findSession(id: string): Promise<Record<string, unknown> | undefined>;
-  listInboundEvents(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
-  listOutboxCommands(query: ListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listInboundEvents(query: EventListQuery): Promise<PageResult<Record<string, unknown>>>;
+  listOutboxCommands(query: OutboxListQuery): Promise<PageResult<Record<string, unknown>>>;
   acceptInboundEvent(input: AcceptInboundEvent): Promise<AcceptInboundEventResult>;
   applyIdentityBinding(input: IdentityBindingInput): Promise<Record<string, unknown>>;
   revokeIdentityBinding(input: RevokeBindingInput): Promise<Record<string, unknown>>;
   transitionSession(input: SessionTransitionInput): Promise<Record<string, unknown>>;
+  transitionConversation(input: ConversationTransitionInput): Promise<Record<string, unknown>>;
   enqueueOutbox(input: EnqueueOutboxInput): Promise<Record<string, unknown>>;
   linkConversationTicket(input: { id: string; conversationId: string; ticketId: string; relationship: "primary" | "related" | "duplicate" | "follow_up"; actorUserId?: string; correlationId?: string; metadata?: Record<string, unknown> }): Promise<void>;
   ensureDiagnosticChannel(input: { id: string; channelKey: string; displayName: string; now: string; actorUserId: string }): Promise<void>;

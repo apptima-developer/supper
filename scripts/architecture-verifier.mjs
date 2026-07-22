@@ -10,6 +10,7 @@ const expectedMigrations = Object.freeze([
   "202607200002_servicenow_sync_reliability_corrections.sql",
   "202607210001_servicenow_customer_mapping_operations.sql",
   "202607220001_unified_intake_core.sql",
+  "202607220002_unified_intake_core_corrections.sql",
 ]);
 
 const domainFiles = Object.freeze([
@@ -27,12 +28,14 @@ const domainFiles = Object.freeze([
   "src/lib/email-intake/repository.ts",
   "src/lib/email-intake/schemas.ts",
   "src/lib/intake-core/contracts.ts",
+  "src/lib/intake-core/canonical-material.ts",
   "src/lib/intake-core/conversation.ts",
   "src/lib/intake-core/email-compatibility.ts",
   "src/lib/intake-core/errors.ts",
   "src/lib/intake-core/identity.ts",
   "src/lib/intake-core/presentation.ts",
   "src/lib/intake-core/schemas.ts",
+  "src/lib/intake-core/sensitive-data.ts",
   "src/lib/intake-core/session.ts",
 ]);
 

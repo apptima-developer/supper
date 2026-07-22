@@ -3,7 +3,11 @@ import { can } from "@/lib/rbac";
 import { HttpError, jsonResponseWithRequestId, requestId, safeErrorResponse } from "@/lib/request-security";
 import { IntakeCoreService } from "./service";
 import type { IntakeCoreRepository } from "./repository";
-import { intakeIdentifierSchema, listQuerySchema } from "./schemas";
+import {
+  conversationAttachmentListQuerySchema, conversationListQuerySchema, conversationMessageListQuerySchema,
+  eventListQuerySchema, identityListQuerySchema, intakeChannelListQuerySchema, intakeIdentifierSchema,
+  outboxListQuerySchema,
+} from "./schemas";
 import { serializeIntakeError } from "./errors";
 
 export type IntakeApiDependencies = {
@@ -48,22 +52,25 @@ export function handleIntakeOperationsGet(request: Request, dependencies: Intake
 }
 
 export function handleIntakeChannelsGet(request: Request, dependencies: IntakeApiDependencies) {
-  return authorized(request, dependencies, ({ service }) => service.channels(listQuerySchema.parse(queryObject(request))));
+  return authorized(request, dependencies, ({ service }) => service.channels(intakeChannelListQuerySchema.parse(queryObject(request))));
 }
 
 export function handleIntakeIdentitiesGet(request: Request, dependencies: IntakeApiDependencies) {
-  return authorized(request, dependencies, ({ service }) => service.identities(listQuerySchema.parse(queryObject(request))));
+  return authorized(request, dependencies, ({ service }) => service.identities(identityListQuerySchema.parse(queryObject(request))));
 }
 
 export function handleIntakeConversationsGet(request: Request, dependencies: IntakeApiDependencies) {
-  return authorized(request, dependencies, ({ service }) => service.conversations(listQuerySchema.parse(queryObject(request))));
+  return authorized(request, dependencies, ({ service }) => service.conversations(conversationListQuerySchema.parse(queryObject(request))));
 }
 
 export function handleIntakeConversationDetailGet(request: Request, conversationId: string, dependencies: IntakeApiDependencies) {
   return authorized(request, dependencies, async ({ service }) => {
     const id = intakeIdentifierSchema("conversationId").parse(conversationId);
+    const raw = queryObject(request);
+    const messageQuery = conversationMessageListQuerySchema.parse({ page: raw.messagePage, limit: raw.messageLimit });
+    const attachmentQuery = conversationAttachmentListQuerySchema.parse({ page: raw.attachmentPage, limit: raw.attachmentLimit });
     const [conversation, messages, attachments] = await Promise.all([
-      service.conversation(id), service.messages(id), service.attachments(id),
+      service.conversation(id), service.messages(id, messageQuery), service.attachments(id, attachmentQuery),
     ]);
     if (!conversation) throw new HttpError(404, "INTAKE_CONVERSATION_NOT_FOUND", "Conversation was not found");
     return { conversation, messages, attachments };
@@ -71,9 +78,9 @@ export function handleIntakeConversationDetailGet(request: Request, conversation
 }
 
 export function handleIntakeEventsGet(request: Request, dependencies: IntakeApiDependencies) {
-  return authorized(request, dependencies, ({ service }) => service.events(listQuerySchema.parse(queryObject(request))));
+  return authorized(request, dependencies, ({ service }) => service.events(eventListQuerySchema.parse(queryObject(request))));
 }
 
 export function handleIntakeOutboxGet(request: Request, dependencies: IntakeApiDependencies) {
-  return authorized(request, dependencies, ({ service }) => service.outbox(listQuerySchema.parse(queryObject(request))));
+  return authorized(request, dependencies, ({ service }) => service.outbox(outboxListQuerySchema.parse(queryObject(request))));
 }

@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(path.join(process.cwd(), "supabase/migrations/202607220001_unified_intake_core.sql"), "utf8");
+const correctionSql = readFileSync(path.join(process.cwd(), "supabase/migrations/202607220002_unified_intake_core_corrections.sql"), "utf8");
 const tables = ["integration_channels", "integration_external_identities", "integration_identity_bindings", "integration_identity_binding_events", "intake_conversations", "intake_messages", "intake_attachments", "intake_sessions", "intake_events", "intake_ticket_links", "integration_outbox"];
 const functions = ["support_get_intake_operations_summary", "support_accept_intake_event", "support_apply_intake_identity_binding", "support_revoke_intake_identity_binding", "support_transition_intake_session", "support_enqueue_integration_outbox"];
 
@@ -32,5 +33,49 @@ describe("AI-1.3 migration contract", () => {
     for (const code of ["INTAKE_EVENT_REPLAY_MISMATCH", "INTAKE_MESSAGE_REPLAY_MISMATCH", "INTAKE_SESSION_VERSION_CONFLICT", "INTEGRATION_OUTBOX_IDEMPOTENCY_CONFLICT"]) expect(sql).toContain(code);
     expect(sql).toContain("declared_size bigint"); expect(sql).not.toMatch(/bytea|large object/i);
     expect(sql).toContain("status text not null default 'pending'");
+  });
+
+  it("keeps the immutable correction migration scoped, idempotent, and service-role-only", () => {
+    for (const table of ["intake_conversation_events", "intake_session_events"]) {
+      expect(correctionSql).toContain(`create table if not exists public.${table}`);
+      expect(correctionSql).toContain(`alter table public.${table} enable row level security`);
+      expect(correctionSql).toMatch(new RegExp(`revoke all privileges on table[\\s\\S]*?public\\.${table}[^;]*from public, anon, authenticated`));
+    }
+    for (const name of [
+      "support_list_intake_identities",
+      "support_list_intake_conversations",
+      "support_list_intake_events",
+      "support_transition_intake_conversation",
+    ]) {
+      expect(correctionSql).toContain(`function public.${name}`);
+      expect(correctionSql).toContain(`grant execute on function public.${name}`);
+    }
+    expect(correctionSql).toContain("'202607220002'");
+    expect(correctionSql).not.toMatch(/drop\s+table|truncate\s+|delete\s+from\s+public\.support_/i);
+  });
+
+  it("enforces canonical replay, durable history, scoped locking, and accepted redelivery semantics", () => {
+    for (const code of [
+      "INTAKE_EVENT_REPLAY_MISMATCH",
+      "INTAKE_MESSAGE_REPLAY_MISMATCH",
+      "INTAKE_ATTACHMENT_REPLAY_MISMATCH",
+      "INTAKE_CONVERSATION_VERSION_CONFLICT",
+    ]) expect(correctionSql).toContain(code);
+    for (const scope of ["intake-event:", "intake-message:", "intake-conversation:", "intake-identity:"]) {
+      expect(correctionSql).toContain(scope);
+    }
+    expect(correctionSql).toContain("duplicate_delivery_count = event_record.duplicate_delivery_count + 1");
+    expect(correctionSql).not.toMatch(/integration_channels[^;]{0,500}for update/i);
+    expect(correctionSql).toContain("insert into public.intake_conversation_events");
+    expect(correctionSql).toContain("insert into public.intake_session_events");
+  });
+
+  it("validates recursive JSON policy and casts through bounded helpers", () => {
+    expect(correctionSql).toContain("support_intake_json_has_unsafe_key");
+    expect(correctionSql).toContain("support_intake_json_keys_allowed");
+    expect(correctionSql).toContain("support_intake_parse_timestamp");
+    expect(correctionSql).toContain("support_intake_parse_integer");
+    expect(correctionSql).toContain("support_intake_parse_bigint");
+    expect(correctionSql).not.toMatch(/:=\s*\(p_payload[^;]+\)::(?:timestamp|timestamptz|integer|bigint)/i);
   });
 });

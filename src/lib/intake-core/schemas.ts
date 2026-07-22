@@ -1,12 +1,13 @@
 import { z } from "zod";
-import { boundedMetadataSchema, integrationBoundaryLimits } from "@/lib/integrations";
+import { boundedMetadataSchema, integrationBoundaryLimits, integrationProviderSchema } from "@/lib/integrations";
 import { containsControlCharacters } from "@/lib/integrations/validation";
 import { isValidRequestId } from "@/lib/request-id";
 import {
-  attachmentScanStatuses, attachmentStatuses, intakeChannelProviders,
+  attachmentScanStatuses, attachmentStatuses, conversationStatuses, intakeChannelProviders,
   intakeEventTypes, messageDirections, messageStatuses, messageTypes, outboxCommandTypes,
-  sessionStatuses,
+  outboxStatuses, sessionStatuses,
 } from "./contracts";
+import { assertNoSensitiveIntakeData } from "./sensitive-data";
 
 export const intakeLimits = Object.freeze({
   identifierCharacters: 200, displayNameCharacters: 200, channelKeyCharacters: 120,
@@ -54,27 +55,46 @@ export const externalEventIdSchema = intakeIdentifierSchema("externalEventId", 5
 export const correlationIdSchema = z.string().trim().refine(isValidRequestId, "Invalid correlation ID");
 export const intakeChannelProviderSchema = z.enum(intakeChannelProviders);
 
-const secretKey = /^(authorization|cookie|password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|signed[_-]?url)$/i;
-function containsSecretKey(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsSecretKey);
-  if (!value || typeof value !== "object") return false;
-  return Object.entries(value).some(([key, child]) => secretKey.test(key) || containsSecretKey(child));
-}
-
 function encodedBytes(value: unknown) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
-function boundedJson(maxBytes: number, rejectSecrets = false) {
+function boundedJson(maxBytes: number, rejectUnsafeKeys = true) {
   return boundedMetadataSchema.superRefine((value, context) => {
     if (encodedBytes(value) > maxBytes) context.addIssue({ code: "custom", message: "JSON value is too large" });
-    if (rejectSecrets && containsSecretKey(value)) context.addIssue({ code: "custom", message: "Credentials are not accepted" });
+    if (rejectUnsafeKeys) {
+      try { assertNoSensitiveIntakeData(value); }
+      catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe JSON key" }); }
+    }
   });
 }
 
+const metadataText = z.string().trim().max(500).refine(wellFormedUnicode);
+function strictMetadata<T extends z.ZodRawShape>(shape: T) {
+  return z.unknown().superRefine((value, context) => {
+    try { assertNoSensitiveIntakeData(value); }
+    catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe metadata" }); }
+    if (encodedBytes(value) > 16 * 1024) context.addIssue({ code: "custom", message: "Metadata is too large" });
+  }).pipe(z.object(shape).strict());
+}
+
+export const channelMetadataSchema = strictMetadata({ diagnostic: z.boolean().optional(), source: metadataText.optional() }).default({});
+export const eventMetadataSchema = strictMetadata({
+  diagnostic: z.boolean().optional(), source: metadataText.optional(), compatibilitySource: metadataText.optional(), adapterVersion: metadataText.optional(),
+}).default({});
+export const identityMetadataSchema = strictMetadata({ diagnostic: z.boolean().optional(), source: metadataText.optional() }).default({});
+export const conversationMetadataSchema = strictMetadata({ diagnostic: z.boolean().optional(), source: metadataText.optional() }).default({});
+export const messageMetadataSchema = strictMetadata({ diagnostic: z.boolean().optional(), source: metadataText.optional() }).default({});
+export const attachmentMetadataSchema = strictMetadata({
+  diagnostic: z.boolean().optional(), source: metadataText.optional(), disposition: z.enum(["attachment", "inline"]).optional(), ordinal: z.number().int().min(0).max(49).optional(),
+}).default({});
+export const sessionMetadataSchema = strictMetadata({ diagnostic: z.boolean().optional(), source: metadataText.optional() }).default({});
+export const bindingMetadataSchema = strictMetadata({ source: metadataText.optional(), reason: metadataText.optional() }).default({});
+export const outboxMetadataSchema = strictMetadata({ source: metadataText.optional(), diagnostic: z.boolean().optional() }).default({});
+
 export const safeStateSchema = boundedJson(intakeLimits.stateBytes);
-export const safeOutboxPayloadSchema = boundedJson(intakeLimits.outboxPayloadBytes, true);
-const metadata = boundedJson(16 * 1024, true).default({});
+export const safeOutboxPayloadSchema = boundedJson(intakeLimits.outboxPayloadBytes);
+export const structuredContentSchema = boundedJson(intakeLimits.stateBytes).default({});
 const safeOptionalText = (max: number) => z.string().max(max).refine(wellFormedUnicode).optional();
 const safeRequiredText = (max: number) => z.string().max(max).refine(wellFormedUnicode);
 
@@ -88,7 +108,7 @@ export const attachmentInputSchema = z.object({
     .refine((value) => !/^(?:https?|file):\/\//i.test(value), "Provider locator must be an opaque server reference").optional(),
   storageStatus: z.enum(attachmentStatuses).default("declared"),
   scanStatus: z.enum(attachmentScanStatuses).default("not_scanned"),
-  retentionUntil: canonicalTimestampSchema.optional(), metadata,
+  retentionUntil: canonicalTimestampSchema.optional(), metadata: attachmentMetadataSchema,
 }).strict().superRefine((value, context) => {
   const serialized = JSON.stringify(value);
   if (/base64|data:[^,]+;base64|file:\/\/|\/var\/|\/tmp\//i.test(serialized)) {
@@ -102,34 +122,76 @@ export const sessionStateSchema = z.object({
   urgency: safeOptionalText(100), attachmentIds: z.array(attachmentIdSchema).max(50).optional(), summary: safeOptionalText(2_000),
 }).strict();
 
-export const acceptInboundEventSchema = z.object({
+const acceptInboundEventBase = z.object({
   channel: z.object({ id: channelIdSchema, provider: intakeChannelProviderSchema, channelKey: intakeIdentifierSchema("channelKey", intakeLimits.channelKeyCharacters) }).strict(),
-  event: z.object({ id: eventIdSchema, externalEventId: externalEventIdSchema, eventType: z.enum(intakeEventTypes), payloadHash: sha256Schema, correlationId: correlationIdSchema, requestId: correlationIdSchema.optional(), receivedAt: canonicalTimestampSchema, metadata }).strict(),
-  identity: z.object({ id: identityIdSchema, externalSubjectId: externalSubjectIdSchema, externalSubjectHash: sha256Schema, displayName: safeRequiredText(intakeLimits.displayNameCharacters).default(""), identityType: z.enum(["user", "contact", "mailbox", "system", "anonymous"]), metadata }).strict(),
-  conversation: z.object({ id: conversationIdSchema, externalConversationId: externalConversationIdSchema, subject: safeRequiredText(intakeLimits.subjectCharacters).default(""), openedAt: canonicalTimestampSchema, lastActivityAt: canonicalTimestampSchema, metadata }).strict(),
-  message: z.object({ id: messageIdSchema, externalMessageId: externalMessageIdSchema, replyToMessageId: messageIdSchema.optional(), direction: z.enum(messageDirections), messageType: z.enum(messageTypes), status: z.enum(messageStatuses), bodyText: safeRequiredText(intakeLimits.textBodyCharacters).default(""), bodyHtml: safeRequiredText(intakeLimits.htmlBodyCharacters).default(""), structuredContent: boundedJson(intakeLimits.stateBytes).default({}), contentHash: sha256Schema, providerSentAt: canonicalTimestampSchema.optional(), receivedAt: canonicalTimestampSchema, storedAt: canonicalTimestampSchema.optional(), metadata }).strict(),
+  event: z.object({ id: eventIdSchema, externalEventId: externalEventIdSchema, eventType: z.enum(intakeEventTypes), payloadHash: sha256Schema.optional(), correlationId: correlationIdSchema, requestId: correlationIdSchema.optional(), receivedAt: canonicalTimestampSchema, metadata: eventMetadataSchema }).strict(),
+  identity: z.object({ id: identityIdSchema, externalSubjectId: externalSubjectIdSchema, externalSubjectHash: sha256Schema.optional(), displayName: safeRequiredText(intakeLimits.displayNameCharacters).default(""), identityType: z.enum(["user", "contact", "mailbox", "system", "anonymous"]), metadata: identityMetadataSchema }).strict(),
+  conversation: z.object({ id: conversationIdSchema, externalConversationId: externalConversationIdSchema, subject: safeRequiredText(intakeLimits.subjectCharacters).default(""), openedAt: canonicalTimestampSchema, lastActivityAt: canonicalTimestampSchema, metadata: conversationMetadataSchema }).strict(),
+  message: z.object({ id: messageIdSchema, externalMessageId: externalMessageIdSchema, replyToMessageId: messageIdSchema.optional(), direction: z.enum(messageDirections), messageType: z.enum(messageTypes), status: z.enum(messageStatuses), bodyText: safeRequiredText(intakeLimits.textBodyCharacters).default(""), bodyHtml: safeRequiredText(intakeLimits.htmlBodyCharacters).default(""), structuredContent: structuredContentSchema, contentHash: sha256Schema.optional(), providerSentAt: canonicalTimestampSchema.optional(), receivedAt: canonicalTimestampSchema, storedAt: canonicalTimestampSchema.optional(), metadata: messageMetadataSchema }).strict(),
   attachments: z.array(attachmentInputSchema).max(intakeLimits.attachmentsPerEvent).default([]),
-  initializeSession: z.object({ id: sessionIdSchema, status: z.enum(["draft", "collecting"]), stateData: sessionStateSchema.default({}), missingFields: z.array(intakeIdentifierSchema("missingField", 100)).max(50).default([]), startedAt: canonicalTimestampSchema, expiresAt: canonicalTimestampSchema.optional() }).strict().optional(),
+  initializeSession: z.object({ id: sessionIdSchema, status: z.enum(["draft", "collecting"]), stateData: sessionStateSchema.default({}), missingFields: z.array(intakeIdentifierSchema("missingField", 100)).max(50).default([]), startedAt: canonicalTimestampSchema, expiresAt: canonicalTimestampSchema.optional(), metadata: sessionMetadataSchema }).strict().optional(),
 }).strict();
+
+export const acceptInboundEventInputSchema = acceptInboundEventBase;
+export const acceptInboundEventSchema = acceptInboundEventBase.transform((value, context) => {
+  if (!value.event.payloadHash || !value.identity.externalSubjectHash || !value.message.contentHash) {
+    context.addIssue({ code: "custom", message: "Canonical intake hashes are required for persistence" });
+    return z.NEVER;
+  }
+  return {
+    ...value,
+    event: { ...value.event, payloadHash: value.event.payloadHash },
+    identity: { ...value.identity, externalSubjectHash: value.identity.externalSubjectHash },
+    message: { ...value.message, contentHash: value.message.contentHash },
+  };
+});
 
 export const acceptInboundEventResultSchema = z.object({ action: z.enum(["accepted", "duplicate", "duplicate_message"]), event_id: z.string(), identity_id: z.string(), conversation_id: z.string(), message_id: z.string(), attachment_count: z.number().int().nonnegative(), session_id: z.string().nullable(), delivery_count: z.number().int().positive() }).strict();
 
-export const identityBindingInputSchema = z.object({ bindingId: bindingIdSchema, eventId: eventIdSchema, identityId: identityIdSchema, customerKey: intakeIdentifierSchema("customerKey", 600), projectCode: z.string().trim().max(200).default(""), allowedSystems: z.array(intakeIdentifierSchema("systemKey", 200)).max(50).default([]), targetReferences: boundedJson(intakeLimits.stateBytes, true).default({}), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata }).strict();
-export const revokeBindingInputSchema = z.object({ identityId: identityIdSchema, actorUserId: intakeIdentifierSchema("actorUserId"), eventId: eventIdSchema, requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata }).strict();
+const targetReferenceValue = intakeIdentifierSchema("targetReference", 1_000);
+export const targetReferencesSchema = z.object({
+  email: targetReferenceValue.optional(), n8n: targetReferenceValue.optional(), servicenow: targetReferenceValue.optional(), internal: targetReferenceValue.optional(), line: targetReferenceValue.optional(), web: targetReferenceValue.optional(), freshservice: targetReferenceValue.optional(),
+}).strict().superRefine((value, context) => {
+  try { assertNoSensitiveIntakeData(value); }
+  catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Unsafe target reference" }); }
+});
+
+export const identityBindingInputSchema = z.object({ bindingId: bindingIdSchema, eventId: eventIdSchema, identityId: identityIdSchema, customerKey: intakeIdentifierSchema("customerKey", 600), projectCode: z.string().trim().max(200).default(""), allowedSystems: z.array(intakeIdentifierSchema("systemKey", 200)).max(50).default([]), targetReferences: targetReferencesSchema.default({}), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata: bindingMetadataSchema }).strict();
+export const revokeBindingInputSchema = z.object({ identityId: identityIdSchema, actorUserId: intakeIdentifierSchema("actorUserId"), eventId: eventIdSchema, requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, appliedAt: canonicalTimestampSchema, metadata: bindingMetadataSchema }).strict();
 export const identityBindingResultSchema = z.object({ action: z.enum(["created", "changed", "reactivated", "unchanged", "revoked"]), binding_id: z.string(), identity_id: z.string(), customer_key: z.string().nullable(), project_code: z.string(), active: z.boolean() }).strict();
 
-export const sessionTransitionInputSchema = z.object({ sessionId: sessionIdSchema, expectedVersion: z.number().int().positive(), targetStatus: z.enum(sessionStatuses), statePatch: sessionStateSchema.default({}), missingFields: z.array(intakeIdentifierSchema("missingField", 100)).max(50).default([]), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, occurredAt: canonicalTimestampSchema }).strict();
-export const sessionSummarySchema = z.object({ id: z.string(), conversation_id: z.string(), status: z.enum(sessionStatuses), version: z.number().int().positive(), state_data: safeStateSchema, missing_fields: z.array(z.string()), started_at: canonicalTimestampSchema, expires_at: canonicalTimestampSchema.nullable(), confirmed_at: canonicalTimestampSchema.nullable(), cancelled_at: canonicalTimestampSchema.nullable(), failed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
+export const sessionTransitionInputSchema = z.object({ eventId: eventIdSchema, sessionId: sessionIdSchema, expectedVersion: z.number().int().positive(), targetStatus: z.enum(sessionStatuses), statePatch: sessionStateSchema.default({}), missingFields: z.array(intakeIdentifierSchema("missingField", 100)).max(50).default([]), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, occurredAt: canonicalTimestampSchema, metadata: sessionMetadataSchema }).strict();
+export const sessionSummarySchema = z.object({ id: z.string(), conversation_id: z.string(), status: z.enum(sessionStatuses), version: z.number().int().positive(), state_data: sessionStateSchema, missing_fields: z.array(z.string()), started_at: canonicalTimestampSchema, expires_at: canonicalTimestampSchema.nullable(), confirmed_at: canonicalTimestampSchema.nullable(), cancelled_at: canonicalTimestampSchema.nullable(), failed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
 
-export const enqueueOutboxInputSchema = z.object({ id: outboxIdSchema, targetProvider: z.enum(["email", "n8n", "servicenow", "internal", "line", "web", "freshservice"]), commandType: z.enum(outboxCommandTypes), idempotencyKey: intakeIdentifierSchema("idempotencyKey", 300), channelId: channelIdSchema.optional(), conversationId: conversationIdSchema.optional(), messageId: messageIdSchema.optional(), ticketId: intakeIdentifierSchema("ticketId").optional(), payload: safeOutboxPayloadSchema, availableAt: canonicalTimestampSchema, maxAttempts: z.number().int().min(1).max(20).default(5), correlationId: correlationIdSchema, requestId: correlationIdSchema.optional(), metadata }).strict();
-export const enqueueOutboxResultSchema = z.object({ action: z.enum(["created", "unchanged"]), command_id: z.string(), status: z.literal("pending"), attempt_count: z.literal(0) }).strict();
+export const conversationTransitionInputSchema = z.object({ eventId: eventIdSchema, conversationId: conversationIdSchema, expectedVersion: z.number().int().positive(), targetStatus: z.enum(conversationStatuses), explicitReopen: z.boolean().default(false), actorUserId: intakeIdentifierSchema("actorUserId"), requestId: correlationIdSchema.optional(), correlationId: correlationIdSchema, occurredAt: canonicalTimestampSchema, metadata: conversationMetadataSchema }).strict();
+export const conversationSummarySchema = z.object({ id: z.string(), status: z.enum(conversationStatuses), version: z.number().int().positive(), last_activity_at: canonicalTimestampSchema, closed_at: canonicalTimestampSchema.nullable(), updated_at: canonicalTimestampSchema }).strict();
 
-export const listQuerySchema = z.object({ page: z.coerce.number().int().min(1).max(100_000).default(1), limit: z.coerce.number().int().min(1).max(intakeLimits.listLimit).default(25), status: z.string().trim().max(80).optional(), provider: intakeChannelProviderSchema.optional() }).strict();
+export const enqueueOutboxInputSchema = z.object({ id: outboxIdSchema, targetProvider: integrationProviderSchema, commandType: z.enum(outboxCommandTypes), idempotencyKey: intakeIdentifierSchema("idempotencyKey", 300), channelId: channelIdSchema.optional(), conversationId: conversationIdSchema.optional(), messageId: messageIdSchema.optional(), ticketId: intakeIdentifierSchema("ticketId").optional(), payload: safeOutboxPayloadSchema, availableAt: canonicalTimestampSchema, maxAttempts: z.number().int().min(1).max(20).default(5), correlationId: correlationIdSchema, requestId: correlationIdSchema.optional(), metadata: outboxMetadataSchema }).strict();
+export const enqueueOutboxResultSchema = z.object({ action: z.enum(["created", "unchanged"]), command_id: z.string(), status: z.enum(outboxStatuses), attempt_count: z.number().int().min(0).max(20) }).strict();
 
+const paginationShape = { page: z.coerce.number().int().min(1).max(100_000).default(1), limit: z.coerce.number().int().min(1).max(intakeLimits.listLimit).default(25) };
+export const intakeChannelListQuerySchema = z.object({ ...paginationShape, status: z.enum(["unconfigured", "configured", "disabled", "error"]).optional(), provider: intakeChannelProviderSchema.optional() }).strict();
+export const identityListQuerySchema = z.object({ ...paginationShape, status: z.enum(["unlinked", "pending", "linked", "revoked", "blocked"]).optional(), provider: intakeChannelProviderSchema.optional() }).strict();
+export const conversationListQuerySchema = z.object({ ...paginationShape, status: z.enum(conversationStatuses).optional(), provider: intakeChannelProviderSchema.optional() }).strict();
+export const eventListQuerySchema = z.object({ ...paginationShape, status: z.enum(["received", "accepted", "rejected", "failed"]).optional(), provider: intakeChannelProviderSchema.optional() }).strict();
+export const outboxListQuerySchema = z.object({ ...paginationShape, status: z.enum(outboxStatuses).optional(), provider: integrationProviderSchema.optional() }).strict();
+export const conversationMessageListQuerySchema = z.object(paginationShape).strict();
+export const conversationAttachmentListQuerySchema = z.object(paginationShape).strict();
+export const sessionListQuerySchema = z.object({ ...paginationShape, status: z.enum(sessionStatuses).optional() }).strict();
+
+export type AcceptInboundEventInput = z.infer<typeof acceptInboundEventInputSchema>;
 export type AcceptInboundEvent = z.infer<typeof acceptInboundEventSchema>;
+export type AttachmentInput = z.infer<typeof attachmentInputSchema>;
 export type AcceptInboundEventResult = z.infer<typeof acceptInboundEventResultSchema>;
 export type IdentityBindingInput = z.infer<typeof identityBindingInputSchema>;
 export type RevokeBindingInput = z.infer<typeof revokeBindingInputSchema>;
 export type SessionTransitionInput = z.infer<typeof sessionTransitionInputSchema>;
+export type ConversationTransitionInput = z.infer<typeof conversationTransitionInputSchema>;
 export type EnqueueOutboxInput = z.infer<typeof enqueueOutboxInputSchema>;
-export type ListQuery = z.infer<typeof listQuerySchema>;
+export type ChannelListQuery = z.infer<typeof intakeChannelListQuerySchema>;
+export type IdentityListQuery = z.infer<typeof identityListQuerySchema>;
+export type ConversationListQuery = z.infer<typeof conversationListQuerySchema>;
+export type EventListQuery = z.infer<typeof eventListQuerySchema>;
+export type OutboxListQuery = z.infer<typeof outboxListQuerySchema>;
+export type ChildListQuery = z.infer<typeof conversationMessageListQuerySchema>;
+export type SessionListQuery = z.infer<typeof sessionListQuerySchema>;

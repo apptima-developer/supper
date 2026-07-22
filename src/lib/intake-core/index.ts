@@ -6,7 +6,14 @@ export { assertConversationTransition, statusAfterOrdinaryMessage, transitionCon
 export { IntakeCoreService } from "./service";
 export type { IntakeCoreRepository, PageResult } from "./repository";
 export {
-  acceptInboundEventSchema, attachmentInputSchema, canonicalTimestampSchema, enqueueOutboxInputSchema,
-  identityBindingInputSchema, intakeLimits, listQuerySchema, revokeBindingInputSchema,
-  sessionStateSchema, sessionTransitionInputSchema, sha256Schema,
+  acceptInboundEventInputSchema, acceptInboundEventSchema, attachmentInputSchema, canonicalTimestampSchema,
+  conversationAttachmentListQuerySchema, conversationListQuerySchema, conversationMessageListQuerySchema,
+  conversationTransitionInputSchema, enqueueOutboxInputSchema, eventListQuerySchema,
+  identityBindingInputSchema, identityListQuerySchema, intakeChannelListQuerySchema, intakeLimits,
+  outboxListQuerySchema, revokeBindingInputSchema, sessionStateSchema, sessionTransitionInputSchema, sha256Schema,
 } from "./schemas";
+export {
+  canonicalIntakeAttachmentMaterial, canonicalIntakeEventMaterial, canonicalIntakeMessageMaterial,
+  canonicalSerializeIntakeMaterial, hashCanonicalIntakeMaterial, prepareCanonicalIntakeEvent,
+} from "./canonical-material";
+export { assertNoSensitiveIntakeData, classifyIntakeJsonKey, findUnsafeIntakeJsonKey, normalizeIntakeJsonKey } from "./sensitive-data";

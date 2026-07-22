@@ -68,23 +68,24 @@ No table is dropped, no existing password is reset, and no production data is co
 
 Prefer rolling application code forward. If a rollback is required, redeploy the prior application first. `auth_version` and `support_schema_migrations` can remain safely. Remove the rate-limit function/table only during a controlled maintenance window after confirming no deployed code uses them. Never delete rate-limit state while the hardened login route is active.
 
-## Applying AI-1.3 Unified Intake Core
+## Applying AI-1.3.1 Unified Intake Core corrections
 
-Migration `supabase/migrations/202607220001_unified_intake_core.sql` is forward-only, non-destructive, and records version `202607220001`. It must be applied only after every earlier migration and only to the verified isolated `supper-ai-dev` Supabase project. Repository automation intentionally does not apply it remotely.
+Migration `supabase/migrations/202607220001_unified_intake_core.sql` is immutable. Because its remote application status cannot be proven without connecting to Supabase, AI-1.3.1 uses the new forward-only correction `supabase/migrations/202607220002_unified_intake_core_corrections.sql`. The correction is non-destructive, records version `202607220002`, and may be run again safely. It must be applied only after every earlier migration and only to the verified isolated `supper-ai-dev` Supabase project. Repository automation intentionally does not apply either file remotely.
 
 1. Verify the Supabase project name/ref is the isolated `supper-ai-dev` target and that no production project is linked.
 2. Take the normal database backup or recovery checkpoint.
-3. Review the complete immutable SQL file at the same Git commit being deployed.
+3. Review both complete immutable SQL files at the same Git commit being deployed. If `202607220001` is already recorded, do not run or edit it again; proceed to `202607220002`.
 4. Run `npm run verify:migrations`, `npm run verify:architecture`, and `npm run verify:intake-core-sql` locally. The last command creates and deletes an isolated PostgreSQL cluster under `/tmp`; it never contacts Supabase.
-5. Paste the complete `202607220001_unified_intake_core.sql` into the target project's Supabase SQL Editor, or use the organization's approved migration runner, and execute once as an authorized database administrator.
-6. Confirm `support_schema_migrations` contains `202607220001`.
-7. Confirm all 11 new tables have RLS enabled and that `PUBLIC`, `anon`, and `authenticated` have no RPC execution grant; `service_role` must retain execution.
+5. If absent, paste and execute the complete `202607220001_unified_intake_core.sql` first. Then paste and execute the complete `202607220002_unified_intake_core_corrections.sql`. Never concatenate, partially copy, or edit an applied migration.
+6. Confirm `support_schema_migrations` contains both `202607220001` and `202607220002`.
+7. Confirm all intake tables, including `intake_conversation_events` and `intake_session_events`, have RLS enabled. Confirm `PUBLIC`, `anon`, and `authenticated` have no table privileges or RPC execution grant; `service_role` must retain the documented access.
 8. Deploy the exact `ai_development` Preview commit and run the manual diagnostic acceptance in [Unified Intake Core](unified-intake-core.md).
 
 ```sql
 select version, description
 from public.support_schema_migrations
-where version = '202607220001';
+where version in ('202607220001', '202607220002')
+order by version;
 
 select relname, relrowsecurity
 from pg_class
@@ -97,15 +98,21 @@ from information_schema.routine_privileges
 where routine_schema = 'public'
   and routine_name in (
     'support_get_intake_operations_summary',
+    'support_list_intake_identities',
+    'support_list_intake_conversations',
+    'support_list_intake_events',
     'support_accept_intake_event',
     'support_apply_intake_identity_binding',
     'support_revoke_intake_identity_binding',
     'support_transition_intake_session',
+    'support_transition_intake_conversation',
     'support_enqueue_integration_outbox'
   )
 order by routine_name, grantee;
 ```
 
-Expected: one migration row, RLS true for every listed intake table, `service_role` execution grants, and no `PUBLIC`, `anon`, or `authenticated` execution grant.
+Expected: two ordered migration rows, RLS true for every listed intake table, `service_role` execution grants, and no `PUBLIC`, `anon`, or `authenticated` execution grant.
+
+The correction adds canonical event/message/attachment verification, recursive credential-key rejection, strict metadata allowlists, bounded read-model RPCs, scoped advisory locking, accepted-event redelivery counters, append-only Conversation/Session history, Conversation compare-and-swap transitions, validation-before-cast helpers, and truthful existing-outbox status. It does not move or delete intake rows, call a provider, create a Ticket, add attachment bytes, or start a worker.
 
 Do not use REST/service-role endpoints for DDL. Do not run this migration against production as part of AI-1.3 acceptance. Roll application code forward if a problem is found; do not delete intake rows or drop the new tables casually.

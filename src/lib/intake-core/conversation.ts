@@ -15,7 +15,7 @@ export function assertConversationTransition(from: ConversationStatus, to: Conve
   if (from === to) return;
   if (from === "closed" && to === "open" && explicitReopen) return;
   if (!ordinaryTransitions[from].includes(to)) {
-    throw new IntakeCoreError("INTAKE_VALIDATION_FAILED", "Conversation status transition is not allowed", 409);
+    throw new IntakeCoreError("INTAKE_CONVERSATION_TRANSITION_INVALID");
   }
 }
 
@@ -43,7 +43,7 @@ export function transitionConversation(input: {
   if (!intakeIdentifierSchema("actorUserId").safeParse(input.actorUserId).success
     || !correlationIdSchema.safeParse(input.correlationId).success
     || !canonicalTimestampSchema.safeParse(input.occurredAt).success) {
-    throw new IntakeCoreError("INTAKE_VALIDATION_FAILED", "Conversation transition context is invalid", 400);
+    throw new IntakeCoreError("INTAKE_PAYLOAD_INVALID", "Conversation transition context is invalid");
   }
   const history = Object.freeze({
     fromStatus: input.status,

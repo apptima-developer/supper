@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IntakeCoreRepository } from "./repository";
 import { IntakeCoreService } from "./service";
-import { hashExternalIdentity } from "./identity";
 
 const timestamp = "2026-07-22T00:00:00.000Z";
 const correlationId = "request-intake-service-1234";
@@ -10,10 +9,10 @@ function normalizedEvent() {
   const externalSubjectId = "service-test-subject";
   return {
     channel: { id: "channel-1", provider: "internal", channelKey: "test" },
-    event: { id: "event-1", externalEventId: "external-event-1", eventType: "message.received", payloadHash: "a".repeat(64), correlationId, receivedAt: timestamp, metadata: {} },
-    identity: { id: "identity-1", externalSubjectId, externalSubjectHash: hashExternalIdentity(externalSubjectId), displayName: "Test", identityType: "system", metadata: {} },
+    event: { id: "event-1", externalEventId: "external-event-1", eventType: "message.received", correlationId, receivedAt: timestamp, metadata: {} },
+    identity: { id: "identity-1", externalSubjectId, displayName: "Test", identityType: "system", metadata: {} },
     conversation: { id: "conversation-1", externalConversationId: "external-conversation-1", subject: "Test", openedAt: timestamp, lastActivityAt: timestamp, metadata: {} },
-    message: { id: "message-1", externalMessageId: "external-message-1", direction: "internal", messageType: "text", status: "stored", bodyText: "Test", bodyHtml: "", structuredContent: {}, contentHash: "b".repeat(64), receivedAt: timestamp, storedAt: timestamp, metadata: {} },
+    message: { id: "message-1", externalMessageId: "external-message-1", direction: "internal", messageType: "text", status: "stored", bodyText: "Test", bodyHtml: "", structuredContent: {}, receivedAt: timestamp, storedAt: timestamp, metadata: {} },
     attachments: [],
   };
 }
