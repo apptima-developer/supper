@@ -15,6 +15,7 @@ const migrations = [
   "202607200001_servicenow_incremental_sync.sql",
   "202607200002_servicenow_sync_reliability_corrections.sql",
   "202607210001_servicenow_customer_mapping_operations.sql",
+  "202607220001_unified_intake_core.sql",
 ];
 
 function write(root, relative, source = "export {};\n") {
@@ -42,6 +43,14 @@ function fixture() {
     "src/lib/email-intake/events.ts",
     "src/lib/email-intake/repository.ts",
     "src/lib/email-intake/schemas.ts",
+    "src/lib/intake-core/contracts.ts",
+    "src/lib/intake-core/conversation.ts",
+    "src/lib/intake-core/email-compatibility.ts",
+    "src/lib/intake-core/errors.ts",
+    "src/lib/intake-core/identity.ts",
+    "src/lib/intake-core/presentation.ts",
+    "src/lib/intake-core/schemas.ts",
+    "src/lib/intake-core/session.ts",
     "src/lib/integrations/index.ts",
     "src/lib/email-intake/index.ts",
     "src/lib/repositories.ts",

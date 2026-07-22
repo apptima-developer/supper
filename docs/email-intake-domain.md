@@ -93,3 +93,7 @@ Errors reuse `IntegrationBoundaryError`. B3 adds only `DuplicateEmailIntake`, `I
 - B3 does not connect to IMAP, POP3, SMTP, Microsoft Graph, Outlook, ServiceNow, n8n, AI, object storage, a queue, a worker, a scheduler, a webhook, an API route, or UI.
 
 Patch B3.5 keeps factory selection in `src/lib/email-intake/repository-factory.ts` and the application-facing factory export in `src/lib/repositories.ts`. Storage adapters and test-only adapters are intentionally not exported by the domain barrels. JSON repository contract tests use a real local JSON store rooted in a guarded OS temporary directory; relational contract tests use an isolated mock store.
+
+## Unified Intake compatibility
+
+AI-1.3 does not rename, delete, migrate, or dual-write existing Email Intake records. `src/lib/intake-core/email-compatibility.ts` is a pure bridge from an already validated `EmailIntake` record to a normalized intake acceptance command. It performs no persistence or network call, creates no Ticket, and enqueues no outbox command. A future migration must explicitly select records and invoke this mapper under its own reviewed idempotency and rollout policy.

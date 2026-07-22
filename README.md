@@ -30,6 +30,8 @@ The Email Intake domain in `src/lib/email-intake/` builds on that boundary with 
 
 The isolated `ai_development` Preview includes guarded ServiceNow diagnostics, administrator-triggered read-only Incident synchronization, sanitized operations history, and stable mapping from ServiceNow companies to existing SUPPER customers. It never writes ServiceNow or creates customers automatically. See [AI-development bootstrap](docs/ai-development-bootstrap.md), [ServiceNow integration](docs/servicenow-integration.md), [operations](docs/servicenow-operations.md), and [customer mapping](docs/servicenow-customer-mapping.md).
 
+AI-1.3 adds the relational [Unified Intake Core](docs/unified-intake-core.md) and protected Intake Operations page for future email, LINE, web, and internal intake. It stores channel/identity, conversation, message, attachment metadata, guided-session, idempotency-ledger, Ticket-link, and outbox-intent records. It does not connect to a live provider, create a Ticket or Incident, store attachment bytes, send a message, or run a worker. Existing [Email Intake](docs/email-intake-domain.md) remains unchanged and has a pure compatibility mapper only.
+
 Patch B3.5 makes those boundaries mechanically verifiable, narrows public module surfaces, and adds a read-only active-data integrity check without changing backend routing. See [architecture consolidation](docs/architecture-consolidation.md).
 
 ## Production security setup
@@ -53,6 +55,8 @@ npm run verify:runtime-assets
 npm run verify:migrations
 npm run verify:architecture
 npm run verify:data-integrity
+npm run verify:servicenow-sql
+npm run verify:intake-core-sql
 ```
 
 ## Operations

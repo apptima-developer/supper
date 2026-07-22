@@ -12,6 +12,8 @@ Phase 0.2 freezes the routing approved in Phase 0.1.1. It does not migrate produ
 
 Core entities include customers, tickets, ticket history, audit records, users, import batches, report jobs, and shared master data. Auxiliary JSON consumers include import mapping overrides and their Settings backups. `supabase-relational` intentionally continues to use `app_store` for the active `imports/mappings.json` record and its snapshots.
 
+AI-1.3 Unified Intake is a relational-only integration subsystem. With `supabase-relational`, it uses dedicated `integration_*` and `intake_*` tables and atomic service-role RPCs; it never stores intake records in `app_store` or local JSON. On other backends, pure domain helpers remain available but Unified Intake writes return a safe unavailable error. Existing Email Intake backend routing is unchanged.
+
 The routing decision is centralized in `src/lib/storage-routing.ts`. Repositories use relational functions only when core routing resolves to `supabase-relational`; `src/lib/json-store.ts` independently resolves auxiliary storage. Supabase-backed errors remain visible and must never fall back to the Vercel filesystem.
 
 ## Entry-point audit
@@ -30,3 +32,5 @@ Existing routing regression tests cover all three modes, app_store failure propa
 `supabase-relational` is the recommended production target for future integrations. Phase 0.2 does not force it and does not run a data migration. Administrators must verify relational row counts before changing `DATA_BACKEND`.
 
 `local-json` is not safe for horizontally scaled or ephemeral production hosts. Its login throttling is in-memory, and its runtime writes are local. Monthly report generation still has documented local template/runtime-file dependencies. Moving report files or future attachments to object storage is explicitly outside this phase.
+
+Unified Intake attachment rows contain metadata only. `storage_object_key` is an opaque future reference, not a local path or URL, and is not exposed to browsers. No runtime attachment filesystem, object-storage adapter, signed URL, or binary payload exists in AI-1.3.

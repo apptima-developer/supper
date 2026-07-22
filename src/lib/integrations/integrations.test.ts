@@ -13,6 +13,7 @@ import {
   externalTicketIdSchema,
   idempotencyKeySchema,
   integrationErrorCategories,
+  integrationProviderSchema,
   integrationEventIdSchema,
   isIntegrationBoundaryError,
   normalizeExternalTicketReference,
@@ -64,6 +65,12 @@ function messageInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe("normalized integration envelopes", () => {
+  it("extends providers additively for unified intake without removing existing identifiers", () => {
+    for (const provider of ["email", "n8n", "servicenow", "internal", "line", "web", "freshservice"]) {
+      expect(integrationProviderSchema.parse(provider)).toBe(provider);
+    }
+    expect(() => integrationProviderSchema.parse("unsupported-provider")).toThrow();
+  });
   it("normalizes addresses, headers, and dates without mutating the source", () => {
     const source = messageInput();
     const normalized = normalizeMessageEnvelope(source);

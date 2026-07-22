@@ -9,6 +9,7 @@ const expectedMigrations = Object.freeze([
   "202607200001_servicenow_incremental_sync.sql",
   "202607200002_servicenow_sync_reliability_corrections.sql",
   "202607210001_servicenow_customer_mapping_operations.sql",
+  "202607220001_unified_intake_core.sql",
 ]);
 
 const domainFiles = Object.freeze([
@@ -25,6 +26,14 @@ const domainFiles = Object.freeze([
   "src/lib/email-intake/events.ts",
   "src/lib/email-intake/repository.ts",
   "src/lib/email-intake/schemas.ts",
+  "src/lib/intake-core/contracts.ts",
+  "src/lib/intake-core/conversation.ts",
+  "src/lib/intake-core/email-compatibility.ts",
+  "src/lib/intake-core/errors.ts",
+  "src/lib/intake-core/identity.ts",
+  "src/lib/intake-core/presentation.ts",
+  "src/lib/intake-core/schemas.ts",
+  "src/lib/intake-core/session.ts",
 ]);
 
 const forbiddenDomainImports = [
@@ -133,6 +142,7 @@ export function verifyArchitecture(root) {
   const sourceFiles = [
     ...walkSourceFiles(path.join(root, "src/lib/integrations")),
     ...walkSourceFiles(path.join(root, "src/lib/email-intake")),
+    ...walkSourceFiles(path.join(root, "src/lib/intake-core")),
   ];
   const cycles = circularDependencies(sourceFiles);
   check("circular dependencies", cycles.length === 0, cycles.length ? `${cycles.length} cycle(s) detected` : "none detected");

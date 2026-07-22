@@ -1,4 +1,4 @@
-export const integrationProviders = ["email", "n8n", "servicenow", "internal"] as const;
+export const integrationProviders = ["email", "n8n", "servicenow", "internal", "line", "web", "freshservice"] as const;
 export type IntegrationProvider = (typeof integrationProviders)[number];
 
 export const integrationOperations = [

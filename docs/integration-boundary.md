@@ -119,3 +119,9 @@ A future provider adapter must:
 B3 is expected to add a separately reviewed application-service and persistence boundary, without changing these provider-neutral contracts casually. B4 may add the first real provider adapter and operational processing only after its transport, credentials, rate limits, observability, and failure behavior are explicitly reviewed.
 
 B2 adds no environment variable, database migration, Supabase access, filesystem write, UI change, authentication change, business-logic change, or production integration. IMAP, Outlook, n8n connectivity, ServiceNow connectivity, SMTP, AI, object storage, browser storage, queues, caches, scheduled tasks, and background processing are explicitly not implemented.
+
+## AI-1.3 extension
+
+The additive provider vocabulary now also accepts `line`, `web`, and `freshservice`; existing provider identifiers remain unchanged. The bounded ordinary intake-channel subset is `email`, `line`, `web`, and `internal`. ServiceNow and Freshservice identify integration targets but are not customer-intake channels in AI-1.3.
+
+Normalized intake persistence lives in the separate `src/lib/intake-core/` module described in [Unified Intake Core](unified-intake-core.md). No provider client was added. Future adapters must terminate transport authentication and signature verification before calling the strict normalized acceptance schema and atomic service-role RPC.

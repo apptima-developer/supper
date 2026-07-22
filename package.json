@@ -11,6 +11,7 @@
     "verify:runtime-assets": "node scripts/verify-runtime-assets.mjs",
     "verify:migrations": "node scripts/verify-migrations.mjs",
     "verify:servicenow-sql": "node scripts/verify-servicenow-sync-sql.mjs",
+    "verify:intake-core-sql": "node scripts/verify-intake-core-sql.mjs",
     "verify:architecture": "node scripts/verify-architecture.mjs",
     "verify:data-integrity": "node scripts/verify-production-data-integrity.mjs",
     "verify:build-env": "node scripts/verify-build-environment.mjs",
