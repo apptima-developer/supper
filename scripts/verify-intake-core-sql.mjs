@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 const root = process.cwd();
@@ -54,7 +55,7 @@ begin
   if v_actual <> $serialized_${index}$${vector.serialized}$serialized_${index}$ then
     raise exception 'Canonical serialization mismatch: ${vector.name}';
   end if;
-  if encode(digest(v_actual, 'sha256'), 'hex') <> '${vector.sha256}' then
+  if public.support_intake_sha256_hex(v_actual) <> '${vector.sha256}' then
     raise exception 'Canonical hash mismatch: ${vector.name}';
   end if;
 end;
@@ -88,6 +89,9 @@ $key_vector_${index}$;`).join("\n");
 }
 
 const baseSchema = String.raw`
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+alter database postgres set search_path = pg_catalog, public, extensions;
 create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin;
@@ -114,9 +118,9 @@ values ('channel-one', 'internal', 'sql-diagnostic-one', 'SQL diagnostic one', '
 create or replace function public.supper_test_intake_rehash(p_payload jsonb) returns jsonb language plpgsql as $$
 declare v_result jsonb := p_payload;
 begin
-  v_result := jsonb_set(v_result, '{identity,externalSubjectHash}', to_jsonb(encode(digest(v_result#>>'{identity,externalSubjectId}', 'sha256'), 'hex')));
-  v_result := jsonb_set(v_result, '{message,contentHash}', to_jsonb(encode(digest(public.support_intake_canonical_json(public.support_intake_message_material(v_result)), 'sha256'), 'hex')));
-  v_result := jsonb_set(v_result, '{event,payloadHash}', to_jsonb(encode(digest(public.support_intake_canonical_json(public.support_intake_event_material(v_result)), 'sha256'), 'hex')));
+  v_result := jsonb_set(v_result, '{identity,externalSubjectHash}', to_jsonb(encode(extensions.digest(v_result#>>'{identity,externalSubjectId}', 'sha256'), 'hex')));
+  v_result := jsonb_set(v_result, '{message,contentHash}', to_jsonb(encode(extensions.digest(public.support_intake_canonical_json(public.support_intake_message_material(v_result)), 'sha256'), 'hex')));
+  v_result := jsonb_set(v_result, '{event,payloadHash}', to_jsonb(encode(extensions.digest(public.support_intake_canonical_json(public.support_intake_event_material(v_result)), 'sha256'), 'hex')));
   return v_result;
 end;
 $$;
@@ -176,7 +180,58 @@ $$;
 
 `;
 
+const pgcryptoCompatibilityValue = "supper-supabase-pgcrypto-schema";
+const pgcryptoCompatibilityHash = createHash("sha256").update(pgcryptoCompatibilityValue).digest("hex");
+const pgcryptoCompatibilitySql = String.raw`
+do $pgcrypto_compatibility$
+declare
+  v_result record;
+  v_attachment_hash text;
+begin
+  if public.support_intake_sha256_hex('${pgcryptoCompatibilityValue}') <> '${pgcryptoCompatibilityHash}' then
+    raise exception 'Portable SHA-256 helper returned the wrong digest';
+  end if;
+
+  v_attachment_hash := public.support_intake_attachment_source_hash(jsonb_build_object(
+    'externalAttachmentId', 'external-attachment-pgcrypto',
+    'fileName', 'pgcrypto.txt',
+    'contentType', 'text/plain',
+    'declaredSize', 128,
+    'sha256', null,
+    'providerLocator', null,
+    'metadata', '{}'::jsonb
+  ));
+  if v_attachment_hash !~ '^[a-f0-9]{64}$' then
+    raise exception 'Attachment source hash did not execute in the extensions pgcrypto layout';
+  end if;
+
+  select * into v_result from public.support_accept_intake_event(
+    public.supper_test_intake_payload('pgcrypto-old', 'external-event-pgcrypto-old',
+      'external-conversation-pgcrypto-old', 'external-subject-pgcrypto-old',
+      'external-message-pgcrypto-old', 'external-attachment-pgcrypto-old'));
+  if v_result.action <> 'accepted' then raise exception 'Legacy acceptance RPC failed in the extensions pgcrypto layout'; end if;
+
+  select * into v_result from public.support_accept_intake_event_v2(
+    public.supper_test_intake_payload('pgcrypto-v2', 'external-event-pgcrypto-v2',
+      'external-conversation-pgcrypto-v2', 'external-subject-pgcrypto-v2',
+      'external-message-pgcrypto-v2', 'external-attachment-pgcrypto-v2'));
+  if v_result.action <> 'accepted' then raise exception 'V2 acceptance RPC failed in the extensions pgcrypto layout'; end if;
+
+  select * into v_result from public.support_accept_intake_event_v3(
+    public.supper_test_intake_payload('pgcrypto-v3', 'external-event-pgcrypto-v3',
+      'external-conversation-pgcrypto-v3', 'external-subject-pgcrypto-v3',
+      'external-message-pgcrypto-v3', 'external-attachment-pgcrypto-v3'));
+  if v_result.action <> 'accepted' then raise exception 'V3 acceptance RPC failed in the extensions pgcrypto layout'; end if;
+end;
+$pgcrypto_compatibility$;
+`;
+
 const legacySeedSql = String.raw`
+-- Migration 002 is already immutable on the target. Its acceptance function
+-- predates the portable helper, so expose the hosted extension only while the
+-- verifier creates representative 002 state, then restore its stored definition.
+alter function public.support_accept_intake_event(jsonb)
+  set search_path = pg_catalog, public, extensions, pg_temp;
 do $$
 declare v_result record;
 begin
@@ -196,6 +251,8 @@ begin
   end if;
 end;
 $$;
+alter function public.support_accept_intake_event(jsonb)
+  set search_path = pg_catalog, public, pg_temp;
 `;
 
 const upgradeVerificationSql = String.raw`
@@ -206,8 +263,8 @@ begin
     or (select scan_status from public.intake_attachments where id='attachment-upgrade') <> 'clean'
     or (select storage_object_key from public.intake_attachments where id='attachment-upgrade') <> 'upgrade-object-key'
     or (select source_material_hash = canonical_hash from public.intake_attachments where id='attachment-upgrade') is not true
-    or (select content_hash = encode(digest(public.support_intake_canonical_json(
-      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+    or (select content_hash = public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)))
       from public.intake_messages where id='message-upgrade') is not true
     or (select count(*) from public.intake_event_deliveries where event_id='event-upgrade' and delivery_number=1) <> 1 then
     raise exception 'Forward migration lost or failed to backfill representative state';
@@ -241,7 +298,8 @@ begin
   select * into v_first from public.support_accept_intake_event_v3(v_payload);
   select source_material_hash into v_source_hash from public.intake_attachments where id = 'attachment-one';
   update public.intake_events set
-    payload_hash = encode(digest(public.support_intake_canonical_json(public.support_intake_legacy_event_material(v_payload)), 'sha256'), 'hex'),
+    payload_hash = public.support_intake_sha256_hex(
+      public.support_intake_canonical_json(public.support_intake_legacy_event_material(v_payload))),
     metadata = metadata - '_canonicalVersion' where id='event-one';
   v_changed := jsonb_set(v_payload, '{conversation,subject}', '"changed-before-upgrade"');
   begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Changed legacy Event material was accepted during upgrade';
@@ -584,8 +642,8 @@ begin
   v_payload := public.supper_test_intake_rehash(v_payload);
   select * into v_result from public.support_accept_intake_event_v3(v_payload);
   if v_result.action <> 'duplicate'
-    or (select content_hash = encode(digest(public.support_intake_canonical_json(
-      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+    or (select content_hash = public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)))
       from public.intake_messages where id='message-multiple') is not true then
     raise exception 'Reversed multi-Attachment replay or persisted Message invariant failed';
   end if;
@@ -597,8 +655,8 @@ begin
   v_payload := public.supper_test_intake_rehash(v_payload);
   select * into v_result from public.support_accept_intake_event_v3(v_payload);
   if v_result.action <> 'accepted'
-    or (select content_hash = encode(digest(public.support_intake_canonical_json(
-      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+    or (select content_hash = public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)))
       from public.intake_messages where id='message-zero') is not true then
     raise exception 'Zero-Attachment persisted Message invariant failed';
   end if;
@@ -738,10 +796,25 @@ try {
   run("pg_ctl", ["-D", dataDirectory, "-l", logPath, "-o", `-F -k ${socketDirectory} -p ${port}`, "-w", "start"]);
   started = true;
   psql([], baseSchema);
+  const pgcryptoSchema = psql(["-Atc", "select namespace.nspname from pg_extension extension join pg_namespace namespace on namespace.oid=extension.extnamespace where extension.extname='pgcrypto'"]);
+  if (pgcryptoSchema !== "extensions") throw new Error(`pgcrypto is installed in ${pgcryptoSchema || "no schema"}, expected extensions`);
   const migrationDirectory = path.join(root, "supabase/migrations");
   const migrations = readdirSync(migrationDirectory).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
   const intakeReplayMigration = "202607220003_unified_intake_core_replay_corrections.sql";
   const intakeFinalMigration = "202607220004_unified_intake_core_final_integrity.sql";
+  const replayMigrationSql = readFileSync(path.join(migrationDirectory, intakeReplayMigration), "utf8");
+  const finalMigrationSql = readFileSync(path.join(migrationDirectory, intakeFinalMigration), "utf8");
+  const replayDigestCalls = [...replayMigrationSql.matchAll(/\bdigest\s*\(/giu)];
+  if (replayDigestCalls.length !== 1
+    || !/function public\.support_intake_sha256_hex\(p_value text\)[\s\S]*?return encode\(digest\(p_value, 'sha256'\), 'hex'\);/u.test(replayMigrationSql)) {
+    throw new Error("Migration 003 contains an unresolved direct pgcrypto digest call outside the portable helper");
+  }
+  if (/\bdigest\s*\(/iu.test(finalMigrationSql)) {
+    throw new Error("Migration 004 contains an unresolved direct pgcrypto digest call");
+  }
+  if (!/alter function public\.support_accept_intake_event_locked_write_impl\(jsonb\)\s+set search_path = pg_catalog, public, extensions, pg_temp;/iu.test(finalMigrationSql)) {
+    throw new Error("The legacy locked write implementation does not receive the Supabase-compatible search_path");
+  }
   for (const migration of migrations.filter((name) => name < intakeReplayMigration)) {
     psql(["-f", path.join(migrationDirectory, migration)]);
   }
@@ -749,6 +822,7 @@ try {
   psql([], legacySeedSql);
   psql(["-f", path.join(migrationDirectory, intakeReplayMigration)]);
   psql(["-f", path.join(migrationDirectory, intakeFinalMigration)]);
+  psql([], pgcryptoCompatibilitySql);
   psql([], canonicalVectorSql());
   psql([], sensitiveKeyVectorSql());
   psql([], upgradeVerificationSql);
@@ -788,12 +862,26 @@ try {
   if (serviceGrants !== functions.length) throw new Error("service_role is missing an intake RPC grant");
   const internalGrants = Number(psql(["-Atc", "select count(*) from information_schema.routine_privileges where routine_schema='public' and routine_name in ('support_accept_intake_event_final_impl','support_accept_intake_event_locked_write_impl') and grantee in ('PUBLIC','anon','authenticated','service_role') and privilege_type='EXECUTE'"]));
   if (internalGrants !== 0) throw new Error("An internal intake acceptance implementation is directly executable");
+  const helperGrants = Number(psql(["-Atc", "select count(*) from information_schema.routine_privileges where routine_schema='public' and routine_name='support_intake_sha256_hex' and grantee in ('PUBLIC','anon','authenticated','service_role') and privilege_type='EXECUTE'"]));
+  if (helperGrants !== 0) throw new Error("The portable SHA-256 helper is directly executable outside its owner");
+  const expectedSearchPath = "search_path=pg_catalog, public, extensions, pg_temp";
+  const helperSearchPath = psql(["-Atc", "select array_to_string(proconfig, ',') from pg_proc where oid='public.support_intake_sha256_hex(text)'::regprocedure"]);
+  if (helperSearchPath !== expectedSearchPath) throw new Error(`Portable SHA-256 helper has an unsafe search_path: ${helperSearchPath}`);
+  const legacySearchPath = psql(["-Atc", "select array_to_string(proconfig, ',') from pg_proc where oid='public.support_accept_intake_event_locked_write_impl(jsonb)'::regprocedure"]);
+  if (legacySearchPath !== expectedSearchPath) throw new Error(`Legacy locked write implementation has an unsafe search_path: ${legacySearchPath}`);
+  const unsafePgcryptoFunctions = psql(["-Atc", `select coalesce(string_agg(procedure.proname, ',' order by procedure.proname), '')
+    from pg_proc procedure join pg_namespace namespace on namespace.oid=procedure.pronamespace
+    where namespace.nspname='public' and procedure.prokind='f'
+      and procedure.proname like 'support_%intake%'
+      and procedure.prosrc ~ '\\mdigest[[:space:]]*\\('
+      and (procedure.proconfig is null or not ('${expectedSearchPath}' = any(procedure.proconfig)))`]);
+  if (unsafePgcryptoFunctions) throw new Error(`Intake functions contain unresolved pgcrypto calls: ${unsafePgcryptoFunctions}`);
   const deliveryTriggerCount = Number(psql(["-Atc", "select count(*) from pg_trigger where tgrelid='public.intake_events'::regclass and tgname='support_intake_event_delivery_ledger' and not tgisinternal"]));
   if (deliveryTriggerCount !== 0) throw new Error("Legacy Event delivery trigger is still active");
   const versions = psql(["-Atc", "select string_agg(version, ',' order by version) from public.support_schema_migrations where version in ('202607220001','202607220002','202607220003','202607220004')"]);
   if (versions !== "202607220001,202607220002,202607220003,202607220004") throw new Error("Intake migration versions were not recorded");
 
-  const migration = readFileSync(path.join(migrationDirectory, intakeFinalMigration), "utf8");
+  const migration = finalMigrationSql;
   if (/integration_channels[^;]{0,500}for update/is.test(migration)) throw new Error("Event acceptance still serializes the whole Channel row");
   for (const scope of ["intake-event:", "intake-message:", "intake-conversation:", "intake-identity:", "intake-attachment:"]) {
     if (!migration.includes(scope)) throw new Error(`Missing scoped concurrency lock: ${scope}`);
@@ -815,7 +903,7 @@ try {
   if (binaryColumns !== 0) throw new Error("Unified Intake added Attachment byte storage");
   if (Number(psql(["-Atc", "select count(*) from public.support_tickets"])) !== 0) throw new Error("Unified Intake created a SUPPER Ticket");
 
-  console.log("Unified intake final integrity migrations upgraded real 1.3.1 state and reapplied safely; shared credential fixtures, immutable Attachment hashes, duplicate rejection, persisted Message reconstruction, current delivery context, scoped concurrency, grants, and intent-only behavior passed.");
+  console.log("Unified intake final integrity migrations upgraded real 1.3.1 state under a Supabase-style extensions.pgcrypto layout and reapplied safely; portable hashing, all acceptance RPC generations, immutable Attachment hashes, duplicate rejection, persisted Message reconstruction, current delivery context, scoped concurrency, grants, and intent-only behavior passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) if (existsSync(target)) rmSync(target, { recursive: true, force: true });

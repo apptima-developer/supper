@@ -119,7 +119,11 @@ Do not use REST/service-role endpoints for DDL. Do not run this migration agains
 
 ## Applying AI-1.3.2 replay corrections
 
-Migrations `202607220001` and `202607220002` remain immutable. Apply the new forward-only, idempotent `supabase/migrations/202607220003_unified_intake_core_replay_corrections.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220003`, backfills immutable Attachment source hashes and initial delivery rows without deleting intake state, and adds service-role-only v2 RPCs. Repository verification never connects to Supabase.
+Migrations `202607220001` and `202607220002` remain immutable. Hosted Supabase commonly installs `pgcrypto` in the `extensions` schema rather than `public`; intake hashing therefore routes through the internal `support_intake_sha256_hex(text)` helper whose controlled search path supports either layout. Do not relocate the extension, change Supabase-managed ownership, or add a `public.digest` wrapper.
+
+The isolated `supper-ai-dev` migration ledger was explicitly verified to contain `202607220001` and `202607220002` only. The first attempt to apply `202607220003` failed transactionally before commit, and `202607220004` had never been attempted, so these two unapplied source migrations were amended for schema portability. No already-applied migration was rewritten. After successful application, treat both files as immutable.
+
+Apply the forward-only, idempotent `supabase/migrations/202607220003_unified_intake_core_replay_corrections.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220003`, backfills immutable Attachment source hashes and initial delivery rows without deleting intake state, and adds service-role-only v2 RPCs. Repository verification uses a disposable local PostgreSQL cluster with `pgcrypto` installed in `extensions`; it never connects to Supabase.
 
 1. Confirm the selected project name/ref is `supper-ai-dev`, not production, and take the normal recovery checkpoint.
 2. Deploy no application code yet. Run `npm ci`, the full test/lint/build suite, `npm run verify:migrations`, and `npm run verify:intake-core-sql` from the exact commit. The SQL verifier uses a disposable local PostgreSQL cluster.
@@ -160,7 +164,9 @@ Expected: versions `202607220001`, `202607220002`, and `202607220003`; RLS true;
 
 ## Applying AI-1.3.3 final integrity corrections
 
-Migrations `202607220001`, `202607220002`, and `202607220003` are immutable. Apply the forward-only, idempotent `supabase/migrations/202607220004_unified_intake_core_final_integrity.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220004`, preserves existing intake rows and lifecycle state, routes legacy/v2/v3 Event acceptance through one lock coordinator, rejects duplicate Attachment identities, protects both immutable Attachment hashes, verifies persisted Message reconstruction before commit, and records current delivery request context without a table trigger.
+Migrations `202607220001` and `202607220002` are immutable. As documented above, `202607220003` and `202607220004` were amended only while both remained unapplied on the verified isolated target. Migration 004 gives the renamed migration-002 write implementation the controlled `pg_catalog, public, extensions, pg_temp` search path because that preserved function body still contains its original unqualified pgcrypto calls.
+
+Apply the forward-only, idempotent `supabase/migrations/202607220004_unified_intake_core_final_integrity.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220004`, preserves existing intake rows and lifecycle state, routes legacy/v2/v3 Event acceptance through one lock coordinator, rejects duplicate Attachment identities, protects both immutable Attachment hashes, verifies persisted Message reconstruction before commit, and records current delivery request context without a table trigger.
 
 1. Confirm the project name/ref is exactly the isolated `supper-ai-dev` target, never production, and take the normal recovery checkpoint.
 2. From the exact `ai_development` commit run the complete acceptance command set, especially `npm run verify:migrations` and `npm run verify:intake-core-sql`. The SQL verifier builds representative 1.3.1 state under migration 002 before applying 003 and 004, then reapplies both corrections.

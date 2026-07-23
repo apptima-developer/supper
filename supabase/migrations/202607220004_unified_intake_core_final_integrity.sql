@@ -1,5 +1,5 @@
 -- SUPPER AI-1.3.3: final replay, Attachment, delivery-ledger, and lock integrity.
--- Forward-only correction for immutable migrations 202607220001 through 202607220003.
+-- Forward-only correction following migrations 202607220001 through 202607220003.
 -- No provider transport, Ticket creation, object bytes, worker, or outbound call is added.
 
 begin;
@@ -118,6 +118,9 @@ begin
 end;
 $$;
 
+alter function public.support_accept_intake_event_locked_write_impl(jsonb)
+  set search_path = pg_catalog, public, extensions, pg_temp;
+
 revoke all privileges on function public.support_accept_intake_event_locked_write_impl(jsonb) from public;
 
 create or replace function public.support_accept_intake_event_final_impl(p_payload jsonb)
@@ -173,8 +176,8 @@ begin
   end if;
 
   v_received_at := public.support_intake_parse_timestamp(p_payload#>>'{event,receivedAt}', 'INTAKE_PAYLOAD_INVALID');
-  v_event_hash := encode(digest(public.support_intake_canonical_json(
-    public.support_intake_event_material(p_payload)), 'sha256'), 'hex');
+  v_event_hash := public.support_intake_sha256_hex(public.support_intake_canonical_json(
+    public.support_intake_event_material(p_payload)));
 
   -- Global lock order: Event, Message, Conversation, Identity, sorted Attachments.
   perform pg_advisory_xact_lock(hashtextextended('intake-event:' || v_channel.id || ':' || (p_payload#>>'{event,externalEventId}'), 0));
@@ -183,8 +186,8 @@ begin
     and event_record.external_event_id = p_payload#>>'{event,externalEventId}' for update;
   if v_event.id is not null and v_event.payload_hash <> v_event_hash
     and coalesce(v_event.metadata->>'_canonicalVersion', '') <> '2' then
-    v_legacy_event_hash := encode(digest(public.support_intake_canonical_json(
-      public.support_intake_legacy_event_material(p_payload)), 'sha256'), 'hex');
+    v_legacy_event_hash := public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_legacy_event_material(p_payload)));
     if v_event.payload_hash <> v_legacy_event_hash then
       raise exception using errcode = '23505', message = 'INTAKE_EVENT_REPLAY_MISMATCH';
     end if;
@@ -249,8 +252,8 @@ begin
   select * into v_result from public.support_accept_intake_event_locked_write_impl(v_ordered_payload);
 
   select message_record.content_hash,
-    encode(digest(public.support_intake_canonical_json(
-      public.support_intake_persisted_message_material(message_record.id)), 'sha256'), 'hex')
+    public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(message_record.id)))
   into v_persisted_content_hash, v_persisted_message_hash
   from public.intake_messages message_record where message_record.id = v_result.message_id;
   if v_persisted_content_hash is null or v_persisted_message_hash is null
@@ -299,6 +302,7 @@ do $$
 declare v_signature regprocedure;
 begin
   foreach v_signature in array array[
+    'public.support_intake_sha256_hex(text)'::regprocedure,
     'public.support_intake_classify_key(text)'::regprocedure,
     'public.support_intake_set_attachment_source_hash()'::regprocedure,
     'public.support_record_intake_event_delivery()'::regprocedure,

@@ -4,6 +4,23 @@
 
 begin;
 
+-- Hosted Supabase commonly installs pgcrypto in the extensions schema. Keep the
+-- schema-specific lookup in one internal helper instead of assuming public.digest.
+create or replace function public.support_intake_sha256_hex(p_value text)
+returns text
+language plpgsql
+immutable
+parallel safe
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+begin
+  return encode(digest(p_value, 'sha256'), 'hex');
+end;
+$$;
+
+revoke all privileges on function public.support_intake_sha256_hex(text)
+  from public, anon, authenticated, service_role;
+
 create or replace function public.support_intake_compact_key(p_value text)
 returns text language sql immutable parallel safe set search_path = pg_catalog, public, pg_temp
 as $$
@@ -233,7 +250,8 @@ as $$ select public.support_intake_attachment_source_material(p_attachment); $$;
 create or replace function public.support_intake_attachment_source_hash(p_attachment jsonb)
 returns text language sql immutable parallel safe set search_path = pg_catalog, public, pg_temp
 as $$
-  select encode(digest(public.support_intake_canonical_json(public.support_intake_attachment_source_material(p_attachment)), 'sha256'), 'hex');
+  select public.support_intake_sha256_hex(
+    public.support_intake_canonical_json(public.support_intake_attachment_source_material(p_attachment)));
 $$;
 
 create or replace function public.support_intake_sorted_attachment_material(p_payload jsonb)
@@ -413,10 +431,10 @@ as $$
 $$;
 
 update public.intake_messages message_record
-set content_hash = encode(digest(public.support_intake_canonical_json(
-  public.support_intake_persisted_message_material(message_record.id)), 'sha256'), 'hex')
-where message_record.content_hash is distinct from encode(digest(public.support_intake_canonical_json(
-  public.support_intake_persisted_message_material(message_record.id)), 'sha256'), 'hex');
+set content_hash = public.support_intake_sha256_hex(public.support_intake_canonical_json(
+  public.support_intake_persisted_message_material(message_record.id)))
+where message_record.content_hash is distinct from public.support_intake_sha256_hex(
+  public.support_intake_canonical_json(public.support_intake_persisted_message_material(message_record.id)));
 
 create or replace function public.support_get_intake_operations_summary()
 returns table (
@@ -495,13 +513,14 @@ begin
     end if;
   end loop;
 
-  v_event_hash := encode(digest(public.support_intake_canonical_json(public.support_intake_event_material(p_payload)), 'sha256'), 'hex');
+  v_event_hash := public.support_intake_sha256_hex(
+    public.support_intake_canonical_json(public.support_intake_event_material(p_payload)));
   select * into v_event from public.intake_events event_record
   where event_record.channel_id = v_channel.id and event_record.external_event_id = p_payload#>>'{event,externalEventId}' for update;
   if v_event.id is not null and v_event.payload_hash <> v_event_hash
     and coalesce(v_event.metadata->>'_canonicalVersion', '') <> '2' then
-    v_legacy_event_hash := encode(digest(public.support_intake_canonical_json(
-      public.support_intake_legacy_event_material(p_payload)), 'sha256'), 'hex');
+    v_legacy_event_hash := public.support_intake_sha256_hex(public.support_intake_canonical_json(
+      public.support_intake_legacy_event_material(p_payload)));
     if v_event.payload_hash <> v_legacy_event_hash then
       raise exception using errcode = '23505', message = 'INTAKE_EVENT_REPLAY_MISMATCH';
     end if;
@@ -646,6 +665,7 @@ do $$
 declare v_signature regprocedure;
 begin
   foreach v_signature in array array[
+    'public.support_intake_sha256_hex(text)'::regprocedure,
     'public.support_intake_compact_key(text)'::regprocedure,
     'public.support_intake_classify_key(text)'::regprocedure,
     'public.support_intake_key_is_unsafe(text)'::regprocedure,
@@ -690,6 +710,8 @@ comment on function public.support_accept_intake_event_v2(jsonb) is
   'AI-1.3.2 canonical replay acceptance with immutable Attachment source identity and chronological delivery ledger.';
 comment on function public.support_transition_intake_conversation_v2(jsonb) is
   'AI-1.3.2 compare-and-swap transition; current-version same-state requests are unchanged and create no history.';
+comment on function public.support_intake_sha256_hex(text) is
+  'Internal portable SHA-256 helper for pgcrypto installed in either extensions or public.';
 
 insert into public.support_schema_migrations (version, description, checksum, applied_by)
 values ('202607220003', 'AI-1.3.2 canonical replay and event metric corrections', null, current_user)
