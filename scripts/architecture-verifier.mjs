@@ -13,6 +13,7 @@ const expectedMigrations = Object.freeze([
   "202607220002_unified_intake_core_corrections.sql",
   "202607220003_unified_intake_core_replay_corrections.sql",
   "202607220004_unified_intake_core_final_integrity.sql",
+  "202607230001_servicenow_write_kernel.sql",
 ]);
 
 const domainFiles = Object.freeze([

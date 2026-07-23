@@ -207,3 +207,15 @@ order by routine_name, grantee;
 ```
 
 Expected: versions `202607220001` through `202607220004`; `attachment_hash_integrity_failures=0`; `legacy_delivery_triggers=0`; only `service_role` can execute the three public acceptance RPC generations; neither private implementation is directly executable. No table is dropped, no intake row or lifecycle state is deleted, and no provider operation is performed.
+
+## Applying AI-2.0 ServiceNow write kernel
+
+Apply the forward-only, idempotent `supabase/migrations/202607230001_servicenow_write_kernel.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607230001`, creates five RLS-protected write-kernel tables, and exposes three service-role-only atomic command/attempt RPCs. It contains no credentials, does not alter existing intake or read-side synchronization rows, and performs no ServiceNow request.
+
+1. Confirm migration versions `202607220001` through `202607220004` are present and take the normal dev recovery checkpoint.
+2. From the exact source revision run the full acceptance suite, including `npm run verify:migrations`, `npm run verify:architecture`, and `npm run verify:servicenow-write-sql`.
+3. In the isolated dev SQL Editor, paste and execute the complete unmodified migration once. Do not concatenate it with another migration, apply it through REST, or target production.
+4. Confirm version `202607230001`, RLS on all `servicenow_write_*` tables, and execution grants only for `service_role`.
+5. Deploy the exact `ai_development` revision with live writes disabled and follow the smoke sequence in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
+
+After application this migration is immutable. Correct future defects with a new forward-only migration; do not drop command or attempt history as a rollback mechanism.

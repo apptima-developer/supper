@@ -42,6 +42,8 @@ Required production variable names:
 
 Optional request-limit variables are `MAX_JSON_BODY_KB`, `MAX_IMPORT_FILE_MB`, and `MAX_INLINE_IMAGE_MB`.
 
+AI-2.0 adds optional ServiceNow write controls. `SERVICENOW_WRITE_ENABLED` defaults to false and gates only live provider mutation; `SERVICENOW_WRITE_MAX_ATTEMPTS` defaults to 3 and is bounded from 1 through 10. Follow the isolated-dev migration and manual acceptance sequence in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md) before enabling the switch.
+
 Optional build metadata variables:
 
 - `APP_BUILD_SHA`

@@ -125,3 +125,9 @@ B2 adds no environment variable, database migration, Supabase access, filesystem
 The additive provider vocabulary now also accepts `line`, `web`, and `freshservice`; existing provider identifiers remain unchanged. The bounded ordinary intake-channel subset is `email`, `line`, `web`, and `internal`. ServiceNow and Freshservice identify integration targets but are not customer-intake channels in AI-1.3.
 
 Normalized intake persistence lives in the separate `src/lib/intake-core/` module described in [Unified Intake Core](unified-intake-core.md). No provider client was added. Future adapters must terminate transport authentication and signature verification before calling the strict normalized acceptance schema and atomic service-role RPC.
+
+## AI-2.0 extension
+
+The operation vocabulary now also accepts `ticket.create`, `ticket.update`, `ticket.comment`, and `ticket.work_note`. These operations are implemented only by the isolated, server-side [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md); their presence does not authorize another connector to write.
+
+The write kernel preserves the boundary rules: strict input schemas, deterministic idempotency, correlation IDs, bounded errors, server-only credentials, explicit field mapping, and sanitized request/response summaries. It adds no queue, automatic intake trigger, attachment transport, webhook, scheduler, or public provider endpoint.

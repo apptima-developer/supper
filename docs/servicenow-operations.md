@@ -6,6 +6,8 @@ AI-1.2 adds an administrator operations layer over the existing manual, read-onl
 
 The protected page is **Settings → ServiceNow integration → Open Operations** at `/settings/integrations/servicenow`. An active SUPPER session with `settings:manage` is required by both the page and every operations API.
 
+AI-2.0 adds a separate protected **Write controls** page at `/settings/integrations/servicenow/write`. The read operations documented here remain read-only and unchanged. Live write execution is disabled by default and is documented in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
+
 ## Page architecture
 
 The page has four sections:

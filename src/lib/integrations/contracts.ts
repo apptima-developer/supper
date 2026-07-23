@@ -8,6 +8,10 @@ export const integrationOperations = [
   "provider.test",
   "ticket.list",
   "ticket.read",
+  "ticket.create",
+  "ticket.update",
+  "ticket.comment",
+  "ticket.work_note",
   "event.handle",
 ] as const;
 export type IntegrationOperation = (typeof integrationOperations)[number];
