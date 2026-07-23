@@ -41,6 +41,7 @@ function sleep(milliseconds) {
 }
 
 const canonicalVectors = JSON.parse(readFileSync(path.join(root, "src/lib/intake-core/canonical-vectors.json"), "utf8"));
+const sensitiveKeyVectors = JSON.parse(readFileSync(path.join(root, "src/lib/intake-core/sensitive-key-vectors.json"), "utf8"));
 
 function canonicalVectorSql() {
   const validChecks = canonicalVectors.filter((vector) => vector.valid).map((vector, index) => {
@@ -71,6 +72,21 @@ $invalid_vector_${index}$;`).join("\n");
   return `${validChecks}\n${invalidChecks}`;
 }
 
+function sensitiveKeyVectorSql() {
+  const checks = [
+    ...sensitiveKeyVectors.reject.map((key) => ({ key, expected: "sensitive" })),
+    ...sensitiveKeyVectors.accept.map((key) => ({ key, expected: "safe" })),
+  ];
+  return checks.map(({ key, expected }, index) => String.raw`
+do $key_vector_${index}$
+begin
+  if public.support_intake_classify_key('${key.replaceAll("'", "''")}') <> '${expected}' then
+    raise exception 'Sensitive-key classification mismatch: ${key}';
+  end if;
+end;
+$key_vector_${index}$;`).join("\n");
+}
+
 const baseSchema = String.raw`
 create role anon nologin;
 create role authenticated nologin;
@@ -87,7 +103,7 @@ create table public.support_customers (
 );
 `;
 
-const acceptanceSql = String.raw`
+const fixtureSql = String.raw`
 insert into public.support_customers (id, customer_key, customer_name, project_code, active, data) values
   ('customer-a', 'customer-a', 'Customer A', 'A-001', true, '{"key":"customer-a"}'),
   ('customer-inactive', 'customer-inactive', 'Inactive', 'I-001', false, '{"key":"customer-inactive"}');
@@ -138,27 +154,109 @@ begin
 end;
 $$;
 
+create or replace function public.supper_test_intake_two_attachment_payload(
+  p_suffix text, p_external_event text, p_external_conversation text,
+  p_external_subject text, p_external_message text,
+  p_external_attachment_a text, p_external_attachment_b text,
+  p_reverse boolean default false
+) returns jsonb language plpgsql as $$
+declare v_value jsonb; v_first jsonb; v_second jsonb;
+begin
+  v_value := public.supper_test_intake_payload(p_suffix, p_external_event, p_external_conversation,
+    p_external_subject, p_external_message, p_external_attachment_a);
+  v_first := (v_value#>'{attachments,0}') || jsonb_build_object(
+    'id','attachment-' || p_suffix || '-a','externalAttachmentId',p_external_attachment_a);
+  v_second := (v_value#>'{attachments,0}') || jsonb_build_object(
+    'id','attachment-' || p_suffix || '-b','externalAttachmentId',p_external_attachment_b);
+  v_value := jsonb_set(v_value, '{attachments}', case when p_reverse
+    then jsonb_build_array(v_second, v_first) else jsonb_build_array(v_first, v_second) end);
+  return public.supper_test_intake_rehash(v_value);
+end;
+$$;
+
+`;
+
+const legacySeedSql = String.raw`
+do $$
+declare v_result record;
+begin
+  select * into v_result from public.support_accept_intake_event(public.supper_test_intake_payload(
+    'upgrade','external-event-upgrade','external-conversation-upgrade','external-subject-upgrade',
+    'external-message-upgrade','external-attachment-upgrade'));
+  if v_result.action <> 'accepted' then raise exception 'Legacy intake seed was not accepted'; end if;
+  update public.intake_attachments set storage_status='stored', storage_object_key='upgrade-object-key',
+    scan_status='clean', retention_until='2027-07-22T00:00:00.000Z' where id='attachment-upgrade';
+  if (select count(*) from public.intake_events where id='event-upgrade') <> 1
+    or (select count(*) from public.integration_external_identities where id='identity-upgrade') <> 1
+    or (select count(*) from public.intake_conversations where id='conversation-upgrade') <> 1
+    or (select count(*) from public.intake_messages where id='message-upgrade') <> 1
+    or (select count(*) from public.intake_attachments where id='attachment-upgrade') <> 1
+    or (select count(*) from public.intake_sessions where id='session-upgrade') <> 1 then
+    raise exception 'Legacy representative state was incomplete';
+  end if;
+end;
+$$;
+`;
+
+const upgradeVerificationSql = String.raw`
+do $$
+declare v_replay record; v_payload jsonb;
+begin
+  if (select storage_status from public.intake_attachments where id='attachment-upgrade') <> 'stored'
+    or (select scan_status from public.intake_attachments where id='attachment-upgrade') <> 'clean'
+    or (select storage_object_key from public.intake_attachments where id='attachment-upgrade') <> 'upgrade-object-key'
+    or (select source_material_hash = canonical_hash from public.intake_attachments where id='attachment-upgrade') is not true
+    or (select content_hash = encode(digest(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+      from public.intake_messages where id='message-upgrade') is not true
+    or (select count(*) from public.intake_event_deliveries where event_id='event-upgrade' and delivery_number=1) <> 1 then
+    raise exception 'Forward migration lost or failed to backfill representative state';
+  end if;
+
+  v_payload := public.supper_test_intake_payload(
+    'upgrade','external-event-upgrade','external-conversation-upgrade','external-subject-upgrade',
+    'external-message-upgrade','external-attachment-upgrade');
+  v_payload := jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:11:00.000Z"');
+  v_payload := jsonb_set(v_payload, '{event,requestId}', '"request-upgrade-current"');
+  v_payload := jsonb_set(v_payload, '{event,correlationId}', '"correlation-upgrade-current"');
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  select * into v_replay from public.support_accept_intake_event_v3(v_payload);
+  if v_replay.action <> 'duplicate' or v_replay.delivery_count <> 2
+    or (select request_id from public.intake_event_deliveries where event_id='event-upgrade' and delivery_number=2) <> 'request-upgrade-current'
+    or (select correlation_id from public.intake_event_deliveries where event_id='event-upgrade' and delivery_number=2) <> 'correlation-upgrade-current'
+    or (select received_at from public.intake_event_deliveries where event_id='event-upgrade' and delivery_number=2) <> '2026-07-22T00:11:00.000Z'::timestamptz then
+    raise exception 'Upgraded replay or current delivery context failed';
+  end if;
+end;
+$$;
+`;
+
+const acceptanceSql = String.raw`
+
 do $$
 declare
   v_payload jsonb := public.supper_test_intake_payload('one','external-event-one','external-conversation-one','external-subject-one','external-message-one','external-attachment-one');
   v_changed jsonb; v_first record; v_replay record; v_duplicate_message record; v_key text; v_source_hash text;
 begin
-  select * into v_first from public.support_accept_intake_event_v2(v_payload);
+  select * into v_first from public.support_accept_intake_event_v3(v_payload);
   select source_material_hash into v_source_hash from public.intake_attachments where id = 'attachment-one';
   update public.intake_events set
     payload_hash = encode(digest(public.support_intake_canonical_json(public.support_intake_legacy_event_material(v_payload)), 'sha256'), 'hex'),
     metadata = metadata - '_canonicalVersion' where id='event-one';
   v_changed := jsonb_set(v_payload, '{conversation,subject}', '"changed-before-upgrade"');
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Changed legacy Event material was accepted during upgrade';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Changed legacy Event material was accepted during upgrade';
   exception when unique_violation then if sqlerrm <> 'INTAKE_EVENT_REPLAY_MISMATCH' then raise; end if; end;
-  select * into v_replay from public.support_accept_intake_event_v2(jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:05:00.000Z"'));
+  select * into v_replay from public.support_accept_intake_event_v3(jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:05:00.000Z"'));
   if v_first.action <> 'accepted' or v_replay.action <> 'duplicate' or v_replay.delivery_count <> 2 then raise exception 'Event replay result failed'; end if;
   if (select processing_status from public.intake_events where id = 'event-one') <> 'accepted'
     or (select duplicate_delivery_count from public.intake_events where id = 'event-one') <> 1 then raise exception 'Accepted Event status was overwritten by redelivery'; end if;
-  if (select count(*) from public.intake_messages) <> 1 or (select count(*) from public.intake_attachments) <> 1 then raise exception 'Replay duplicated normalized records'; end if;
+  if (select count(*) from public.intake_messages where id='message-one') <> 1
+    or (select count(*) from public.intake_attachments where id='attachment-one') <> 1 then
+    raise exception 'Replay duplicated normalized records';
+  end if;
   update public.intake_attachments set storage_status='stored', storage_object_key='opaque-diagnostic-key',
     scan_status='clean', retention_until='2027-07-22T00:00:00.000Z' where id='attachment-one';
-  select * into v_replay from public.support_accept_intake_event_v2(jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:10:00.000Z"'));
+  select * into v_replay from public.support_accept_intake_event_v3(jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:10:00.000Z"'));
   if v_replay.action <> 'duplicate' or v_replay.delivery_count <> 3
     or (select source_material_hash from public.intake_attachments where id='attachment-one') <> v_source_hash
     or (select canonical_hash from public.intake_attachments where id='attachment-one') <> v_source_hash
@@ -175,11 +273,11 @@ begin
   end if;
 
   v_changed := public.supper_test_intake_rehash(jsonb_set(v_payload, '{conversation,subject}', '"changed"'));
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Event mismatch accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Event mismatch accepted';
   exception when unique_violation then if sqlerrm <> 'INTAKE_EVENT_REPLAY_MISMATCH' then raise; end if; end;
 
   v_changed := public.supper_test_intake_payload('message-exact','external-event-message-exact','external-conversation-one','external-subject-one','external-message-one','external-attachment-one');
-  select * into v_duplicate_message from public.support_accept_intake_event_v2(v_changed);
+  select * into v_duplicate_message from public.support_accept_intake_event_v3(v_changed);
   if v_duplicate_message.action <> 'duplicate_message' or v_duplicate_message.conversation_id <> 'conversation-one'
     or v_duplicate_message.identity_id <> 'identity-one' then raise exception 'Exact Message replay did not reuse persisted identity'; end if;
 
@@ -193,13 +291,13 @@ begin
     if v_key = 'reply' then v_changed := jsonb_set(v_changed, '{message,replyToMessageId}', '"message-other"'); end if;
     if v_key = 'structured' then v_changed := jsonb_set(v_changed, '{message,structuredContent}', '{"kind":"changed"}'); end if;
     v_changed := public.supper_test_intake_rehash(v_changed);
-    begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Message mismatch accepted: %', v_key;
+    begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Message mismatch accepted: %', v_key;
     exception when unique_violation then if sqlerrm <> 'INTAKE_MESSAGE_REPLAY_MISMATCH' then raise; end if; end;
     if exists (select 1 from public.intake_events where id = 'event-mismatch-' || v_key) then raise exception 'Rejected replay left an Event row'; end if;
   end loop;
 
   v_changed := public.supper_test_intake_payload('attachment-conflict','external-event-attachment-conflict','new-conversation','external-subject-one','new-message','external-attachment-one');
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Attachment mismatch accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Attachment mismatch accepted';
   exception when unique_violation then if sqlerrm <> 'INTAKE_ATTACHMENT_REPLAY_MISMATCH' then raise; end if; end;
   if exists (select 1 from public.intake_events where id = 'event-attachment-conflict') then raise exception 'Attachment conflict did not roll back'; end if;
 
@@ -211,7 +309,7 @@ begin
     if v_key = 'declaredSize' then v_changed := jsonb_set(v_changed, '{attachments,0,declaredSize}', '129'); end if;
     if v_key = 'sha256' then v_changed := jsonb_set(v_changed, '{attachments,0,sha256}', to_jsonb(repeat('a',64))); end if;
     v_changed := public.supper_test_intake_rehash(v_changed);
-    begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Attachment material mismatch accepted: %', v_key;
+    begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Attachment material mismatch accepted: %', v_key;
     exception when unique_violation then if sqlerrm <> 'INTAKE_ATTACHMENT_REPLAY_MISMATCH' then raise; end if; end;
   end loop;
 
@@ -223,17 +321,17 @@ begin
       'message-secret-' || replace(v_key,'-',''), 'attachment-secret-' || replace(v_key,'-',''));
     v_changed := jsonb_set(v_changed, '{message,structuredContent}', jsonb_build_object(v_key, 'forbidden'));
     v_changed := public.supper_test_intake_rehash(v_changed);
-    begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Sensitive key accepted: %', v_key;
+    begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Sensitive key accepted: %', v_key;
     exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_SENSITIVE_DATA_REJECTED' then raise; end if; end;
   end loop;
 
   v_changed := public.supper_test_intake_rehash(jsonb_set(v_payload, '{event,receivedAt}', '"not-a-timestamp"'));
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Malformed timestamp accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Malformed timestamp accepted';
   exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_PAYLOAD_INVALID' then raise; end if; end;
 
   v_changed := jsonb_set(public.supper_test_intake_payload('fractional','external-event-fractional','conversation-fractional',
     'subject-fractional','message-fractional','attachment-fractional'), '{message,structuredContent}', '{"value":1.5}'::jsonb);
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Fractional canonical number accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Fractional canonical number accepted';
   exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_CANONICAL_NUMBER_INVALID' then raise; end if; end;
 
   foreach v_key in array array['tokenizer','secretariat','monkey','keyboard'] loop
@@ -242,12 +340,12 @@ begin
   v_changed := jsonb_set(public.supper_test_intake_payload('nested-secret','external-event-nested-secret','conversation-nested-secret',
     'subject-nested-secret','message-nested-secret','attachment-nested-secret'), '{message,structuredContent}',
     '{"outer":[{"apikey":"forbidden"}]}'::jsonb);
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Nested compact sensitive key accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Nested compact sensitive key accepted';
   exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_SENSITIVE_DATA_REJECTED' then raise; end if; end;
   v_changed := jsonb_set(public.supper_test_intake_payload('unsafe-number','external-event-unsafe-number','conversation-unsafe-number',
     'subject-unsafe-number','message-unsafe-number','attachment-unsafe-number'), '{message,structuredContent}',
     '{"value":9007199254740992}'::jsonb);
-  begin perform * from public.support_accept_intake_event_v2(v_changed); raise exception 'Unsafe canonical integer accepted';
+  begin perform * from public.support_accept_intake_event_v3(v_changed); raise exception 'Unsafe canonical integer accepted';
   exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_CANONICAL_NUMBER_INVALID' then raise; end if; end;
 end;
 $$;
@@ -410,6 +508,144 @@ end;
 $$;
 `;
 
+const finalIntegritySql = String.raw`
+do $$
+declare
+  v_payload jsonb; v_second jsonb; v_result record; v_before jsonb; v_after jsonb;
+  v_good_hash text; v_bad_hash text := repeat('f', 64);
+begin
+  -- Direct source-hash or canonical-hash changes are replay mismatches.
+  select source_material_hash into v_good_hash from public.intake_attachments where id='attachment-one';
+  begin update public.intake_attachments set source_material_hash=v_bad_hash where id='attachment-one';
+    raise exception 'Direct source_material_hash mutation succeeded';
+  exception when unique_violation then if sqlerrm <> 'INTAKE_ATTACHMENT_REPLAY_MISMATCH' then raise; end if; end;
+  begin update public.intake_attachments set canonical_hash=v_bad_hash where id='attachment-one';
+    raise exception 'Direct canonical_hash mutation succeeded';
+  exception when unique_violation then if sqlerrm <> 'INTAKE_ATTACHMENT_REPLAY_MISMATCH' then raise; end if; end;
+
+  -- A pre-existing corrupt source identity must be surfaced, never silently blessed.
+  alter table public.intake_attachments disable trigger support_intake_attachment_source_hash_guard;
+  update public.intake_attachments set source_material_hash=v_bad_hash, canonical_hash=v_bad_hash where id='attachment-one';
+  alter table public.intake_attachments enable trigger support_intake_attachment_source_hash_guard;
+  begin update public.intake_attachments set scan_status='not_scanned' where id='attachment-one';
+    raise exception 'Corrupt Attachment state was silently accepted';
+  exception when data_corrupted then if sqlerrm <> 'INTAKE_STORAGE_INTEGRITY_ERROR' then raise; end if; end;
+  alter table public.intake_attachments disable trigger support_intake_attachment_source_hash_guard;
+  update public.intake_attachments set source_material_hash=v_good_hash, canonical_hash=v_good_hash where id='attachment-one';
+  alter table public.intake_attachments enable trigger support_intake_attachment_source_hash_guard;
+
+  select jsonb_build_object(
+    'events',(select count(*) from public.intake_events),
+    'messages',(select count(*) from public.intake_messages),
+    'attachments',(select count(*) from public.intake_attachments),
+    'sessions',(select count(*) from public.intake_sessions),
+    'deliveries',(select count(*) from public.intake_event_deliveries)) into v_before;
+
+  v_payload := public.supper_test_intake_payload('duplicate-internal','external-event-duplicate-internal',
+    'external-conversation-duplicate-internal','external-subject-duplicate-internal',
+    'external-message-duplicate-internal','external-attachment-duplicate-internal');
+  v_second := (v_payload#>'{attachments,0}') || jsonb_build_object(
+    'externalAttachmentId','external-attachment-duplicate-internal-two');
+  v_payload := jsonb_set(v_payload, '{attachments}', jsonb_build_array(v_payload#>'{attachments,0}', v_second));
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  begin perform * from public.support_accept_intake_event_v3(v_payload);
+    raise exception 'Duplicate internal Attachment ID was accepted';
+  exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT' then raise; end if; end;
+
+  v_payload := public.supper_test_intake_payload('duplicate-external','external-event-duplicate-external',
+    'external-conversation-duplicate-external','external-subject-duplicate-external',
+    'external-message-duplicate-external','external-attachment-duplicate-external');
+  v_second := (v_payload#>'{attachments,0}') || jsonb_build_object('id','attachment-duplicate-external-two');
+  v_payload := jsonb_set(v_payload, '{attachments}', jsonb_build_array(v_payload#>'{attachments,0}', v_second));
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  begin perform * from public.support_accept_intake_event_v3(v_payload);
+    raise exception 'Duplicate external Attachment ID was accepted';
+  exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT' then raise; end if; end;
+
+  select jsonb_build_object(
+    'events',(select count(*) from public.intake_events),
+    'messages',(select count(*) from public.intake_messages),
+    'attachments',(select count(*) from public.intake_attachments),
+    'sessions',(select count(*) from public.intake_sessions),
+    'deliveries',(select count(*) from public.intake_event_deliveries)) into v_after;
+  if v_after <> v_before then raise exception 'Rejected duplicate Attachment payload left partial state'; end if;
+
+  -- Equal content under different external IDs remains valid, including reversed replay order.
+  v_payload := public.supper_test_intake_payload('multiple','external-event-multiple',
+    'external-conversation-multiple','external-subject-multiple','external-message-multiple','external-attachment-multiple-a');
+  v_second := (v_payload#>'{attachments,0}') || jsonb_build_object(
+    'id','attachment-multiple-b','externalAttachmentId','external-attachment-multiple-b');
+  v_payload := jsonb_set(v_payload, '{attachments}', jsonb_build_array(v_payload#>'{attachments,0}', v_second));
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  select * into v_result from public.support_accept_intake_event_v3(v_payload);
+  if v_result.action <> 'accepted' or v_result.attachment_count <> 2 then raise exception 'Distinct multi-Attachment event failed'; end if;
+  v_payload := jsonb_set(v_payload, '{attachments}', jsonb_build_array(v_second, v_payload#>'{attachments,0}'));
+  v_payload := jsonb_set(v_payload, '{event,receivedAt}', '"2026-07-22T00:12:00.000Z"');
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  select * into v_result from public.support_accept_intake_event_v3(v_payload);
+  if v_result.action <> 'duplicate'
+    or (select content_hash = encode(digest(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+      from public.intake_messages where id='message-multiple') is not true then
+    raise exception 'Reversed multi-Attachment replay or persisted Message invariant failed';
+  end if;
+
+  -- Zero Attachment material also reconstructs exactly.
+  v_payload := public.supper_test_intake_payload('zero','external-event-zero','external-conversation-zero',
+    'external-subject-zero','external-message-zero','external-attachment-unused');
+  v_payload := jsonb_set(v_payload, '{attachments}', '[]'::jsonb);
+  v_payload := public.supper_test_intake_rehash(v_payload);
+  select * into v_result from public.support_accept_intake_event_v3(v_payload);
+  if v_result.action <> 'accepted'
+    or (select content_hash = encode(digest(public.support_intake_canonical_json(
+      public.support_intake_persisted_message_material(id)), 'sha256'), 'hex')
+      from public.intake_messages where id='message-zero') is not true then
+    raise exception 'Zero-Attachment persisted Message invariant failed';
+  end if;
+
+  -- Delivery metadata is recursively credential-safe at the database boundary.
+  begin insert into public.intake_event_deliveries
+    (id,event_id,channel_id,delivery_number,delivery_type,received_at,metadata)
+    values ('unsafe-delivery','event-one','channel-one',999,'duplicate',now(),
+      '{"nested":{"linetoken":"forbidden"}}'::jsonb);
+    raise exception 'Unsafe delivery metadata was accepted';
+  exception when invalid_parameter_value then if sqlerrm <> 'INTAKE_SENSITIVE_DATA_REJECTED' then raise; end if; end;
+end;
+$$;
+
+create or replace function public.supper_test_corrupt_new_message_hash() returns trigger language plpgsql as $$
+begin
+  if new.id = 'attachment-post-write-corrupt' then
+    update public.intake_messages set content_hash=repeat('f',64) where id=new.message_id;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists supper_test_corrupt_new_message_hash on public.intake_attachments;
+create trigger supper_test_corrupt_new_message_hash after insert on public.intake_attachments
+for each row execute function public.supper_test_corrupt_new_message_hash();
+do $$
+declare v_payload jsonb;
+begin
+  v_payload := public.supper_test_intake_payload('post-write-corrupt','external-event-post-write-corrupt',
+    'external-conversation-post-write-corrupt','external-subject-post-write-corrupt',
+    'external-message-post-write-corrupt','external-attachment-post-write-corrupt');
+  begin perform * from public.support_accept_intake_event_v3(v_payload);
+    raise exception 'Post-write Message corruption was accepted';
+  exception when data_corrupted then if sqlerrm <> 'INTAKE_STORAGE_INTEGRITY_ERROR' then raise; end if; end;
+  if exists (select 1 from public.intake_events where id='event-post-write-corrupt')
+    or exists (select 1 from public.intake_messages where id='message-post-write-corrupt')
+    or exists (select 1 from public.intake_attachments where id='attachment-post-write-corrupt')
+    or exists (select 1 from public.intake_sessions where id='session-post-write-corrupt')
+    or exists (select 1 from public.intake_event_deliveries where event_id='event-post-write-corrupt') then
+    raise exception 'Post-write Message integrity failure did not roll back';
+  end if;
+end;
+$$;
+drop trigger if exists supper_test_corrupt_new_message_hash on public.intake_attachments;
+drop function if exists public.supper_test_corrupt_new_message_hash();
+`;
+
 async function verifyUnrelatedEventConcurrency() {
   psql([], String.raw`
 create or replace function public.supper_test_intake_slow_event() returns trigger language plpgsql as $$
@@ -428,7 +664,7 @@ for each row execute function public.supper_test_intake_slow_event();
 `);
   let slow;
   try {
-    slow = psqlAsync(String.raw`select action from public.support_accept_intake_event_v2(public.supper_test_intake_payload(
+    slow = psqlAsync(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_payload(
       'concurrency-slow','external-event-concurrency-slow','external-conversation-concurrency-slow',
       'external-subject-concurrency-slow','external-message-concurrency-slow','external-attachment-concurrency-slow'));
 `);
@@ -439,7 +675,7 @@ for each row execute function public.supper_test_intake_slow_event();
     }
     if (!entered) throw new Error("Could not establish the concurrency acceptance barrier");
     const startedAt = Date.now();
-    const fastResult = psql(["-Atc", String.raw`select action from public.support_accept_intake_event_v2(public.supper_test_intake_payload(
+    const fastResult = psql(["-Atc", String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_payload(
       'concurrency-fast','external-event-concurrency-fast','external-conversation-concurrency-fast',
       'external-subject-concurrency-fast','external-message-concurrency-fast','external-attachment-concurrency-fast'))`]);
     const elapsed = Date.now() - startedAt;
@@ -452,6 +688,50 @@ for each row execute function public.supper_test_intake_slow_event();
   }
 }
 
+async function verifyGlobalLockOrderConcurrency() {
+  const timed = (sql) => psqlAsync(`\\pset tuples_only on\n\\pset format unaligned\nset statement_timeout='5s';\n${sql}`)
+    .then((output) => output.split("\n").at(-1)?.trim());
+
+  const sameEvent = await Promise.all([
+    timed(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_two_attachment_payload(
+      'lock-same-a','external-event-lock-same','external-conversation-lock-same','external-subject-lock-same',
+      'external-message-lock-same','external-attachment-lock-same-a','external-attachment-lock-same-b',false));`),
+    timed(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_two_attachment_payload(
+      'lock-same-b','external-event-lock-same','external-conversation-lock-same','external-subject-lock-same',
+      'external-message-lock-same','external-attachment-lock-same-a','external-attachment-lock-same-b',true));`),
+  ]);
+  if (sameEvent.sort().join(",") !== "accepted,duplicate") {
+    throw new Error(`Same Event reversed-Attachment concurrency failed: ${sameEvent.join(",")}`);
+  }
+
+  const sharedAttachments = await Promise.allSettled([
+    timed(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_two_attachment_payload(
+      'lock-shared-a','external-event-lock-shared-a','external-conversation-lock-shared-a','external-subject-lock-shared-a',
+      'external-message-lock-shared-a','external-attachment-lock-shared-a','external-attachment-lock-shared-b',false));`),
+    timed(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_two_attachment_payload(
+      'lock-shared-b','external-event-lock-shared-b','external-conversation-lock-shared-b','external-subject-lock-shared-b',
+      'external-message-lock-shared-b','external-attachment-lock-shared-a','external-attachment-lock-shared-b',true));`),
+  ]);
+  const acceptedShared = sharedAttachments.filter((result) => result.status === "fulfilled" && result.value === "accepted");
+  const rejectedShared = sharedAttachments.filter((result) => result.status === "rejected"
+    && /INTAKE_ATTACHMENT_REPLAY_MISMATCH/.test(String(result.reason)));
+  if (acceptedShared.length !== 1 || rejectedShared.length !== 1) {
+    throw new Error(`Shared Attachment concurrency did not serialize safely: ${JSON.stringify(sharedAttachments)}`);
+  }
+
+  const mixedGeneration = await Promise.all([
+    timed(String.raw`select action from public.support_accept_intake_event(public.supper_test_intake_two_attachment_payload(
+      'lock-mixed-old','external-event-lock-mixed','external-conversation-lock-mixed','external-subject-lock-mixed',
+      'external-message-lock-mixed','external-attachment-lock-mixed-a','external-attachment-lock-mixed-b',true));`),
+    timed(String.raw`select action from public.support_accept_intake_event_v3(public.supper_test_intake_two_attachment_payload(
+      'lock-mixed-new','external-event-lock-mixed','external-conversation-lock-mixed','external-subject-lock-mixed',
+      'external-message-lock-mixed','external-attachment-lock-mixed-a','external-attachment-lock-mixed-b',false));`),
+  ]);
+  if (mixedGeneration.sort().join(",") !== "accepted,duplicate") {
+    throw new Error(`Legacy/current RPC concurrency failed: ${mixedGeneration.join(",")}`);
+  }
+}
+
 try {
   run("initdb", ["-A", "trust", "-U", "postgres", "-D", dataDirectory, "--no-locale"]);
   mkdirSync(socketDirectory, { recursive: true });
@@ -460,17 +740,24 @@ try {
   psql([], baseSchema);
   const migrationDirectory = path.join(root, "supabase/migrations");
   const migrations = readdirSync(migrationDirectory).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
-  for (const migration of migrations) psql(["-f", path.join(migrationDirectory, migration)]);
+  const intakeReplayMigration = "202607220003_unified_intake_core_replay_corrections.sql";
+  const intakeFinalMigration = "202607220004_unified_intake_core_final_integrity.sql";
+  for (const migration of migrations.filter((name) => name < intakeReplayMigration)) {
+    psql(["-f", path.join(migrationDirectory, migration)]);
+  }
+  psql([], fixtureSql);
+  psql([], legacySeedSql);
+  psql(["-f", path.join(migrationDirectory, intakeReplayMigration)]);
+  psql(["-f", path.join(migrationDirectory, intakeFinalMigration)]);
   psql([], canonicalVectorSql());
+  psql([], sensitiveKeyVectorSql());
+  psql([], upgradeVerificationSql);
   psql([], acceptanceSql);
-  psql([], String.raw`update public.intake_messages set content_hash = encode(digest(public.support_intake_canonical_json(
-    public.support_intake_legacy_message_material(public.supper_test_intake_payload(
-      'one','external-event-one','external-conversation-one','external-subject-one','external-message-one','external-attachment-one'))), 'sha256'), 'hex')
-    where id='message-one';`);
-  psql(["-f", path.join(migrationDirectory, "202607220003_unified_intake_core_replay_corrections.sql")]);
-  const backfilledMessageHash = psql(["-Atc", "select content_hash = encode(digest(public.support_intake_canonical_json(public.support_intake_persisted_message_material(id)), 'sha256'), 'hex') from public.intake_messages where id='message-one'"]);
-  if (backfilledMessageHash !== "t") throw new Error("Existing Message canonical hash was not upgraded from immutable Attachment source material");
+  psql([], finalIntegritySql);
+  psql(["-f", path.join(migrationDirectory, intakeReplayMigration)]);
+  psql(["-f", path.join(migrationDirectory, intakeFinalMigration)]);
   await verifyUnrelatedEventConcurrency();
+  await verifyGlobalLockOrderConcurrency();
 
   const expectedTables = [
     "integration_channels", "integration_external_identities", "integration_identity_bindings", "integration_identity_binding_events",
@@ -491,22 +778,35 @@ try {
     "support_get_intake_operations_summary", "support_list_intake_identities", "support_list_intake_conversations",
     "support_list_intake_events", "support_accept_intake_event", "support_apply_intake_identity_binding",
     "support_revoke_intake_identity_binding", "support_transition_intake_session", "support_transition_intake_conversation",
-    "support_enqueue_integration_outbox", "support_accept_intake_event_v2", "support_apply_intake_identity_binding_v2",
+    "support_enqueue_integration_outbox", "support_apply_intake_identity_binding_v2",
     "support_transition_intake_conversation_v2", "support_enqueue_integration_outbox_v2",
+    "support_accept_intake_event_v2", "support_accept_intake_event_v3",
   ];
   const unsafe = Number(psql(["-Atc", `select count(*) from information_schema.routine_privileges where routine_schema='public' and routine_name in (${functions.map((name) => `'${name}'`).join(",")}) and grantee in ('PUBLIC','anon','authenticated') and privilege_type='EXECUTE'`]));
   if (unsafe !== 0) throw new Error("A privileged intake RPC is executable by a browser role");
   const serviceGrants = Number(psql(["-Atc", `select count(distinct routine_name) from information_schema.routine_privileges where routine_schema='public' and routine_name in (${functions.map((name) => `'${name}'`).join(",")}) and grantee='service_role' and privilege_type='EXECUTE'`]));
   if (serviceGrants !== functions.length) throw new Error("service_role is missing an intake RPC grant");
-  const versions = psql(["-Atc", "select string_agg(version, ',' order by version) from public.support_schema_migrations where version in ('202607220001','202607220002','202607220003')"]);
-  if (versions !== "202607220001,202607220002,202607220003") throw new Error("Intake migration versions were not recorded");
+  const internalGrants = Number(psql(["-Atc", "select count(*) from information_schema.routine_privileges where routine_schema='public' and routine_name in ('support_accept_intake_event_final_impl','support_accept_intake_event_locked_write_impl') and grantee in ('PUBLIC','anon','authenticated','service_role') and privilege_type='EXECUTE'"]));
+  if (internalGrants !== 0) throw new Error("An internal intake acceptance implementation is directly executable");
+  const deliveryTriggerCount = Number(psql(["-Atc", "select count(*) from pg_trigger where tgrelid='public.intake_events'::regclass and tgname='support_intake_event_delivery_ledger' and not tgisinternal"]));
+  if (deliveryTriggerCount !== 0) throw new Error("Legacy Event delivery trigger is still active");
+  const versions = psql(["-Atc", "select string_agg(version, ',' order by version) from public.support_schema_migrations where version in ('202607220001','202607220002','202607220003','202607220004')"]);
+  if (versions !== "202607220001,202607220002,202607220003,202607220004") throw new Error("Intake migration versions were not recorded");
 
-  const migration = readFileSync(path.join(migrationDirectory, "202607220002_unified_intake_core_corrections.sql"), "utf8");
+  const migration = readFileSync(path.join(migrationDirectory, intakeFinalMigration), "utf8");
   if (/integration_channels[^;]{0,500}for update/is.test(migration)) throw new Error("Event acceptance still serializes the whole Channel row");
-  for (const scope of ["intake-event:", "intake-message:", "intake-conversation:", "intake-identity:"]) {
+  for (const scope of ["intake-event:", "intake-message:", "intake-conversation:", "intake-identity:", "intake-attachment:"]) {
     if (!migration.includes(scope)) throw new Error(`Missing scoped concurrency lock: ${scope}`);
   }
+  for (const wrapper of ["support_accept_intake_event", "support_accept_intake_event_v2", "support_accept_intake_event_v3"]) {
+    if (!new RegExp(`function public\\.${wrapper}\\(p_payload jsonb\\)[\\s\\S]*?support_accept_intake_event_final_impl\\(p_payload\\)`).test(migration)) {
+      throw new Error(`${wrapper} does not delegate to the final acceptance implementation`);
+    }
+  }
   const repository = readFileSync(path.join(root, "src/lib/intake-core/relational-repository.ts"), "utf8");
+  if (!repository.includes('rpc("support_accept_intake_event_v3"') || repository.includes('rpc("support_accept_intake_event_v2"')) {
+    throw new Error("The relational repository is not pinned to the final intake RPC");
+  }
   if (!/listConversationMessages[\s\S]*?\.range\(from, to\)/.test(repository)
     || !/listConversationAttachments[\s\S]*?\.range\(from, to\)/.test(repository)) throw new Error("Child read pagination is not enforced at storage");
   if (/listConversationMessages[\s\S]*?body_html/.test(repository)) throw new Error("Conversation Messages expose raw HTML");
@@ -515,7 +815,7 @@ try {
   if (binaryColumns !== 0) throw new Error("Unified Intake added Attachment byte storage");
   if (Number(psql(["-Atc", "select count(*) from public.support_tickets"])) !== 0) throw new Error("Unified Intake created a SUPPER Ticket");
 
-  console.log("Unified intake replay correction applied twice safely; canonical vectors, credential classification, immutable attachment replay, delivery metrics, strict target references, no-op transitions, grants, and intent-only behavior passed.");
+  console.log("Unified intake final integrity migrations upgraded real 1.3.1 state and reapplied safely; shared credential fixtures, immutable Attachment hashes, duplicate rejection, persisted Message reconstruction, current delivery context, scoped concurrency, grants, and intent-only behavior passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) if (existsSync(target)) rmSync(target, { recursive: true, force: true });

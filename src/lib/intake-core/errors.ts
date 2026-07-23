@@ -8,6 +8,7 @@ export type IntakeErrorCode =
   | "INTAKE_EVENT_REPLAY_MISMATCH"
   | "INTAKE_MESSAGE_REPLAY_MISMATCH"
   | "INTAKE_ATTACHMENT_REPLAY_MISMATCH"
+  | "INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT"
   | "INTAKE_REPLY_MESSAGE_INVALID"
   | "INTAKE_CONVERSATION_NOT_FOUND"
   | "INTAKE_CONVERSATION_VERSION_CONFLICT"
@@ -19,7 +20,8 @@ export type IntakeErrorCode =
   | "INTEGRATION_OUTBOX_PAYLOAD_INVALID"
   | "INTEGRATION_OUTBOX_IDEMPOTENCY_CONFLICT"
   | "INTAKE_RELATIONAL_BACKEND_REQUIRED"
-  | "INTAKE_STORAGE_ERROR";
+  | "INTAKE_STORAGE_ERROR"
+  | "INTAKE_STORAGE_INTEGRITY_ERROR";
 
 const errorCatalogue: Readonly<Record<IntakeErrorCode, { status: number; message: string }>> = Object.freeze({
   INTAKE_PAYLOAD_INVALID: { status: 400, message: "Unified intake payload is invalid" },
@@ -31,6 +33,7 @@ const errorCatalogue: Readonly<Record<IntakeErrorCode, { status: number; message
   INTAKE_EVENT_REPLAY_MISMATCH: { status: 409, message: "The event identifier was already used with different material" },
   INTAKE_MESSAGE_REPLAY_MISMATCH: { status: 409, message: "The message identifier was already used with different material" },
   INTAKE_ATTACHMENT_REPLAY_MISMATCH: { status: 409, message: "The attachment identifier was already used with different material" },
+  INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT: { status: 400, message: "The intake event contains a duplicate attachment identifier" },
   INTAKE_REPLY_MESSAGE_INVALID: { status: 422, message: "The reply target is invalid for this conversation" },
   INTAKE_CONVERSATION_NOT_FOUND: { status: 404, message: "The intake conversation was not found" },
   INTAKE_CONVERSATION_VERSION_CONFLICT: { status: 409, message: "The intake conversation changed before this request completed" },
@@ -43,6 +46,7 @@ const errorCatalogue: Readonly<Record<IntakeErrorCode, { status: number; message
   INTEGRATION_OUTBOX_IDEMPOTENCY_CONFLICT: { status: 409, message: "The command identifier was already used with different material" },
   INTAKE_RELATIONAL_BACKEND_REQUIRED: { status: 503, message: "Unified intake requires the relational data backend" },
   INTAKE_STORAGE_ERROR: { status: 500, message: "Unified intake storage operation failed" },
+  INTAKE_STORAGE_INTEGRITY_ERROR: { status: 500, message: "Unified intake stored material failed its integrity check" },
 });
 
 export class IntakeCoreError extends Error {

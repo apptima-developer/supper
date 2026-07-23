@@ -5,6 +5,7 @@ import {
   hashCanonicalIntakeMaterial, prepareCanonicalIntakeEvent,
 } from "./canonical-material";
 import canonicalVectors from "./canonical-vectors.json";
+import sensitiveKeyVectors from "./sensitive-key-vectors.json";
 import { mapEmailIntakeToUnifiedCommand } from "./email-compatibility";
 import { maskExternalIdentity } from "./identity";
 import { assertConversationTransition, statusAfterOrdinaryMessage, transitionConversation } from "./conversation";
@@ -31,6 +32,15 @@ function eventInput() {
 }
 
 describe("recursive Unified Intake sensitive-data policy", () => {
+  it.each(sensitiveKeyVectors.reject)("rejects shared compact credential fixture %s", (key) => {
+    expect(classifyIntakeJsonKey(key)).toBe("sensitive");
+    expect(findUnsafeIntakeJsonKey({ safe: [{ nested: { [key]: "value" } }] })?.classification).toBe("sensitive");
+  });
+
+  it.each(sensitiveKeyVectors.accept)("accepts shared safe-word fixture %s", (key) => {
+    expect(classifyIntakeJsonKey(key)).toBe("safe");
+  });
+
   it.each([
     "clientSecret", "Client-Secret", "client_secret", "channelAccessToken", "serviceNowPassword", "authorizationHeader",
     "x-api-key", "oauthClientSecret", "refreshTokenValue", "signedDownloadUrl", "apikey", "xapikey", "clientsecret",
@@ -39,10 +49,6 @@ describe("recursive Unified Intake sensitive-data policy", () => {
   ])("rejects compound credential key %s", (key) => {
     expect(classifyIntakeJsonKey(key)).toBe("sensitive");
     expect(findUnsafeIntakeJsonKey({ safe: [{ nested: { [key]: "value" } }] })?.classification).toBe("sensitive");
-  });
-
-  it.each(["tokenizer", "secretariat", "monkey", "keyboard"])('does not overmatch safe compact word %s', (key) => {
-    expect(classifyIntakeJsonKey(key)).toBe("safe");
   });
 
   it("rejects raw provider payload keys and Unicode/control tricks", () => {
@@ -57,6 +63,21 @@ describe("recursive Unified Intake sensitive-data policy", () => {
     expect(acceptInboundEventInputSchema.parse(input).event.metadata).toEqual({ source: "internal-adapter" });
     expect(() => acceptInboundEventInputSchema.parse({ ...eventInput(), event: { ...eventInput().event, metadata: { unknown: true } } })).toThrow(/unrecognized/i);
     expect(() => acceptInboundEventInputSchema.parse({ ...eventInput(), message: { ...eventInput().message, structuredContent: { nested: { clientSecret: "no" } } } })).toThrow(/Credentials/i);
+  });
+
+  it("applies contextual compact classification recursively across every arbitrary JSON boundary", () => {
+    expect(() => acceptInboundEventInputSchema.parse({
+      ...eventInput(), message: { ...eventInput().message, structuredContent: { nested: [{ linetoken: "no" }] } },
+    })).toThrow(/Credentials/i);
+    expect(() => acceptInboundEventInputSchema.parse({
+      ...eventInput(), event: { ...eventInput().event, metadata: { appsecret: "no" } },
+    })).toThrow(/Credentials/i);
+    expect(() => targetReferencesSchema.parse({ internal: { authorizationvalue: "no" } })).toThrow(/INTAKE_SENSITIVE_DATA_REJECTED/);
+    expect(() => enqueueOutboxInputSchema.parse({
+      id: "outbox-compact-secret", targetProvider: "internal", commandType: "notification.send",
+      idempotencyKey: "compact-secret-key", payload: { nested: { signedasseturl: "no" } },
+      availableAt: timestamp, correlationId, metadata: {},
+    })).toThrow(/Credentials/i);
   });
 });
 
@@ -128,6 +149,29 @@ describe("canonical event, message, and attachment material", () => {
 });
 
 describe("unified intake domain validation", () => {
+  it("rejects duplicate attachment identifiers before canonical hashing", () => {
+    const base = eventInput();
+    const duplicateInternal = {
+      ...base,
+      attachments: [base.attachments[0], { ...base.attachments[0], externalAttachmentId: "external-attachment-2" }],
+    };
+    expect(() => acceptInboundEventInputSchema.parse(duplicateInternal)).toThrow(/INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT/);
+
+    const duplicateExternal = {
+      ...base,
+      attachments: [base.attachments[0], { ...base.attachments[0], id: "attachment-2" }],
+    };
+    expect(() => acceptInboundEventInputSchema.parse(duplicateExternal)).toThrow(/INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT/);
+
+    const sameMaterialDistinctExternalIds = {
+      ...base,
+      attachments: [base.attachments[0], {
+        ...base.attachments[0], id: "attachment-2", externalAttachmentId: "external-attachment-2",
+      }],
+    };
+    expect(acceptInboundEventInputSchema.parse(sameMaterialDistinctExternalIds).attachments).toHaveLength(2);
+  });
+
   it("deeply copies normalized input while keeping HTML opaque", () => {
     const source = eventInput();
     const parsed = acceptInboundEventInputSchema.parse(source);
@@ -217,6 +261,7 @@ describe("bounded intake errors", () => {
       "INTAKE_PAYLOAD_INVALID", "INTAKE_CHANNEL_UNAVAILABLE", "INTAKE_IDENTITY_HASH_MISMATCH",
       "INTAKE_SENSITIVE_DATA_REJECTED", "INTAKE_CANONICAL_NUMBER_INVALID", "INTAKE_TARGET_REFERENCE_INVALID",
       "INTAKE_EVENT_REPLAY_MISMATCH", "INTAKE_MESSAGE_REPLAY_MISMATCH", "INTAKE_ATTACHMENT_REPLAY_MISMATCH",
+      "INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT", "INTAKE_STORAGE_INTEGRITY_ERROR",
       "INTAKE_REPLY_MESSAGE_INVALID", "INTAKE_CONVERSATION_NOT_FOUND", "INTAKE_CONVERSATION_VERSION_CONFLICT",
       "INTAKE_CONVERSATION_TRANSITION_INVALID", "INTAKE_SESSION_NOT_FOUND", "INTAKE_SESSION_VERSION_CONFLICT",
       "INTAKE_SESSION_TRANSITION_INVALID", "INTAKE_IDENTITY_BINDING_INVALID", "INTEGRATION_OUTBOX_PAYLOAD_INVALID",

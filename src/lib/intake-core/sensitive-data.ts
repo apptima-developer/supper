@@ -27,6 +27,15 @@ const compoundCompactConcepts = [
   "servicerolekey", "supabaseservicerolekey",
 ] as const;
 
+const compactSensitivePatterns = [
+  /^(?:line|api|app|oauth|access|refresh|bearer|channel)token(?:value|string)?$/,
+  /^token(?:value|string)$/,
+  /^(?:app|oauth|client|channel|webhook|session|signing|signature)secret(?:value|string)?$/,
+  /^(?:pre)?signed(?:upload|asset|download)?url$/,
+  /^bearercredential$/,
+  /^authorizationvalue$/,
+] as const;
+
 const forbiddenProviderPayloadKeys = new Set([
   "raw payload", "webhook body", "raw headers", "authorization headers", "complete profile", "raw event",
 ]);
@@ -80,6 +89,7 @@ export function classifyIntakeJsonKey(value: string): IntakeJsonKeyClassificatio
   }
   if (compactSensitiveConcepts.has(compact)
     || compoundCompactConcepts.some((concept) => compact.includes(concept))
+    || compactSensitivePatterns.some((pattern) => pattern.test(compact))
     || compact.startsWith("bearer")) return "sensitive";
   return "safe";
 }

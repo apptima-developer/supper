@@ -327,7 +327,7 @@ export class RelationalIntakeCoreRepository implements IntakeCoreRepository {
 
   async acceptInboundEvent(input: AcceptInboundEvent): Promise<AcceptInboundEventResult> {
     requireRelational();
-    const result = await must("Could not accept normalized intake event", supabaseAdmin.rpc("support_accept_intake_event_v2", { p_payload: input }));
+    const result = await must("Could not accept normalized intake event", supabaseAdmin.rpc("support_accept_intake_event_v3", { p_payload: input }));
     return acceptInboundEventResultSchema.parse(rpcRow(result.data));
   }
 

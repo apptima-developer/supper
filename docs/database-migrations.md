@@ -157,3 +157,47 @@ where source_material_hash is null;
 ```
 
 Expected: versions `202607220001`, `202607220002`, and `202607220003`; RLS true; only `service_role` has v2 execution; and `attachments_missing_source_hash=0`. Roll application behavior forward if correction is needed. Do not drop the delivery ledger, overwrite source hashes, or delete replay state.
+
+## Applying AI-1.3.3 final integrity corrections
+
+Migrations `202607220001`, `202607220002`, and `202607220003` are immutable. Apply the forward-only, idempotent `supabase/migrations/202607220004_unified_intake_core_final_integrity.sql` only to the verified isolated `supper-ai-dev` project. It records version `202607220004`, preserves existing intake rows and lifecycle state, routes legacy/v2/v3 Event acceptance through one lock coordinator, rejects duplicate Attachment identities, protects both immutable Attachment hashes, verifies persisted Message reconstruction before commit, and records current delivery request context without a table trigger.
+
+1. Confirm the project name/ref is exactly the isolated `supper-ai-dev` target, never production, and take the normal recovery checkpoint.
+2. From the exact `ai_development` commit run the complete acceptance command set, especially `npm run verify:migrations` and `npm run verify:intake-core-sql`. The SQL verifier builds representative 1.3.1 state under migration 002 before applying 003 and 004, then reapplies both corrections.
+3. Confirm migration rows `202607220001` through `202607220003` exist. If one is absent, stop and apply the immutable files in order; never modify an already-applied file.
+4. In the isolated project's SQL editor, paste and execute the complete unmodified `202607220004_unified_intake_core_final_integrity.sql` once. Do not concatenate migrations or apply DDL through REST.
+5. Run the verification SQL below. Confirm four ordered versions, equal valid Attachment hashes, no legacy Event delivery trigger, service-role execution only on public acceptance RPCs, and no direct grant on private implementations.
+6. Deploy the exact commit to Vercel Preview and run the manual smoke test in [Unified Intake Core](unified-intake-core.md). Do not merge to `main` during acceptance.
+
+```sql
+select version, description
+from public.support_schema_migrations
+where version in ('202607220001', '202607220002', '202607220003', '202607220004')
+order by version;
+
+select count(*) as attachment_hash_integrity_failures
+from public.intake_attachments
+where source_material_hash !~ '^[a-f0-9]{64}$'
+   or canonical_hash !~ '^[a-f0-9]{64}$'
+   or source_material_hash <> canonical_hash;
+
+select count(*) as legacy_delivery_triggers
+from pg_trigger
+where tgrelid = 'public.intake_events'::regclass
+  and tgname = 'support_intake_event_delivery_ledger'
+  and not tgisinternal;
+
+select routine_name, grantee, privilege_type
+from information_schema.routine_privileges
+where routine_schema = 'public'
+  and routine_name in (
+    'support_accept_intake_event',
+    'support_accept_intake_event_v2',
+    'support_accept_intake_event_v3',
+    'support_accept_intake_event_final_impl',
+    'support_accept_intake_event_locked_write_impl'
+  )
+order by routine_name, grantee;
+```
+
+Expected: versions `202607220001` through `202607220004`; `attachment_hash_integrity_failures=0`; `legacy_delivery_triggers=0`; only `service_role` can execute the three public acceptance RPC generations; neither private implementation is directly executable. No table is dropped, no intake row or lifecycle state is deleted, and no provider operation is performed.

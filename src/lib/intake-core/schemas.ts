@@ -135,7 +135,21 @@ const acceptInboundEventBase = z.object({
   message: z.object({ id: messageIdSchema, externalMessageId: externalMessageIdSchema, replyToMessageId: messageIdSchema.optional(), direction: z.enum(messageDirections), messageType: z.enum(messageTypes), status: z.enum(messageStatuses), bodyText: safeRequiredText(intakeLimits.textBodyCharacters).default(""), bodyHtml: safeRequiredText(intakeLimits.htmlBodyCharacters).default(""), structuredContent: structuredContentSchema, contentHash: sha256Schema.optional(), providerSentAt: canonicalTimestampSchema.optional(), receivedAt: canonicalTimestampSchema, storedAt: canonicalTimestampSchema.optional(), metadata: messageMetadataSchema }).strict(),
   attachments: z.array(attachmentInputSchema).max(intakeLimits.attachmentsPerEvent).default([]),
   initializeSession: z.object({ id: sessionIdSchema, status: z.enum(["draft", "collecting"]), stateData: sessionStateSchema.default({}), missingFields: z.array(intakeIdentifierSchema("missingField", 100)).max(50).default([]), startedAt: canonicalTimestampSchema, expiresAt: canonicalTimestampSchema.optional(), metadata: sessionMetadataSchema }).strict().optional(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const internalIds = new Set<string>();
+  const externalIds = new Set<string>();
+  value.attachments.forEach((attachment, index) => {
+    if (internalIds.has(attachment.id)) {
+      context.addIssue({ code: "custom", path: ["attachments", index, "id"], message: "INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT" });
+    }
+    internalIds.add(attachment.id);
+    if (!attachment.externalAttachmentId) return;
+    if (externalIds.has(attachment.externalAttachmentId)) {
+      context.addIssue({ code: "custom", path: ["attachments", index, "externalAttachmentId"], message: "INTAKE_ATTACHMENT_DUPLICATE_IN_EVENT" });
+    }
+    externalIds.add(attachment.externalAttachmentId);
+  });
+});
 
 export const acceptInboundEventInputSchema = acceptInboundEventBase;
 export const acceptInboundEventSchema = acceptInboundEventBase.transform((value, context) => {

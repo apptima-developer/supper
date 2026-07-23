@@ -1,0 +1,27 @@
+{
+  "reject": [
+    "linetoken",
+    "apitoken",
+    "apptoken",
+    "tokenvalue",
+    "tokenstring",
+    "appsecret",
+    "oauthsecret",
+    "signingsecret",
+    "clientsecretvalue",
+    "signeduploadurl",
+    "signedasseturl",
+    "presignedurl",
+    "presigneddownloadurl",
+    "bearercredential",
+    "authorizationvalue"
+  ],
+  "accept": [
+    "tokenizer",
+    "tokenization",
+    "secretariat",
+    "secretarial",
+    "monkey",
+    "keyboard"
+  ]
+}
