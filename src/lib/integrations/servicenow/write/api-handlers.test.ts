@@ -4,15 +4,54 @@ import type { Session } from "../../../auth";
 import {
   handleServiceNowWriteCommandDetailGet,
   handleServiceNowWriteCommandDryRunPost,
+  handleServiceNowWriteCommandExecutePost,
   handleServiceNowWriteCommandsGet,
   handleServiceNowWriteCommandsPost,
+  handleServiceNowWriteConfirmationPost,
   handleServiceNowWriteReadinessPost,
+  handleServiceNowWriteReconciliationPost,
 } from "./api-handlers";
 import type { ServiceNowWriteRepository } from "./repository";
+import type { ServiceNowWriteCommandSummary } from "./types";
 
 const admin: Session = { userId: "admin-id", username: "admin", name: "Admin", role: "admin", authVersion: 1 };
 const support: Session = { userId: "support-id", username: "support", name: "Support", role: "support", authVersion: 1 };
 const repository = {} as ServiceNowWriteRepository;
+const hash = "a".repeat(64);
+const commandId = "command-id-0000000001";
+
+function summary(overrides: Partial<ServiceNowWriteCommandSummary> = {}): ServiceNowWriteCommandSummary {
+  return {
+    id: commandId,
+    version: 1,
+    commandType: "create_incident",
+    status: "validated",
+    sourceType: "manual",
+    operationReference: "manual-op:command-id-0000000001",
+    targetTable: "incident",
+    normalizedPayloadHash: hash,
+    validationSummary: { valid: true },
+    safeRequestSummary: {},
+    safeResponseSummary: {},
+    retryAllowed: false,
+    attemptCount: 0,
+    maxAttempts: 3,
+    createdBy: "admin-id",
+    createdAt: "2026-07-23T01:00:00.000Z",
+    updatedAt: "2026-07-23T01:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function confirmationBody(action?: string) {
+  return {
+    ...(action ? { action } : {}),
+    confirmed: true,
+    expectedVersion: 1,
+    expectedNormalizedPayloadHash: hash,
+    confirmationNonce: "nonce-value-with-sufficient-entropy",
+  };
+}
 
 describe("ServiceNow write API security", () => {
   it("rejects unauthenticated and non-admin users", async () => {
@@ -29,22 +68,7 @@ describe("ServiceNow write API security", () => {
   });
 
   it("accepts only strict bounded command bodies", async () => {
-    const create = vi.fn(async () => ({
-      id: "command-id-0000000001",
-      commandType: "create_incident" as const,
-      status: "validated" as const,
-      sourceType: "manual" as const,
-      sourceReference: "manual:api-test",
-      targetTable: "incident",
-      validationSummary: { valid: true },
-      safeRequestSummary: {},
-      safeResponseSummary: {},
-      attemptCount: 0,
-      maxAttempts: 3,
-      createdBy: "admin-id",
-      createdAt: "2026-07-23T01:00:00.000Z",
-      updatedAt: "2026-07-23T01:00:00.000Z",
-    }));
+    const create = vi.fn(async () => summary());
     const valid = await handleServiceNowWriteCommandsPost(new Request(
       "https://app.test/api/integrations/servicenow/write/commands",
       {
@@ -53,7 +77,6 @@ describe("ServiceNow write API security", () => {
         body: JSON.stringify({
           commandType: "create_incident",
           sourceType: "manual",
-          sourceReference: "manual:api-test",
           payload: { shortDescription: "Short", description: "Description" },
         }),
       },
@@ -66,7 +89,6 @@ describe("ServiceNow write API security", () => {
         body: JSON.stringify({
           commandType: "create_incident",
           sourceType: "manual",
-          sourceReference: "manual:api-test",
           payload: { shortDescription: "Short", description: "Description", authorization: "forbidden" },
         }),
       },
@@ -77,25 +99,12 @@ describe("ServiceNow write API security", () => {
   });
 
   it("returns browser-safe command details without raw payload or credentials", async () => {
-    const detail = vi.fn(async () => ({
-      id: "command-id-0000000001",
-      commandType: "create_incident" as const,
-      status: "validated" as const,
-      sourceType: "manual" as const,
-      sourceReference: "manual:api-test",
-      targetTable: "incident",
-      validationSummary: { valid: true },
+    const detail = vi.fn(async () => summary({
       safeRequestSummary: { method: "POST", fieldNames: ["description"] },
-      safeResponseSummary: {},
-      attemptCount: 0,
-      maxAttempts: 3,
-      createdBy: "admin-id",
-      createdAt: "2026-07-23T01:00:00.000Z",
-      updatedAt: "2026-07-23T01:00:00.000Z",
     }));
     const response = await handleServiceNowWriteCommandDetailGet(
-      new Request("https://app.test/api/integrations/servicenow/write/commands/command-id-0000000001"),
-      "command-id-0000000001",
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}`),
+      commandId,
       { getSession: async () => admin, repository, detail },
     );
     const body = await response.json();
@@ -105,15 +114,86 @@ describe("ServiceNow write API security", () => {
     expect(JSON.stringify(body)).not.toMatch(/authorization|password|credential/i);
   });
 
-  it("rejects bodies on action and readiness routes", async () => {
+  it("requires a strict one-time confirmation body for live execution", async () => {
+    const execute = vi.fn(async () => summary({ status: "succeeded" }));
+    const missing = await handleServiceNowWriteCommandExecutePost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      }),
+      commandId,
+      { getSession: async () => admin, repository, execute },
+    );
+    const valid = await handleServiceNowWriteCommandExecutePost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(confirmationBody()),
+      }),
+      commandId,
+      { getSession: async () => admin, repository, execute },
+    );
+    expect(missing.status).toBe(400);
+    expect(valid.status).toBe(200);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({ confirmation: confirmationBody() }),
+      { repository },
+    );
+  });
+
+  it("issues confirmations and requires an explicit reconciliation action", async () => {
+    const issueConfirmation = vi.fn(async () => ({
+      confirmationNonce: "nonce-value-with-sufficient-entropy",
+      action: "execute" as const,
+      commandId,
+      expectedVersion: 1,
+      expectedNormalizedPayloadHash: hash,
+      expiresAt: "2026-07-23T01:02:00.000Z",
+    }));
+    const issued = await handleServiceNowWriteConfirmationPost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/confirmation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "execute",
+          expectedVersion: 1,
+          expectedNormalizedPayloadHash: hash,
+        }),
+      }),
+      commandId,
+      { getSession: async () => admin, repository, issueConfirmation },
+    );
+    const reconcile = vi.fn(async () => summary({ status: "succeeded" }));
+    const reconciled = await handleServiceNowWriteReconciliationPost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/reconcile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(confirmationBody("mark_succeeded_after_verification")),
+      }),
+      commandId,
+      { getSession: async () => admin, repository, reconcile },
+    );
+    expect(issued.status).toBe(201);
+    expect(reconciled.status).toBe(200);
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "mark_succeeded_after_verification",
+        confirmation: expect.objectContaining({ confirmed: true, expectedVersion: 1 }),
+      }),
+      { repository },
+    );
+  });
+
+  it("rejects bodies on dry-run and readiness routes", async () => {
     const dryRun = vi.fn();
     const readiness = vi.fn();
     const actionResponse = await handleServiceNowWriteCommandDryRunPost(
-      new Request("https://app.test/api/integrations/servicenow/write/commands/command-id-0000000001/dry-run", {
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/dry-run`, {
         method: "POST",
         body: "x",
       }),
-      "command-id-0000000001",
+      commandId,
       { getSession: async () => admin, repository, dryRun },
     );
     const readinessResponse = await handleServiceNowWriteReadinessPost(
@@ -129,7 +209,7 @@ describe("ServiceNow write API security", () => {
   it("enforces bounded list filters and rejects provider query injection", async () => {
     const list = vi.fn(async () => ({ items: [], total: 0, page: 1, limit: 100 }));
     const valid = await handleServiceNowWriteCommandsGet(
-      new Request("https://app.test/api/integrations/servicenow/write/commands?limit=100&status=failed&commandType=update_incident"),
+      new Request("https://app.test/api/integrations/servicenow/write/commands?limit=100&status=reconciliation_required&commandType=update_incident"),
       { getSession: async () => admin, repository, list },
     );
     const invalid = await handleServiceNowWriteCommandsGet(

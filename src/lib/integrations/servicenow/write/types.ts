@@ -16,6 +16,7 @@ export const serviceNowWriteStatuses = [
   "succeeded",
   "failed",
   "retry_scheduled",
+  "reconciliation_required",
   "cancelled",
 ] as const;
 export type ServiceNowWriteStatus = (typeof serviceNowWriteStatuses)[number];
@@ -27,6 +28,33 @@ export const serviceNowWriteSourceTypes = [
   "integration_outbox",
 ] as const;
 export type ServiceNowWriteSourceType = (typeof serviceNowWriteSourceTypes)[number];
+
+export const serviceNowWriteDeliveryDispositions = [
+  "definitely_not_sent",
+  "definitely_rejected",
+  "safe_to_retry",
+  "confirmed_succeeded",
+  "may_have_committed",
+] as const;
+export type ServiceNowWriteDeliveryDisposition = (typeof serviceNowWriteDeliveryDispositions)[number];
+
+export const serviceNowWriteFailurePhases = [
+  "configuration",
+  "authorization",
+  "number_lookup",
+  "mutation_dispatch",
+  "mutation_response",
+  "response_parse",
+  "read_back",
+] as const;
+export type ServiceNowWriteFailurePhase = (typeof serviceNowWriteFailurePhases)[number];
+
+export const serviceNowWriteReconciliationActions = [
+  "reconcile_by_read_back",
+  "mark_succeeded_after_verification",
+  "mark_not_applied_after_verification",
+] as const;
+export type ServiceNowWriteReconciliationAction = (typeof serviceNowWriteReconciliationActions)[number];
 
 export type ServiceNowCreateIncidentInput = {
   shortDescription: string;
@@ -74,16 +102,19 @@ export type ServiceNowWriteCommandInput = {
   [Type in ServiceNowWriteCommandType]: {
     commandType: Type;
     sourceType: ServiceNowWriteSourceType;
-    sourceReference: string;
+    sourceEntityReference?: string;
+    operationReference?: string;
     maxAttempts?: number;
     payload: ServiceNowWritePayloadByType[Type];
   }
 }[ServiceNowWriteCommandType];
 
 export type NormalizedServiceNowWriteCommand = {
+  schemaVersion: "servicenow-write-normalized-v2";
   commandType: ServiceNowWriteCommandType;
   targetSysId?: string;
   targetNumber?: string;
+  providerCorrelationMarker?: string;
   fields: Record<string, string>;
 };
 
@@ -101,6 +132,7 @@ export type ServiceNowSafeResponseSummary = {
   sysId?: string;
   number?: string;
   state?: string;
+  recoveredByCorrelationMarker?: boolean;
 };
 
 export type ServiceNowWriteAdapterResult = {
@@ -110,10 +142,18 @@ export type ServiceNowWriteAdapterResult = {
   targetNumber: string;
 };
 
+export type ServiceNowWriteReadBackResult = {
+  result: "confirmed_succeeded" | "not_found" | "ambiguous" | "inconclusive";
+  summary: JsonObject;
+  targetSysId?: string;
+  targetNumber?: string;
+};
+
 export type ServiceNowWritePreview = {
   commandType: ServiceNowWriteCommandType;
   targetSysId?: string;
   targetNumber?: string;
+  providerCorrelationMarker?: string;
   fields: Array<{ name: string; kind: "text" | "identifier" | "enum"; length: number; value?: string }>;
 };
 
@@ -123,25 +163,53 @@ export type ServiceNowWriteAttemptSummary = {
   executionMode: "dry_run" | "live" | "retry";
   requestSummary: JsonObject;
   responseSummary: JsonObject;
-  outcome: "executing" | "dry_run" | "succeeded" | "failed";
+  outcome: "executing" | "dry_run" | "succeeded" | "failed" | "uncertain";
+  deliveryDisposition?: ServiceNowWriteDeliveryDisposition;
+  failurePhase?: ServiceNowWriteFailurePhase;
+  retryAllowed: boolean;
+  retryReason?: string;
+  reconciliationReason?: string;
   safeErrorCode?: string;
   safeErrorMessage?: string;
   startedAt: string;
   finishedAt?: string;
 };
 
+export type ServiceNowWriteReconciliationEventSummary = {
+  id: string;
+  action: ServiceNowWriteReconciliationAction;
+  result: string;
+  safeReadBackSummary: JsonObject;
+  actorUserId: string;
+  commandVersionBefore: number;
+  commandVersionAfter: number;
+  createdAt: string;
+};
+
 export type ServiceNowWriteCommandSummary = {
   id: string;
+  version: number;
   commandType: ServiceNowWriteCommandType;
   status: ServiceNowWriteStatus;
   sourceType: ServiceNowWriteSourceType;
-  sourceReference: string;
+  sourceEntityReference?: string;
+  operationReference: string;
   targetTable: string;
   targetSysId?: string;
   targetNumber?: string;
+  normalizedPayloadHash: string;
+  providerCorrelationMarker?: string;
   validationSummary: JsonObject;
   safeRequestSummary: JsonObject;
   safeResponseSummary: JsonObject;
+  deliveryDisposition?: ServiceNowWriteDeliveryDisposition;
+  failurePhase?: ServiceNowWriteFailurePhase;
+  retryAllowed: boolean;
+  retryReason?: string;
+  reconciliationReason?: string;
+  reconciliationCheckedAt?: string;
+  reconciledByUserId?: string;
+  reconciliationResult?: string;
   errorCode?: string;
   errorMessage?: string;
   attemptCount: number;
@@ -154,18 +222,20 @@ export type ServiceNowWriteCommandSummary = {
   updatedAt: string;
   normalizedPreview?: ServiceNowWritePreview;
   attempts?: ServiceNowWriteAttemptSummary[];
+  reconciliationHistory?: ServiceNowWriteReconciliationEventSummary[];
   auditWarning?: "secondary_audit_write_failed";
 };
 
 export type ServiceNowWriteReadiness = {
   configured: boolean;
-  enabled: boolean;
   relationalStorage: boolean;
-  ready: boolean;
+  connectionTestable: boolean;
+  connectionTested: boolean;
+  liveWriteEnabled: boolean;
+  liveWriteReady: boolean;
   authMode?: "basic" | "oauth_client_credentials";
   hostname?: string;
   incidentTable?: string;
-  connectionTested?: boolean;
   safeErrorCode?: string;
   safeErrorMessage?: string;
 };
@@ -177,4 +247,13 @@ export type ServiceNowWriteOperationsSummary = {
   countsByStatus: Partial<Record<ServiceNowWriteStatus, number>>;
   lastSafeErrorCode?: string;
   lastSafeErrorMessage?: string;
+};
+
+export type ServiceNowWriteConfirmation = {
+  confirmationNonce: string;
+  action: "execute" | "retry" | ServiceNowWriteReconciliationAction;
+  commandId: string;
+  expectedVersion: number;
+  expectedNormalizedPayloadHash: string;
+  expiresAt: string;
 };

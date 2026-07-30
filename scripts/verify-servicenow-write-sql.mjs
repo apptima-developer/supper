@@ -24,11 +24,12 @@ function psql(args = [], input) {
 }
 
 const baseSchema = String.raw`
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+alter database postgres set search_path = pg_catalog, public, extensions;
 create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin;
-create extension if not exists pgcrypto;
-
 create table public.support_schema_migrations (
   version text primary key,
   description text not null,
@@ -36,212 +37,542 @@ create table public.support_schema_migrations (
   applied_by text,
   applied_at timestamptz not null default now()
 );
-
-create table public.support_tickets (id text primary key);
-create table public.intake_conversations (id text primary key);
-
-create or replace function public.support_intake_json_has_unsafe_key(p_value jsonb)
-returns boolean language sql immutable as $$ select false; $$;
-
-create or replace function public.support_intake_sha256_hex(p_value text)
-returns text language sql immutable as $$
-  select encode(digest(p_value, 'sha256'), 'hex')
-$$;
+create table public.support_users (
+  id text primary key, username text not null, data jsonb not null default '{}'::jsonb
+);
+create table public.support_customers (
+  id text primary key, customer_key text not null unique, customer_name text not null,
+  project_code text not null default '', active boolean not null default true,
+  end_period date, data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+create table public.support_tickets (
+  id text primary key, issue_id text not null unique, customer_key text not null,
+  customer_name text not null, kanban_status text not null, status text not null,
+  issue_type text not null, severity text not null, ticket_date date, start_date date,
+  due_date date, close_date date, data jsonb not null, updated_at timestamptz not null
+);
+insert into public.support_customers (
+  id,customer_key,customer_name,project_code,active,data
+) values ('customer-write','customer-write','Write verifier','TEST',true,'{}');
+insert into public.support_tickets (
+  id,issue_id,customer_key,customer_name,kanban_status,status,issue_type,severity,data,updated_at
+) values (
+  'ticket-write-00000001','WRITE-1','customer-write','Write verifier',
+  'open','open','Incident','Medium','{}',now()
+);
 `;
 
 const acceptanceSql = String.raw`
-insert into public.servicenow_write_connections (
-  id, name, active, auth_mode, instance_url, incident_table, timeout_ms, metadata
-) values (
-  'connection-test-00000001', 'Test PDI', true, 'basic',
-  'https://example.service-now.com', 'incident', 15000, '{"source":"sql-test"}'::jsonb
-);
+select * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
+  'id','connection-test-00000001','name','Test PDI','active',true,
+  'authMode','basic','instanceUrl','https://example.service-now.com',
+  'incidentTable','incident','timeoutMs',15000,
+  'metadata',jsonb_build_object('source','sql-test'),
+  'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+select * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+  'id','mapping-create-00000001','connectionId','connection-test-00000001',
+  'commandType','create_incident','mappingName','SUPPER default','active',true,
+  'fieldMapping','{
+    "shortDescription":"short_description","description":"description",
+    "callerId":"caller_id","category":"category","subcategory":"subcategory",
+    "impact":"impact","urgency":"urgency","assignmentGroup":"assignment_group",
+    "contactChannel":"contact_type","customer":"company","projectCode":"u_project_code"
+  }'::jsonb,'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+select * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+  'id','mapping-update-00000001','connectionId','connection-test-00000001',
+  'commandType','update_incident','mappingName','SUPPER default','active',true,
+  'fieldMapping','{
+    "shortDescription":"short_description","description":"description","state":"state",
+    "impact":"impact","urgency":"urgency","assignmentGroup":"assignment_group",
+    "customer":"company","projectCode":"u_project_code"
+  }'::jsonb,'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+select * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+  'id','mapping-comment-00000001','connectionId','connection-test-00000001',
+  'commandType','add_comment','mappingName','SUPPER default','active',true,
+  'fieldMapping','{"text":"comments"}'::jsonb,
+  'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+select * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+  'id','mapping-work-note-000001','connectionId','connection-test-00000001',
+  'commandType','add_work_note','mappingName','SUPPER default','active',true,
+  'fieldMapping','{"text":"work_notes"}'::jsonb,
+  'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+create or replace function public.supper_test_write_payload(
+  p_command_id text,
+  p_operation_reference text,
+  p_description text default 'Safe SQL test body',
+  p_source_type text default 'manual',
+  p_source_entity_reference text default null
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_payload jsonb;
+  v_mapping jsonb;
+  v_key text;
+  v_normalized jsonb;
+  v_hash text;
+begin
+  v_payload := jsonb_build_object(
+    'shortDescription','SQL test','description',p_description
+  );
+  select field_mapping into v_mapping from public.servicenow_write_mappings
+  where id='mapping-create-00000001';
+  v_key := public.support_servicenow_write_idempotency_hash(
+    'connection-test-00000001','create_incident',p_operation_reference,
+    p_source_type,p_source_entity_reference,'incident'
+  );
+  v_normalized := public.support_servicenow_write_normalize(
+    'create_incident',v_payload,v_mapping,v_key
+  );
+  v_hash := public.support_servicenow_write_normalized_hash(v_normalized);
+  return jsonb_build_object(
+    'commandId',p_command_id,'commandType','create_incident',
+    'idempotencyKey',v_key,'normalizedPayloadHash',v_hash,
+    'connectionId','connection-test-00000001','mappingId','mapping-create-00000001',
+    'sourceType',p_source_type,'sourceEntityReference',coalesce(p_source_entity_reference,''),
+    'operationReference',p_operation_reference,'targetTable','incident',
+    'targetSysId','','targetNumber','',
+    'providerCorrelationMarker',v_normalized->>'providerCorrelationMarker',
+    'payload',v_payload,'normalizedPayload',v_normalized,
+    'validationSummary',jsonb_build_object(
+      'valid',true,'mappedFieldCount',3,
+      'mappedFields',jsonb_build_array('correlation_id','description','short_description'),
+      'warningCodes','[]'::jsonb
+    ),
+    'maxAttempts',3,'createdBy','admin-user',
+    'requestId','request-write-sql-0001',
+    'correlationId','correlation-write-sql-0001',
+    'createdAt','2026-07-23T01:00:00.000Z'
+  );
+end;
+$$;
+
+create or replace function public.supper_test_write_payload_for(
+  p_command_id text,
+  p_command_type text,
+  p_operation_reference text,
+  p_payload jsonb,
+  p_source_type text default 'supper_ticket',
+  p_source_entity_reference text default 'ticket-write-00000001'
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_mapping_id text;
+  v_mapping jsonb;
+  v_key text;
+  v_normalized jsonb;
+  v_hash text;
+  v_field_count integer;
+begin
+  select id,field_mapping into v_mapping_id,v_mapping
+  from public.servicenow_write_mappings
+  where connection_id='connection-test-00000001'
+    and command_type=p_command_type and active;
+  v_key := public.support_servicenow_write_idempotency_hash(
+    'connection-test-00000001',p_command_type,p_operation_reference,
+    p_source_type,p_source_entity_reference,'incident'
+  );
+  v_normalized := public.support_servicenow_write_normalize(
+    p_command_type,p_payload,v_mapping,v_key
+  );
+  v_hash := public.support_servicenow_write_normalized_hash(v_normalized);
+  select count(*) into v_field_count from jsonb_object_keys(v_normalized->'fields');
+  return jsonb_build_object(
+    'commandId',p_command_id,'commandType',p_command_type,
+    'idempotencyKey',v_key,'normalizedPayloadHash',v_hash,
+    'connectionId','connection-test-00000001','mappingId',v_mapping_id,
+    'sourceType',p_source_type,'sourceEntityReference',coalesce(p_source_entity_reference,''),
+    'operationReference',p_operation_reference,'targetTable','incident',
+    'targetSysId',coalesce(v_normalized->>'targetSysId',''),
+    'targetNumber',coalesce(v_normalized->>'targetNumber',''),
+    'providerCorrelationMarker',coalesce(v_normalized->>'providerCorrelationMarker',''),
+    'payload',p_payload,'normalizedPayload',v_normalized,
+    'validationSummary',jsonb_build_object(
+      'valid',true,'mappedFieldCount',v_field_count,
+      'mappedFields','[]'::jsonb,'warningCodes','[]'::jsonb
+    ),
+    'maxAttempts',3,'createdBy','admin-user',
+    'requestId','request-write-sql-0001',
+    'correlationId','correlation-write-sql-0001',
+    'createdAt','2026-07-23T01:00:00.000Z'
+  );
+end;
+$$;
 
 do $$
 declare
   v_result record;
   v_attempt record;
-  v_command_payload jsonb := jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'commandType', 'create_incident',
-    'idempotencyKey', repeat('a', 64),
-    'normalizedPayloadHash', repeat('b', 64),
-    'connectionId', 'connection-test-00000001',
-    'mappingId', '',
-    'sourceType', 'manual',
-    'sourceReference', 'manual:sql-test',
-    'targetTable', 'incident',
-    'targetSysId', '',
-    'targetNumber', '',
-    'payload', jsonb_build_object('shortDescription', 'SQL test', 'description', 'Safe test body'),
-    'normalizedPayload', jsonb_build_object(
-      'commandType', 'create_incident',
-      'fields', jsonb_build_object('short_description', 'SQL test', 'description', 'Safe test body')
-    ),
-    'validationSummary', jsonb_build_object('valid', true, 'mappedFieldCount', 2),
-    'maxAttempts', 2,
-    'createdBy', 'admin-user',
-    'requestId', 'request-write-sql-0001',
-    'correlationId', 'correlation-write-sql-0001',
-    'createdAt', '2026-07-23T01:00:00.000Z'
-  );
+  v_command jsonb;
+  v_confirmation jsonb;
+  v_version integer;
+  v_hash text;
 begin
-  begin
-    perform * from public.support_create_servicenow_write_command(
-      v_command_payload || jsonb_build_object(
-        'commandId', 'command-invalid-source-001',
-        'idempotencyKey', repeat('e', 64),
-        'sourceType', 'supper_ticket',
-        'sourceReference', 'missing-ticket-id'
-      )
-    );
-    raise exception 'Missing linked source was accepted';
-  exception when foreign_key_violation then
-    if sqlerrm <> 'SERVICENOW_WRITE_SOURCE_NOT_FOUND' then raise; end if;
-  end;
-  if exists (
-    select 1 from public.servicenow_write_commands
-    where id = 'command-invalid-source-001'
-  ) then raise exception 'Rejected linked source created a command'; end if;
+  if public.support_servicenow_write_idempotency_hash(
+    'connection-a','create_incident','create:initial',
+    'supper_ticket','ticket:T-100','incident'
+  )<>'06cfd138fb4bbab5d8a82359e05d667ac6df4317f5e1259b22b08fec510ac1a6' then
+    raise exception 'TypeScript/PostgreSQL idempotency parity failed';
+  end if;
+  if public.support_servicenow_write_normalized_hash(
+    public.support_servicenow_write_normalize(
+      'create_incident',
+      jsonb_build_object('shortDescription','S','description','D'),
+      (select field_mapping from public.servicenow_write_mappings where id='mapping-create-00000001'),
+      '06cfd138fb4bbab5d8a82359e05d667ac6df4317f5e1259b22b08fec510ac1a6'
+    )
+  )<>'26096def22561832e72682010c663017acde6c4104fd6a9c62aee17451b01965' then
+    raise exception 'TypeScript/PostgreSQL normalized hash parity failed';
+  end if;
 
-  select * into v_result from public.support_create_servicenow_write_command(v_command_payload);
-  if v_result.action <> 'created' or v_result.command_status <> 'validated' then
+  v_command := public.supper_test_write_payload(
+    'command-test-0000000001','manual-op:sql-0001'
+  );
+  select * into v_result from public.support_create_servicenow_write_command(v_command);
+  if v_result.action<>'created' or v_result.command_status<>'validated' then
     raise exception 'Initial command creation failed';
   end if;
 
   select * into v_result from public.support_create_servicenow_write_command(
-    jsonb_set(v_command_payload, '{commandId}', '"command-test-0000000002"'::jsonb)
+    jsonb_set(v_command,'{commandId}','"command-test-0000000002"'::jsonb)
   );
-  if v_result.action <> 'unchanged' or v_result.command_id <> 'command-test-0000000001' then
-    raise exception 'Identical command did not deduplicate';
+  if v_result.action<>'unchanged' or v_result.command_id<>'command-test-0000000001' then
+    raise exception 'Identical operation did not deduplicate';
   end if;
 
   begin
     perform * from public.support_create_servicenow_write_command(
-      jsonb_set(
-        jsonb_set(v_command_payload, '{commandId}', '"command-test-0000000003"'::jsonb),
-        '{normalizedPayloadHash}', to_jsonb(repeat('c', 64))
+      public.supper_test_write_payload(
+        'command-test-0000000003','manual-op:sql-0001','Changed material'
       )
     );
-    raise exception 'Changed idempotency material was accepted';
+    raise exception 'Changed material reused one operation';
   exception when unique_violation then
-    if sqlerrm <> 'SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT' then raise; end if;
+    if sqlerrm<>'SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT' then raise; end if;
   end;
 
-  select * into v_attempt from public.support_begin_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-dry-000000000001',
-    'executionMode', 'dry_run',
-    'retry', false,
-    'requestId', 'request-write-sql-0002',
-    'startedAt', '2026-07-23T01:01:00.000Z'
-  ));
-  if v_attempt.attempt_number <> 1 or v_attempt.live_attempt_count <> 0 then
-    raise exception 'Dry-run consumed live attempt budget';
-  end if;
-
-  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-dry-000000000001',
-    'outcome', 'dry_run',
-    'retryable', false,
-    'requestSummary', jsonb_build_object('method', 'POST', 'fieldNames', jsonb_build_array('description', 'short_description')),
-    'responseSummary', jsonb_build_object('validated', true, 'providerWritePerformed', false),
-    'targetSysId', '',
-    'targetNumber', '',
-    'errorCode', '',
-    'errorMessage', '',
-    'finishedAt', '2026-07-23T01:01:01.000Z'
-  ));
-  if (select status from public.servicenow_write_commands where id = 'command-test-0000000001') <> 'dry_run_ready' then
-    raise exception 'Dry-run did not reach dry_run_ready';
-  end if;
-
-  select * into v_attempt from public.support_begin_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-live-00000000001',
-    'executionMode', 'live',
-    'retry', false,
-    'requestId', 'request-write-sql-0003',
-    'startedAt', '2026-07-23T01:02:00.000Z'
-  ));
-  if v_attempt.attempt_number <> 2 or v_attempt.live_attempt_count <> 1 then
-    raise exception 'Live attempt count was not bounded';
-  end if;
-
-  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-live-00000000001',
-    'outcome', 'failed',
-    'retryable', true,
-    'requestSummary', jsonb_build_object('method', 'POST'),
-    'responseSummary', '{}'::jsonb,
-    'targetSysId', '',
-    'targetNumber', '',
-    'errorCode', 'SERVICENOW_WRITE_TIMEOUT',
-    'errorMessage', 'ServiceNow write timed out',
-    'nextRetryAt', '2026-07-23T01:03:00.000Z',
-    'finishedAt', '2026-07-23T01:02:01.000Z'
-  ));
-  if not exists (
-    select 1 from public.servicenow_write_commands
-    where id = 'command-test-0000000001' and status = 'retry_scheduled'
-      and attempt_count = 1 and next_retry_at is not null
-  ) then raise exception 'Retry was not scheduled safely'; end if;
-
-  select * into v_attempt from public.support_begin_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-retry-0000000001',
-    'executionMode', 'retry',
-    'retry', true,
-    'requestId', 'request-write-sql-0004',
-    'startedAt', '2026-07-23T01:03:00.000Z'
-  ));
-  if v_attempt.live_attempt_count <> 2 then raise exception 'Retry budget did not advance'; end if;
-
-  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
-    'commandId', 'command-test-0000000001',
-    'attemptId', 'attempt-retry-0000000001',
-    'outcome', 'succeeded',
-    'retryable', false,
-    'requestSummary', jsonb_build_object('method', 'POST'),
-    'responseSummary', jsonb_build_object('httpStatus', 201, 'number', 'INC0001001', 'sysId', repeat('d', 32)),
-    'targetSysId', repeat('d', 32),
-    'targetNumber', 'INC0001001',
-    'errorCode', '',
-    'errorMessage', '',
-    'finishedAt', '2026-07-23T01:03:01.000Z'
-  ));
-  if not exists (
-    select 1 from public.servicenow_write_commands
-    where id = 'command-test-0000000001' and status = 'succeeded'
-      and attempt_count = 2 and target_number = 'INC0001001'
-  ) then raise exception 'Successful retry was not finalized'; end if;
-
   select * into v_result from public.support_create_servicenow_write_command(
-    jsonb_set(v_command_payload, '{commandId}', '"command-test-0000000004"'::jsonb)
+    public.supper_test_write_payload(
+      'command-test-0000000004','manual-op:sql-0002'
+    )
   );
-  if v_result.action <> 'unchanged' or v_result.command_status <> 'succeeded' then
-    raise exception 'Completed create command no longer deduplicates';
+  if v_result.action<>'created' then
+    raise exception 'Distinct operation on same source was rejected';
   end if;
+
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload_for(
+      'command-comment-00000001','add_comment','comment:event-0001',
+      jsonb_build_object('number','INC0010001','text','First reviewed comment')
+    )
+  );
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload_for(
+      'command-comment-00000002','add_comment','comment:event-0002',
+      jsonb_build_object('number','INC0010001','text','Second reviewed comment')
+    )
+  );
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload_for(
+      'command-work-note-0000001','add_work_note','work-note:event-0001',
+      jsonb_build_object('sysId',repeat('c',32),'text','Reviewed work note')
+    )
+  );
+  if (
+    select count(*) from public.servicenow_write_commands
+    where source_type='supper_ticket'
+      and source_entity_reference='ticket-write-00000001'
+      and command_type in ('add_comment','add_work_note')
+  )<>3 then
+    raise exception 'Multiple operations on one Ticket were not preserved';
+  end if;
+
+  begin
+    perform public.support_servicenow_write_normalize(
+      'update_incident',
+      jsonb_build_object('sysId',repeat('a',32),'number','INC0010001','state','2'),
+      (select field_mapping from public.servicenow_write_mappings where id='mapping-update-00000001'),
+      repeat('a',64)
+    );
+    raise exception 'Both sysId and number were accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_TARGET_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_normalize(
+      'add_comment',
+      jsonb_build_object('text','Missing target'),
+      (select field_mapping from public.servicenow_write_mappings where id='mapping-comment-00000001'),
+      repeat('a',64)
+    );
+    raise exception 'Missing sysId and number were accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_TARGET_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_normalize(
+      'create_incident',
+      jsonb_build_object(
+        'shortDescription','Invalid reference','description','Invalid reference',
+        'callerId',repeat('A',32)
+      ),
+      (select field_mapping from public.servicenow_write_mappings where id='mapping-create-00000001'),
+      repeat('a',64)
+    );
+    raise exception 'Uppercase reference sys_id was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_PAYLOAD_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+      'id','mapping-invalid-00000001','connectionId','connection-test-00000001',
+      'commandType','add_comment','mappingName','invalid','active',true,
+      'fieldMapping','{"text":"work_notes"}'::jsonb,'metadata','{}'::jsonb,
+      'updatedAt','2026-07-23T01:00:00.000Z'
+    ));
+    raise exception 'Cross-journal mapping was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_MAPPING_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
+      'id','mapping-duplicate-0000001','connectionId','connection-test-00000001',
+      'commandType','update_incident','mappingName','duplicate','active',true,
+      'fieldMapping','{
+        "shortDescription":"short_description","description":"description","state":"state",
+        "impact":"impact","urgency":"urgency","assignmentGroup":"assignment_group",
+        "customer":"company","projectCode":"company"
+      }'::jsonb,'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+    ));
+    raise exception 'Duplicate mapping target was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_MAPPING_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
+      'id','connection-invalid-00001','name','Invalid','active','true',
+      'authMode','basic','instanceUrl','https://example.service-now.com',
+      'incidentTable','incident','timeoutMs','15000','metadata','{}'::jsonb,
+      'updatedAt','not-a-timestamp'
+    ));
+    raise exception 'Malformed booleans, integers, and timestamps were cast';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_CONNECTION_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','command-test-0000000001','action','execute','actorUserId','admin-user',
+      'expectedVersion','not-an-integer','expectedNormalizedPayloadHash',repeat('a',64),
+      'confirmationNonceHash',repeat('f',64),'issuedAt','invalid',
+      'expiresAt','2026-07-23T01:02:00.000Z'
+    ));
+    raise exception 'Malformed cast material was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_CONFIRMATION_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-test-0000000004','attemptId','attempt-chronology-00001',
+      'executionMode','dry_run','retry',false,'requestId','request-write-sql-chronology',
+      'startedAt','2026-07-22T23:59:59.000Z','actorUserId','admin-user'
+    ));
+    raise exception 'Attempt chronology before command creation was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_CHRONOLOGY_INVALID' then raise; end if;
+  end;
+
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-test-0000000001';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-test-0000000001','action','execute','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('f',64),
+    'issuedAt','2026-07-23T01:01:00.000Z','expiresAt','2026-07-23T01:03:00.000Z'
+  ));
+  select * into v_attempt from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-test-0000000001','attemptId','attempt-live-00000000001',
+    'executionMode','live','retry',false,'requestId','request-write-sql-0002',
+    'startedAt','2026-07-23T01:01:30.000Z','actorUserId','admin-user',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('f',64)
+  ));
+  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-test-0000000001','attemptId','attempt-live-00000000001',
+    'outcome','uncertain','deliveryDisposition','may_have_committed',
+    'failurePhase','mutation_dispatch','retryAllowed',false,
+    'retryReason','','reconciliationReason','Mutation dispatch ended without a response',
+    'requestSummary',jsonb_build_object('method','POST'),
+    'responseSummary','{}'::jsonb,'targetSysId','','targetNumber','',
+    'errorCode','SERVICENOW_WRITE_TIMEOUT','errorMessage','ServiceNow request timed out',
+    'finishedAt','2026-07-23T01:01:31.000Z'
+  ));
+  if not exists (
+    select 1 from public.servicenow_write_commands
+    where id='command-test-0000000001' and status='reconciliation_required'
+      and delivery_disposition='may_have_committed' and not retry_allowed
+      and next_retry_at is null
+  ) then raise exception 'Uncertain mutation remained retryable'; end if;
+
+  begin
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-test-0000000001','attemptId','attempt-unsafe-retry-0001',
+      'executionMode','retry','retry',true,'requestId','request-write-sql-0003',
+      'startedAt','2026-07-23T01:02:00.000Z','actorUserId','admin-user'
+    ));
+    raise exception 'Uncertain command was retryable';
+  exception when invalid_parameter_value then
+    if sqlerrm not in (
+      'SERVICENOW_WRITE_CONFIRMATION_INVALID','SERVICENOW_WRITE_RETRY_NOT_ALLOWED'
+    ) then raise; end if;
+  end;
+
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-test-0000000001';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-test-0000000001','action','reconcile_by_read_back',
+    'actorUserId','admin-user','expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('e',64),
+    'issuedAt','2026-07-23T01:02:00.000Z','expiresAt','2026-07-23T01:04:00.000Z'
+  ));
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','command-test-0000000001','action','reconcile_by_read_back',
+    'result','inconclusive','safeReadBackSummary',jsonb_build_object('method','correlation_marker'),
+    'targetSysId','','targetNumber','','actorUserId','admin-user',
+    'requestId','request-write-sql-0004','checkedAt','2026-07-23T01:02:30.000Z',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('e',64)
+  ));
+  if not exists (
+    select 1 from public.servicenow_write_reconciliation_events
+    where command_id='command-test-0000000001' and result='inconclusive'
+  ) then raise exception 'Reconciliation event was not appended'; end if;
+
+  begin
+    update public.servicenow_write_reconciliation_events set result='changed'
+    where command_id='command-test-0000000001';
+    raise exception 'Reconciliation history was mutable';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_IMMUTABLE' then raise; end if;
+  end;
+
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-test-0000000001';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-test-0000000001','action','mark_not_applied_after_verification',
+    'actorUserId','admin-user','expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('d',64),
+    'issuedAt','2026-07-23T01:03:00.000Z','expiresAt','2026-07-23T01:05:00.000Z'
+  ));
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','command-test-0000000001','action','mark_not_applied_after_verification',
+    'result','confirmed_not_applied','safeReadBackSummary',jsonb_build_object('method','manual_verification'),
+    'targetSysId','','targetNumber','','actorUserId','admin-user',
+    'requestId','request-write-sql-0005','checkedAt','2026-07-23T01:03:30.000Z',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('d',64)
+  ));
+  if not exists (
+    select 1 from public.servicenow_write_commands
+    where id='command-test-0000000001' and status='retry_scheduled'
+      and delivery_disposition='safe_to_retry' and retry_allowed
+      and next_retry_at='2026-07-23T01:03:30.000Z'::timestamptz
+  ) then raise exception 'Verified-not-applied command did not enter safe retry'; end if;
+
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-test-0000000001';
+  begin
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','command-test-0000000001','action','retry','actorUserId','admin-user',
+      'expectedVersion',v_version-1,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('c',64),
+      'issuedAt','2026-07-23T01:03:31.000Z','expiresAt','2026-07-23T01:05:00.000Z'
+    ));
+    raise exception 'Stale confirmation was accepted';
+  exception when serialization_failure then
+    if sqlerrm<>'SERVICENOW_WRITE_VERSION_CONFLICT' then raise; end if;
+  end;
+
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-test-0000000001','action','retry','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('b',64),
+    'issuedAt','2026-07-23T01:03:40.000Z','expiresAt','2026-07-23T01:05:00.000Z'
+  ));
+  select * into v_attempt from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-test-0000000001','attemptId','attempt-safe-retry-00001',
+    'executionMode','retry','retry',true,'requestId','request-write-sql-0006',
+    'startedAt','2026-07-23T01:03:50.000Z','actorUserId','admin-user',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('b',64)
+  ));
+  if exists (
+    select 1 from public.servicenow_write_commands
+    where id='command-test-0000000001' and confirmation_nonce_hash is not null
+  ) then raise exception 'Confirmation nonce was not consumed'; end if;
+  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-test-0000000001','attemptId','attempt-safe-retry-00001',
+    'outcome','failed','deliveryDisposition','definitely_rejected',
+    'failurePhase','mutation_response','retryAllowed',false,
+    'retryReason','','reconciliationReason','',
+    'requestSummary',jsonb_build_object('method','POST'),'responseSummary','{}'::jsonb,
+    'targetSysId','','targetNumber','','errorCode','SERVICENOW_WRITE_REJECTED',
+    'errorMessage','ServiceNow rejected the write request',
+    'finishedAt','2026-07-23T01:03:51.000Z'
+  ));
+  if not exists (
+    select 1 from public.servicenow_write_commands
+    where id='command-test-0000000001' and status='failed' and not retry_allowed
+  ) then raise exception 'Definitive rejection remained retryable'; end if;
 end;
 $$;
 
 do $$
 begin
-  if has_table_privilege('anon', 'public.servicenow_write_commands', 'select')
-    or has_table_privilege('authenticated', 'public.servicenow_write_commands', 'select') then
-    raise exception 'Browser roles can read write commands';
+  if has_table_privilege('service_role','public.servicenow_write_commands','insert')
+    or has_table_privilege('service_role','public.servicenow_write_connections','update')
+    or has_table_privilege('service_role','public.servicenow_write_mappings','insert')
+    or has_table_privilege('service_role','public.servicenow_write_commands','update')
+    or has_table_privilege('service_role','public.servicenow_write_attempts','insert')
+    or has_table_privilege('service_role','public.servicenow_ticket_links','update')
+    or has_table_privilege('service_role','public.servicenow_write_reconciliation_events','insert') then
+    raise exception 'service_role can directly mutate an authoritative ledger';
   end if;
-  if has_function_privilege('public', 'public.support_create_servicenow_write_command(jsonb)', 'execute')
-    or has_function_privilege('anon', 'public.support_begin_servicenow_write_attempt(jsonb)', 'execute')
-    or has_function_privilege('authenticated', 'public.support_finish_servicenow_write_attempt(jsonb)', 'execute') then
+  if has_table_privilege('anon','public.servicenow_write_commands','select')
+    or has_table_privilege('authenticated','public.servicenow_write_commands','select') then
+    raise exception 'Browser roles can read the write ledger';
+  end if;
+  if has_function_privilege('public','public.support_create_servicenow_write_command(jsonb)','execute')
+    or has_function_privilege('anon','public.support_begin_servicenow_write_attempt(jsonb)','execute')
+    or has_function_privilege('authenticated','public.support_reconcile_servicenow_write_command(jsonb)','execute') then
     raise exception 'Privileged write RPC is browser executable';
   end if;
-  if not has_function_privilege('service_role', 'public.support_create_servicenow_write_command(jsonb)', 'execute')
-    or not has_function_privilege('service_role', 'public.support_begin_servicenow_write_attempt(jsonb)', 'execute')
-    or not has_function_privilege('service_role', 'public.support_finish_servicenow_write_attempt(jsonb)', 'execute') then
-    raise exception 'service_role cannot execute write RPCs';
+  if not has_function_privilege('service_role','public.support_create_servicenow_write_command(jsonb)','execute')
+    or not has_function_privilege('service_role','public.support_issue_servicenow_write_confirmation(jsonb)','execute')
+    or not has_function_privilege('service_role','public.support_begin_servicenow_write_attempt(jsonb)','execute')
+    or not has_function_privilege('service_role','public.support_finish_servicenow_write_attempt(jsonb)','execute')
+    or not has_function_privilege('service_role','public.support_reconcile_servicenow_write_command(jsonb)','execute') then
+    raise exception 'service_role cannot execute controlled write RPCs';
   end if;
 end;
 $$;
@@ -253,13 +584,21 @@ try {
   run("pg_ctl", ["-D", dataDirectory, "-l", logPath, "-o", `-F -k ${socketDirectory} -p ${port}`, "-w", "start"]);
   started = true;
   psql([], baseSchema);
+  for (const name of [
+    "202607220001_unified_intake_core.sql",
+    "202607220002_unified_intake_core_corrections.sql",
+    "202607220003_unified_intake_core_replay_corrections.sql",
+    "202607220004_unified_intake_core_final_integrity.sql",
+  ]) {
+    psql(["-f", path.join(root, "supabase/migrations", name)]);
+  }
   const migration = path.join(root, "supabase/migrations/202607230001_servicenow_write_kernel.sql");
   psql(["-f", migration]);
   psql(["-f", migration]);
   psql([], acceptanceSql);
-  const version = psql(["-Atc", "select version from public.support_schema_migrations where version = '202607230001'"]);
+  const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice safely; linked-source validation, idempotency, dry-run isolation, bounded retries, atomic attempts, and browser-role denial checks passed.");
+  console.log("ServiceNow write migration executed twice after real intake migrations; database-owned identity, allowlisted mappings, uncertain outcomes, one-time confirmation, append-only reconciliation, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

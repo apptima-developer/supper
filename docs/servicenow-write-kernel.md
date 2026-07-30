@@ -1,40 +1,79 @@
 # Controlled ServiceNow Write Kernel
 
-AI-2.0 adds an administrator-operated, server-side write boundary for ServiceNow Incidents. It is available only with `DATA_BACKEND=supabase-relational`, uses the existing server-only ServiceNow credentials, and remains disabled for live provider mutation until `SERVICENOW_WRITE_ENABLED=true`.
+AI-2.0.1 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
 
-This milestone does not connect Unified Intake to automatic ticket creation. It adds no LINE OA or email provider, attachment-byte upload, webhook listener, outbound fanout, Freshservice integration, cron, queue, or background worker.
+This milestone does not connect Unified Intake to automatic creation. It adds no LINE OA or email provider, attachment upload, outbound webhook, Freshservice write, queue, cron, scheduler, or worker.
 
-## Supported commands
+## Commands and identity
 
-All command requests contain a `commandType`, `sourceType`, stable `sourceReference`, optional bounded `maxAttempts`, and a strict type-specific `payload`.
+Every command has separate identity fields:
+
+- `sourceType` identifies the originating domain.
+- `sourceEntityReference` identifies the canonical SUPPER Ticket, Intake conversation, or outbox row. It is optional bounded context for manual commands.
+- `operationReference` identifies one immutable domain operation. Manual commands receive a server-generated operation reference when one is omitted.
+
+The v2 logical key hashes the version, connection, command type, operation reference, source type, source entity reference, and target table. The same operation with unchanged normalized material returns the existing command; changed material conflicts. Different operation references allow multiple updates, comments, or work notes on the same Ticket.
 
 | Command | Required payload | Optional payload |
 | --- | --- | --- |
-| `create_incident` | `shortDescription`, `description` | `callerId`, `category`, `subcategory`, `impact`, `urgency`, `assignmentGroup`, `contactChannel`, `customer`, `projectCode`, `supperTicketNo`, bounded `externalReferences` |
-| `update_incident` | `sysId` or `number`, plus at least one update field | `shortDescription`, `description`, `state`, `impact`, `urgency`, `assignmentGroup`, `customer`, `projectCode` |
-| `add_comment` | `sysId` or `number`, `text` | none |
-| `add_work_note` | `sysId` or `number`, `text` | none |
+| `create_incident` | `shortDescription`, `description` | reviewed Incident fields and bounded external evidence |
+| `update_incident` | exactly one of `sysId` or `number`, plus an update field | reviewed update fields |
+| `add_comment` | exactly one of `sysId` or `number`, `text` | none |
+| `add_work_note` | exactly one of `sysId` or `number`, `text` | none |
 
-Impact and urgency accept only `1`, `2`, or `3`. State accepts only the reviewed values `1`, `2`, `3`, `6`, `7`, and `8`. Unknown fields, control characters, unsafe metadata keys, oversized values, and invalid ServiceNow identifiers are rejected before persistence.
+`callerId`, `assignmentGroup`, and `customer` accept only lowercase 32-character ServiceNow `sys_id` values. Updates and journals reject both-target and no-target requests.
 
-Default normalization maps only explicitly approved fields. Comments map to `comments`; work notes map to `work_notes`. When a command supplies only a ServiceNow number, the server performs an exact bounded number lookup before issuing the write. `externalReferences` are retained as bounded command evidence but are not sent through the default ServiceNow field mapping.
+## Mapping boundary
 
-## Idempotency and state
+Mappings are exact reviewed documents, not arbitrary aliases:
 
-The logical idempotency key is deterministic over the connection, command type, source type, source reference, and target table. The normalized payload is hashed separately.
+- create: `short_description`, `description`, `caller_id`, `category`, `subcategory`, `impact`, `urgency`, `assignment_group`, `contact_type`, `company`, and `u_project_code`;
+- update: `short_description`, `description`, `state`, `impact`, `urgency`, `assignment_group`, `company`, and `u_project_code`;
+- comment: `comments` only;
+- work note: `work_notes` only.
 
-- The same logical key and the same normalized payload return the existing command without creating duplicate work.
-- The same logical key with different normalized material returns a bounded conflict.
-- Provider-assigned `sys_id` and number values added after a successful create do not change the original idempotency identity.
-- Dry runs do not consume the live attempt budget.
+All required entries must be present. Extra sources, alternate targets, duplicate targets, cross-journal fields, and reserved/system fields are rejected by TypeScript and SQL. Only one mapping can be active for each connection and command type.
 
-Command states are:
+Create commands always receive the server-owned marker `SUPPER:<logical-idempotency-key>` in `correlation_id`. User payload and mappings cannot remove or override it. Before every create POST, the adapter performs one bounded exact marker lookup:
 
-`pending` → `validated` → `dry_run_ready` → `executing` → `succeeded`
+- no match permits POST;
+- one match recovers the Incident and performs no POST;
+- multiple matches require reconciliation.
 
-Provider failures enter `failed` or `retry_scheduled` according to their safe retry classification and the configured attempt budget. `cancelled` is reserved in the model; AI-2.0 exposes no cancellation action. Retries are manual and bounded. No scheduler or background worker executes `next_retry_at`.
+`supperTicketNo` is evidence only and is never the provider idempotency marker.
 
-If the provider may have received a mutation but SUPPER cannot safely classify the result, the command remains `executing` and the server emits `SERVICENOW_WRITE_EXECUTION_STATE_UNCERTAIN`. Operators must reconcile the target in ServiceNow before taking further action; the kernel will not blindly retry an uncertain mutation.
+## Mutation outcomes
+
+The ledger records both a delivery disposition and failure phase.
+
+Delivery dispositions are `definitely_not_sent`, `definitely_rejected`, `safe_to_retry`, `confirmed_succeeded`, and `may_have_committed`. Failure phases are `configuration`, `authorization`, `number_lookup`, `mutation_dispatch`, `mutation_response`, `response_parse`, and `read_back`.
+
+Once POST or PATCH dispatch begins, timeout, network disconnect, abort, HTTP 5xx, malformed/empty/oversized 2xx, and invalid returned identity are `may_have_committed`. The attempt finishes as `uncertain`; the command enters `reconciliation_required`; `retry_allowed` is false; and `next_retry_at` is empty. Journal uncertainty follows the same rule.
+
+Only a definitive `safe_to_retry` outcome can become `retry_scheduled`, and only while attempts remain. Retry also requires the live-write switch, a due `next_retry_at`, and a fresh server confirmation. `failed`, `reconciliation_required`, `succeeded`, `executing`, `cancelled`, and exhausted commands cannot retry.
+
+## Confirmation and reconciliation
+
+Live execute, retry, and reconciliation require a server-issued confirmation:
+
+```json
+{
+  "confirmed": true,
+  "expectedVersion": 3,
+  "expectedNormalizedPayloadHash": "<64 lowercase hex>",
+  "confirmationNonce": "<server-issued nonce>"
+}
+```
+
+The nonce expires after two minutes, is stored only as a hash, is scoped to command/action/user/version/hash, and is consumed atomically. Stale or replayed confirmation material is rejected. Dry-run requires no confirmation and consumes no live attempt.
+
+Administrators with `settings:manage` may:
+
+- `reconcile_by_read_back`: read only; create uses the exact marker, update compares reviewed fields by exact `sys_id`, and journals remain inconclusive without a reviewed journal verification method;
+- `mark_succeeded_after_verification`: record externally verified success;
+- `mark_not_applied_after_verification`: record verified non-application and permit a bounded manual retry when attempts remain.
+
+Reconciliation never repeats the mutation. Every decision appends an immutable event with actor, action, result, command versions, timestamp, and bounded safe read-back summary.
 
 ## Storage and security
 
@@ -45,41 +84,36 @@ Migration `supabase/migrations/202607230001_servicenow_write_kernel.sql` creates
 - `servicenow_write_commands`
 - `servicenow_write_attempts`
 - `servicenow_ticket_links`
+- `servicenow_write_reconciliation_events`
 
-Every table has RLS enabled and no browser policy. Table access and the three privileged write RPCs are revoked from `PUBLIC`, `anon`, and `authenticated`, then granted only to `service_role`. RPCs are `SECURITY DEFINER`, use a controlled search path, and atomically enforce deduplication and state transitions.
+All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, normalized payload, marker, and normalized hash from raw command material and the active mapping.
 
-Connection rows contain only non-secret configuration. Passwords, OAuth secrets, authorization headers, raw provider bodies, attachment bytes, and full response bodies are never persisted or returned to the browser.
+Database rows are parsed with strict Zod schemas before presentation. Browser-safe output never includes credentials, authorization headers, raw provider bodies, original payloads, or long narrative values.
 
-Browser-safe command details expose only:
+## Readiness
 
-- command status, bounded identifiers, timestamps, and attempt counters;
-- normalized field names, value lengths, and reviewed identifier/enum values;
-- request method, endpoint path, table, field names, and safe target identifiers;
-- response HTTP status and selected `sys_id`, number, or state values;
-- bounded safe error codes and messages.
-
-The command and attempt ledger is the authoritative execution audit. A normal application audit row is attempted after the atomic command operation. If that secondary audit fails, the committed command result remains successful, the response includes `secondary_audit_write_failed`, and a sanitized critical server event is emitted.
+Readiness reports `configured`, `relationalStorage`, `connectionTestable`, `connectionTested`, `liveWriteEnabled`, and `liveWriteReady`. An administrator can run the bounded GET-only connection test while `SERVICENOW_WRITE_ENABLED=false`. The test creates no command or attempt and performs no POST/PATCH. Live execute and retry remain blocked.
 
 ## Configuration
-
-Reuse the existing server-only ServiceNow settings and add:
 
 ```dotenv
 SERVICENOW_WRITE_ENABLED=false
 SERVICENOW_WRITE_MAX_ATTEMPTS=3
 ```
 
-`SERVICENOW_WRITE_ENABLED` defaults to false. The maximum attempt value must be between 1 and 10. Do not expose either ServiceNow credential through a `NEXT_PUBLIC_` variable.
+The attempt limit is 1 through 10. No ServiceNow secret may use a `NEXT_PUBLIC_` name.
 
-## Apply the migration
+## Migration strategy
 
-Apply this migration only to the verified isolated `supper-ai-dev` project during AI-2.0 acceptance. Do not apply it to production and never edit it after it has been applied.
+`202607230001` was amended before first remote application. Evidence: the audited baseline contained the file only locally, the preceding delivery explicitly deferred manual SQL execution, and no remote SQL command was run. If the version is present on any target, stop; do not run the amended file or edit applied history.
 
-1. Confirm migrations `202607220001` through `202607220004` are present in `support_schema_migrations`.
-2. Take the normal dev database recovery checkpoint.
-3. From the exact source revision, run `npm run verify:migrations`, `npm run verify:architecture`, and `npm run verify:servicenow-write-sql`.
-4. In the dev Supabase SQL Editor, paste and execute the complete unmodified `202607230001_servicenow_write_kernel.sql`.
-5. Confirm the migration row, RLS flags, and grants with the queries below.
+Manual application to the isolated `supper-ai-dev` project only:
+
+1. Verify `202607220001` through `202607220004` exist and `202607230001` does not.
+2. Take the normal development recovery checkpoint.
+3. Run the full acceptance suite from the exact reviewed source revision.
+4. Paste and execute the complete `202607230001_servicenow_write_kernel.sql` once in the isolated development SQL Editor.
+5. Verify version, RLS, grants, and RPC privileges:
 
 ```sql
 select version, description
@@ -89,39 +123,46 @@ where version = '202607230001';
 select relname, relrowsecurity
 from pg_class
 where relnamespace = 'public'::regnamespace
-  and relname in (
-    'servicenow_write_connections',
-    'servicenow_write_mappings',
-    'servicenow_write_commands',
-    'servicenow_write_attempts',
-    'servicenow_ticket_links'
-  )
+  and relname like 'servicenow_write_%'
 order by relname;
+
+select table_name, privilege_type
+from information_schema.role_table_grants
+where grantee = 'service_role'
+  and table_schema = 'public'
+  and table_name like 'servicenow_write_%'
+order by table_name, privilege_type;
 
 select routine_name, grantee, privilege_type
 from information_schema.routine_privileges
 where routine_schema = 'public'
   and routine_name in (
+    'support_upsert_servicenow_write_connection',
+    'support_upsert_servicenow_write_mapping',
     'support_create_servicenow_write_command',
+    'support_issue_servicenow_write_confirmation',
     'support_begin_servicenow_write_attempt',
-    'support_finish_servicenow_write_attempt'
+    'support_finish_servicenow_write_attempt',
+    'support_reconcile_servicenow_write_command'
   )
 order by routine_name, grantee;
 ```
 
-Expected: one migration row, RLS true for all five tables, and only `service_role` execution for the three write RPCs.
+Expected: one migration row; RLS on all six write tables; `service_role` table access is select-only; and privileged RPC execution belongs only to `service_role`.
 
-## Manual smoke test
+## Preview smoke test
 
-1. Deploy the reviewed `ai_development` commit to the isolated Preview with `DATA_BACKEND=supabase-relational`, existing ServiceNow configuration, and `SERVICENOW_WRITE_ENABLED=false`.
+1. Deploy the reviewed `ai_development` revision to the isolated Preview with relational storage and live writes disabled.
 2. Sign in as an administrator and open **Settings → ServiceNow integration → Write controls**.
-3. Confirm the readiness panel reports configured relational storage and that live write is blocked.
-4. Compose each command type with a unique stable source reference. Validate it and inspect the mapping preview; long text must appear only as a character count.
-5. Run dry runs. Confirm `dry_run_ready`, a durable dry-run attempt, no ServiceNow mutation, and unchanged live attempt count.
-6. Submit the same source reference and payload again; confirm the existing command is returned. Change mapped material while retaining the source reference; confirm a conflict.
-7. Enable `SERVICENOW_WRITE_ENABLED=true` only in the isolated Preview, redeploy, and use **Test readiness**.
-8. Execute one approved disposable Incident command through the explicit confirmation dialog. Confirm the safe response summary, target link, command history, and ServiceNow result.
-9. Exercise manual retry only with a deliberately retryable dev failure and confirm the attempt budget is enforced.
-10. Disable the write switch after acceptance.
+3. Confirm connection testing is available, live mutation is blocked, and **Test readiness** performs a GET successfully.
+4. Create separate manual commands for all four command types. Verify exact target validation, safe preview field names, and hidden narrative values.
+5. Run dry-runs and confirm no provider mutation and no live attempt consumption.
+6. Repeat one operation reference with unchanged material and confirm deduplication. Change its material and confirm conflict. Use a new operation reference on the same Ticket and confirm a new command.
+7. Enable live writes only on the isolated Preview and redeploy.
+8. Execute one disposable create after the server confirmation. Confirm the exact `correlation_id` marker and recovered target.
+9. Simulate a definitive safe retry condition and confirm Retry appears only for `retry_scheduled`.
+10. Simulate an ambiguous response and confirm `reconciliation_required`, no next retry, and no Retry button.
+11. Exercise read-back and one manual reconciliation decision. Confirm the immutable history and stale/replayed confirmation rejection.
+12. Disable live writes and redeploy after acceptance.
 
-Do not paste credentials, provider response bodies, customer content, or production identifiers into acceptance evidence.
+Never use production identifiers or paste credentials, provider bodies, or customer narratives into acceptance evidence.

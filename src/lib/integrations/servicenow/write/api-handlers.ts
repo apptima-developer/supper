@@ -12,8 +12,11 @@ import { isIntegrationBoundaryError } from "../../errors";
 import { serviceNowErrorHttpStatus } from "../errors";
 import { ServiceNowWriteRepository } from "./repository";
 import {
+  confirmedServiceNowWriteActionRequestSchema,
   createServiceNowWriteCommandRequestSchema,
+  issueServiceNowWriteConfirmationRequestSchema,
   queryObject,
+  reconcileServiceNowWriteCommandRequestSchema,
   serviceNowWriteCommandIdSchema,
   serviceNowWriteCommandsQuerySchema,
 } from "./schemas";
@@ -23,7 +26,9 @@ import {
   executeCommandDryRun,
   getCommandStatus,
   getServiceNowWriteOperationsSummary,
+  issueCommandConfirmation,
   listCommands,
+  reconcileCommand,
   retryCommand,
   testServiceNowWriteReadiness,
 } from "./service";
@@ -39,6 +44,8 @@ export type ServiceNowWriteApiDependencies = {
   list?: typeof listCommands;
   summary?: typeof getServiceNowWriteOperationsSummary;
   readiness?: typeof testServiceNowWriteReadiness;
+  issueConfirmation?: typeof issueCommandConfirmation;
+  reconcile?: typeof reconcileCommand;
 };
 
 function authorize(session: Session | null, request: Request, correlationId: string) {
@@ -126,18 +133,59 @@ async function commandAction(
 ) {
   return authorized(request, dependencies, async (session, correlationId, repository) => {
     const safeCommandId = serviceNowWriteCommandIdSchema.parse(commandId);
-    const bytes = await readLimitedBodyBytes(request, 1);
-    if (bytes.byteLength) throw new HttpError(400, "UNEXPECTED_REQUEST_BODY", "This operation does not accept a request body");
-    const handler = action === "dry_run"
-      ? dependencies.dryRun || executeCommandDryRun
-      : action === "execute"
-        ? dependencies.execute || executeCommand
-        : dependencies.retry || retryCommand;
-    const result = await handler({
+    const confirmation = action === "dry_run"
+      ? undefined
+      : await readJsonBody(request, confirmedServiceNowWriteActionRequestSchema, 4 * 1024);
+    if (action === "dry_run") {
+      const bytes = await readLimitedBodyBytes(request, 1);
+      if (bytes.byteLength) throw new HttpError(400, "UNEXPECTED_REQUEST_BODY", "This operation does not accept a request body");
+    }
+    const common = {
       commandId: safeCommandId,
       session,
       requestId: correlationId,
       correlationId,
+      abortSignal: request.signal,
+    };
+    const result = action === "dry_run"
+      ? await (dependencies.dryRun || executeCommandDryRun)(common, { repository })
+      : action === "execute"
+        ? await (dependencies.execute || executeCommand)({ ...common, confirmation: confirmation! }, { repository })
+        : await (dependencies.retry || retryCommand)({ ...common, confirmation: confirmation! }, { repository });
+    return jsonResponseWithRequestId(result, request, {}, correlationId);
+  });
+}
+
+export function handleServiceNowWriteConfirmationPost(
+  request: Request,
+  commandId: string,
+  dependencies: ServiceNowWriteApiDependencies,
+) {
+  return authorized(request, dependencies, async (session, correlationId, repository) => {
+    const body = await readJsonBody(request, issueServiceNowWriteConfirmationRequestSchema, 4 * 1024);
+    const result = await (dependencies.issueConfirmation || issueCommandConfirmation)({
+      commandId: serviceNowWriteCommandIdSchema.parse(commandId),
+      ...body,
+      session,
+    }, { repository });
+    return jsonResponseWithRequestId(result, request, { status: 201 }, correlationId);
+  });
+}
+
+export function handleServiceNowWriteReconciliationPost(
+  request: Request,
+  commandId: string,
+  dependencies: ServiceNowWriteApiDependencies,
+) {
+  return authorized(request, dependencies, async (session, correlationId, repository) => {
+    const body = await readJsonBody(request, reconcileServiceNowWriteCommandRequestSchema, 4 * 1024);
+    const result = await (dependencies.reconcile || reconcileCommand)({
+      commandId: serviceNowWriteCommandIdSchema.parse(commandId),
+      action: body.action,
+      session,
+      requestId: correlationId,
+      correlationId,
+      confirmation: body,
       abortSignal: request.signal,
     }, { repository });
     return jsonResponseWithRequestId(result, request, {}, correlationId);

@@ -80,4 +80,12 @@ Synchronization persistence is supported only with `DATA_BACKEND=supabase-relati
 
 AI-1.2 adds a protected administrator [Operations page](./servicenow-operations.md) and provider-neutral [customer mapping](./servicenow-customer-mapping.md). Stable ServiceNow company identity maps to an existing active `support_customers` row; applying or changing a mapping atomically reassigns only linked ServiceNow tickets while preserving SUPPER-owned data. Future manual synchronization uses active mappings automatically. Deactivation retains history and leaves existing ticket assignments unchanged.
 
-This layer remains read-only toward ServiceNow. It adds no schedule, customer creation, raw provider response viewer, or ServiceNow Incident write method.
+The AI-1.2 layer remains read-only toward ServiceNow. It adds no schedule, customer creation, or raw provider response viewer.
+
+## AI-2.0.1 controlled writes
+
+AI-2.0.1 adds a separate administrator-operated [Controlled ServiceNow Write Kernel](./servicenow-write-kernel.md). It does not change the diagnostic, synchronization, or customer-mapping read paths. Live mutation is disabled independently by default.
+
+The write adapter supports reviewed Incident create, update, comment, and work-note commands only. Create uses a server-owned `correlation_id` marker and performs an exact marker lookup before POST. Update and journal commands require exactly one `sys_id` or number. After mutation dispatch, ambiguous transport or response failures are recorded as `may_have_committed` and require reconciliation; they are never blindly retried.
+
+Connection testing remains an authenticated, bounded GET and is available while live writes are disabled. Execute, retry, and reconciliation require an expiring one-time server confirmation tied to command version and normalized hash.

@@ -42,7 +42,9 @@ Required production variable names:
 
 Optional request-limit variables are `MAX_JSON_BODY_KB`, `MAX_IMPORT_FILE_MB`, and `MAX_INLINE_IMAGE_MB`.
 
-AI-2.0 adds optional ServiceNow write controls. `SERVICENOW_WRITE_ENABLED` defaults to false and gates only live provider mutation; `SERVICENOW_WRITE_MAX_ATTEMPTS` defaults to 3 and is bounded from 1 through 10. Follow the isolated-dev migration and manual acceptance sequence in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md) before enabling the switch.
+AI-2.0.1 adds optional ServiceNow write controls. `SERVICENOW_WRITE_ENABLED` defaults to false and gates only live provider mutation; the bounded GET readiness test remains available. `SERVICENOW_WRITE_MAX_ATTEMPTS` defaults to 3 and is bounded from 1 through 10.
+
+An ambiguous post-dispatch outcome is an operator event, not a retry event. Leave it in `reconciliation_required`, inspect only the safe error/phase/disposition/known target/read-back summary, and use a confirmed read-back or verified manual decision. Never replay the mutation to discover whether it succeeded. Retry only when the command explicitly reports `retry_scheduled` and `retryAllowed=true`. Follow the isolated-dev migration and smoke sequence in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md) before enabling the switch.
 
 Optional build metadata variables:
 

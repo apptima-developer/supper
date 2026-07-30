@@ -1,5 +1,4 @@
-import { classifyIntakeJsonKey } from "@/lib/intake-core/sensitive-data";
-import { serviceNowWriteCommandTypeSchema } from "./schemas";
+import { serviceNowCorrelationMarkerSchema, serviceNowWriteCommandTypeSchema } from "./schemas";
 import type {
   NormalizedServiceNowWriteCommand,
   ServiceNowWriteCommandInput,
@@ -9,7 +8,8 @@ import type {
 
 export type ServiceNowWriteFieldMapping = Record<string, string>;
 
-const defaultMappings: Record<ServiceNowWriteCommandType, ServiceNowWriteFieldMapping> = {
+const reservedCorrelationField = "correlation_id";
+const approvedMappings: Record<ServiceNowWriteCommandType, Readonly<Record<string, string>>> = {
   create_incident: {
     shortDescription: "short_description",
     description: "description",
@@ -22,7 +22,6 @@ const defaultMappings: Record<ServiceNowWriteCommandType, ServiceNowWriteFieldMa
     contactChannel: "contact_type",
     customer: "company",
     projectCode: "u_project_code",
-    supperTicketNo: "correlation_id",
   },
   update_incident: {
     shortDescription: "short_description",
@@ -38,44 +37,48 @@ const defaultMappings: Record<ServiceNowWriteCommandType, ServiceNowWriteFieldMa
   add_work_note: { text: "work_notes" },
 };
 
-const allowedSourceFields: Record<ServiceNowWriteCommandType, Set<string>> = {
-  create_incident: new Set(Object.keys(defaultMappings.create_incident)),
-  update_incident: new Set(Object.keys(defaultMappings.update_incident)),
-  add_comment: new Set(["text"]),
-  add_work_note: new Set(["text"]),
-};
-
-function validateTargetField(value: string) {
-  if (!/^[a-z][a-z0-9_]{0,79}$/.test(value) || classifyIntakeJsonKey(value) !== "safe") {
-    throw Object.assign(new Error("ServiceNow field mapping is invalid"), { code: "SERVICENOW_WRITE_MAPPING_INVALID" });
-  }
-  return value;
+function invalidMapping(): never {
+  throw Object.assign(new Error("ServiceNow field mapping is outside the reviewed allowlist"), {
+    code: "SERVICENOW_WRITE_MAPPING_INVALID",
+  });
 }
 
-export function validateServiceNowWriteFieldMapping(commandType: ServiceNowWriteCommandType, mapping: unknown) {
+export function validateServiceNowWriteFieldMapping(
+  commandType: ServiceNowWriteCommandType,
+  mapping: unknown,
+) {
   serviceNowWriteCommandTypeSchema.parse(commandType);
-  if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
-    throw Object.assign(new Error("ServiceNow field mapping is invalid"), { code: "SERVICENOW_WRITE_MAPPING_INVALID" });
-  }
+  if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) invalidMapping();
+  const approved = approvedMappings[commandType];
   const entries = Object.entries(mapping);
-  if (entries.length > 30) throw Object.assign(new Error("ServiceNow field mapping is too large"), { code: "SERVICENOW_WRITE_MAPPING_INVALID" });
+  if (entries.length !== Object.keys(approved).length) invalidMapping();
+  const targetFields = new Set<string>();
   const result: ServiceNowWriteFieldMapping = {};
   for (const [source, target] of entries) {
-    if (!allowedSourceFields[commandType].has(source) || typeof target !== "string") {
-      throw Object.assign(new Error("ServiceNow field mapping is invalid"), { code: "SERVICENOW_WRITE_MAPPING_INVALID" });
+    if (typeof target !== "string"
+      || approved[source] !== target
+      || target === reservedCorrelationField
+      || targetFields.has(target)) {
+      invalidMapping();
     }
-    result[source] = validateTargetField(target);
+    targetFields.add(target);
+    result[source] = target;
+  }
+  for (const requiredSource of Object.keys(approved)) {
+    if (!Object.hasOwn(result, requiredSource)) invalidMapping();
   }
   return result;
 }
 
 export function serviceNowDefaultWriteMapping(commandType: ServiceNowWriteCommandType) {
-  return { ...defaultMappings[commandType] };
+  return { ...approvedMappings[commandType] };
 }
 
 function sourceFields(input: ServiceNowWriteCommandInput) {
   if (input.commandType === "create_incident") {
-    return Object.fromEntries(Object.entries(input.payload).filter(([key]) => key !== "externalReferences"));
+    return Object.fromEntries(Object.entries(input.payload).filter(([key]) => (
+      key !== "externalReferences" && key !== "supperTicketNo"
+    )));
   }
   if (input.commandType === "update_incident") {
     return Object.fromEntries(Object.entries(input.payload).filter(([key]) => key !== "sysId" && key !== "number"));
@@ -85,36 +88,44 @@ function sourceFields(input: ServiceNowWriteCommandInput) {
 
 export function normalizeCommand(
   input: ServiceNowWriteCommandInput,
-  configuredMapping?: ServiceNowWriteFieldMapping,
+  configuredMapping: ServiceNowWriteFieldMapping,
+  providerCorrelationMarker?: string,
 ): NormalizedServiceNowWriteCommand {
-  const mapping = configuredMapping
-    ? validateServiceNowWriteFieldMapping(input.commandType, configuredMapping)
-    : defaultMappings[input.commandType];
+  const mapping = validateServiceNowWriteFieldMapping(input.commandType, configuredMapping);
   const fields: Record<string, string> = {};
   for (const [source, value] of Object.entries(sourceFields(input))) {
     const target = mapping[source];
     if (!target || typeof value !== "string" || !value) continue;
     fields[target] = value;
   }
+  if (input.commandType === "create_incident") {
+    const marker = serviceNowCorrelationMarkerSchema.parse(providerCorrelationMarker);
+    fields[reservedCorrelationField] = marker;
+  }
   if (!Object.keys(fields).length) {
-    throw Object.assign(new Error("No mapped ServiceNow fields remain after normalization"), { code: "SERVICENOW_WRITE_EMPTY_MAPPING" });
+    throw Object.assign(new Error("No mapped ServiceNow fields remain after normalization"), {
+      code: "SERVICENOW_WRITE_EMPTY_MAPPING",
+    });
   }
   return {
+    schemaVersion: "servicenow-write-normalized-v2",
     commandType: input.commandType,
     ...(input.commandType !== "create_incident" && input.payload.sysId ? { targetSysId: input.payload.sysId } : {}),
     ...(input.commandType !== "create_incident" && input.payload.number ? { targetNumber: input.payload.number } : {}),
+    ...(input.commandType === "create_incident" ? { providerCorrelationMarker } : {}),
     fields,
   };
 }
 
 const enumFields = new Set(["impact", "urgency", "state"]);
-const identifierFields = new Set(["caller_id", "assignment_group", "company", "correlation_id", "u_project_code"]);
+const identifierFields = new Set(["caller_id", "assignment_group", "company", "correlation_id"]);
 
 export function buildServiceNowWritePreview(normalized: NormalizedServiceNowWriteCommand): ServiceNowWritePreview {
   return {
     commandType: normalized.commandType,
     targetSysId: normalized.targetSysId,
     targetNumber: normalized.targetNumber,
+    providerCorrelationMarker: normalized.providerCorrelationMarker,
     fields: Object.entries(normalized.fields).sort(([left], [right]) => left.localeCompare(right)).map(([name, value]) => ({
       name,
       kind: enumFields.has(name) ? "enum" as const : identifierFields.has(name) ? "identifier" as const : "text" as const,

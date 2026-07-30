@@ -6,7 +6,9 @@ AI-1.2 adds an administrator operations layer over the existing manual, read-onl
 
 The protected page is **Settings → ServiceNow integration → Open Operations** at `/settings/integrations/servicenow`. An active SUPPER session with `settings:manage` is required by both the page and every operations API.
 
-AI-2.0 adds a separate protected **Write controls** page at `/settings/integrations/servicenow/write`. The read operations documented here remain read-only and unchanged. Live write execution is disabled by default and is documented in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
+AI-2.0.1 adds a separate protected **Write controls** page at `/settings/integrations/servicenow/write`. The read operations documented here remain read-only and unchanged. Live write execution is disabled by default and is documented in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
+
+Write controls distinguish configuration, GET-testable connection, tested connection, live-write switch, and complete live readiness. The command detail shows only safe summaries and immutable attempt/reconciliation history. Retry is visible only for `retry_scheduled` commands with `retryAllowed=true` while live writes are ready. `reconciliation_required` commands instead show read-back and explicit verified-result actions; each requires `settings:manage` and a fresh server confirmation.
 
 ## Page architecture
 

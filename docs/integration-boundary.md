@@ -126,8 +126,12 @@ The additive provider vocabulary now also accepts `line`, `web`, and `freshservi
 
 Normalized intake persistence lives in the separate `src/lib/intake-core/` module described in [Unified Intake Core](unified-intake-core.md). No provider client was added. Future adapters must terminate transport authentication and signature verification before calling the strict normalized acceptance schema and atomic service-role RPC.
 
-## AI-2.0 extension
+## AI-2.0.1 extension
 
 The operation vocabulary now also accepts `ticket.create`, `ticket.update`, `ticket.comment`, and `ticket.work_note`. These operations are implemented only by the isolated, server-side [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md); their presence does not authorize another connector to write.
 
-The write kernel preserves the boundary rules: strict input schemas, deterministic idempotency, correlation IDs, bounded errors, server-only credentials, explicit field mapping, and sanitized request/response summaries. It adds no queue, automatic intake trigger, attachment transport, webhook, scheduler, or public provider endpoint.
+The write kernel preserves the boundary rules: strict input and persisted-row schemas, operation-scoped deterministic idempotency, server-owned provider markers, correlation IDs, bounded errors, server-only credentials, exact field allowlists, and sanitized request/response summaries. SQL independently recomputes command identity and normalized hashes.
+
+Mutation delivery certainty is part of the boundary. Once POST/PATCH dispatch begins, ambiguous failures become `may_have_committed` and enter `reconciliation_required`; they never enter the retry path. Retry requires a definitive `safe_to_retry` result. Live execution, retry, and reconciliation require a short-lived one-time server confirmation tied to user, action, version, and normalized hash.
+
+The kernel adds no queue, automatic intake trigger, attachment transport, webhook, scheduler, worker, or public provider endpoint.

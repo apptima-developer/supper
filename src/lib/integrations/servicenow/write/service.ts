@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Session } from "../../../auth";
 import { getDataBackend } from "../../../env";
 import { writeAudit } from "../../../repositories";
@@ -8,27 +8,47 @@ import { logServerCritical } from "../../../server-logging";
 import { isIntegrationBoundaryError } from "../../errors";
 import { correlationIdSchema } from "../../schemas";
 import { parseServiceNowConfig, summarizeServiceNowConfig, type ServiceNowEnabledConfig } from "../config";
-import { serviceNowDefaultWriteMapping, validateServiceNowWriteFieldMapping, normalizeCommand } from "./normalization";
-import { buildServiceNowNormalizedPayloadHash, buildServiceNowWriteIdempotencyKey } from "./idempotency";
 import { ServiceNowWriteAdapter } from "./adapter";
 import { parseServiceNowWriteConfig } from "./config";
+import {
+  buildServiceNowNormalizedPayloadHash,
+  buildServiceNowProviderCorrelationMarker,
+  buildServiceNowWriteIdempotencyKey,
+  hashServiceNowWriteConfirmationNonce,
+} from "./idempotency";
+import { serviceNowDefaultWriteMapping, validateServiceNowWriteFieldMapping, normalizeCommand } from "./normalization";
+import { isServiceNowWriteExecutionError } from "./outcomes";
 import { ServiceNowWriteRepository } from "./repository";
-import { createServiceNowWriteCommandRequestSchema } from "./schemas";
+import {
+  createServiceNowWriteCommandRequestSchema,
+  serviceNowWriteConfirmationActionSchema,
+} from "./schemas";
 import type {
   ServiceNowWriteCommandInput,
   ServiceNowWriteCommandSummary,
+  ServiceNowWriteConfirmation,
   ServiceNowWriteReadiness,
+  ServiceNowWriteReconciliationAction,
 } from "./types";
 
 type AuditWriter = typeof writeAudit;
+type WriteAdapter = Pick<ServiceNowWriteAdapter, "preview" | "execute" | "readBack" | "testReadiness">;
 type Dependencies = {
   env?: Record<string, string | undefined>;
   repository?: ServiceNowWriteRepository;
-  adapter?: Pick<ServiceNowWriteAdapter, "preview" | "execute" | "testReadiness">;
+  adapter?: WriteAdapter;
   fetch?: typeof fetch;
   audit?: AuditWriter;
   now?: () => Date;
   createId?: () => string;
+  createNonce?: () => string;
+};
+
+type ConfirmedAction = {
+  confirmed: true;
+  expectedVersion: number;
+  expectedNormalizedPayloadHash: string;
+  confirmationNonce: string;
 };
 
 function digest(value: string) {
@@ -62,11 +82,14 @@ function requireServiceNowConfig(env: Record<string, string | undefined>) {
 
 function operationalError(error: unknown): never {
   const message = error instanceof Error ? error.message : "";
-  if (message.includes("SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT", "The source reference is already associated with different command material");
+  if (message.includes("SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT", "The operation is already associated with different command material");
   if (message.includes("SERVICENOW_WRITE_COMMAND_NOT_FOUND")) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
   if (message.includes("SERVICENOW_WRITE_COMMAND_BUSY")) throw new HttpError(409, "SERVICENOW_WRITE_COMMAND_BUSY", "ServiceNow write command is already executing");
   if (message.includes("SERVICENOW_WRITE_ATTEMPTS_EXHAUSTED")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPTS_EXHAUSTED", "ServiceNow write retry limit has been reached");
   if (message.includes("SERVICENOW_WRITE_SOURCE_NOT_FOUND")) throw new HttpError(409, "SERVICENOW_WRITE_SOURCE_NOT_FOUND", "The linked SUPPER source record was not found");
+  if (message.includes("SERVICENOW_WRITE_CONFIRMATION")) throw new HttpError(409, "SERVICENOW_WRITE_CONFIRMATION_INVALID", "ServiceNow write confirmation is missing, stale, expired, or already used");
+  if (message.includes("SERVICENOW_WRITE_VERSION_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERSION_CONFLICT", "ServiceNow write command changed; review it again");
+  if (message.includes("SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED", "ServiceNow write command does not require reconciliation");
   if (message.includes("SERVICENOW_WRITE_DRY_RUN_NOT_ALLOWED")
     || message.includes("SERVICENOW_WRITE_EXECUTION_NOT_ALLOWED")
     || message.includes("SERVICENOW_WRITE_RETRY_NOT_ALLOWED")) {
@@ -74,13 +97,14 @@ function operationalError(error: unknown): never {
   }
   if (message.includes("SERVICENOW_WRITE_CONNECTION_UNAVAILABLE")) throw new HttpError(503, "SERVICENOW_WRITE_CONNECTION_UNAVAILABLE", "ServiceNow write connection is unavailable");
   if (message.includes("SERVICENOW_WRITE_MAPPING_UNAVAILABLE")) throw new HttpError(409, "SERVICENOW_WRITE_MAPPING_UNAVAILABLE", "ServiceNow write mapping is unavailable");
+  if (message.includes("SERVICENOW_WRITE_STORAGE_INTEGRITY_ERROR")) throw new HttpError(500, "SERVICENOW_WRITE_STORAGE_INTEGRITY_ERROR", "Stored ServiceNow write data failed integrity validation");
   throw error;
 }
 
 async function auditBestEffort(
   command: ServiceNowWriteCommandSummary,
   session: Session,
-  event: "created" | "dry_run" | "executed" | "retried",
+  event: "created" | "dry_run" | "executed" | "retried" | "reconciled",
   requestId: string,
   audit: AuditWriter,
 ) {
@@ -96,9 +120,11 @@ async function auditBestEffort(
         commandType: command.commandType,
         status: command.status,
         sourceType: command.sourceType,
-        sourceReference: command.sourceReference,
+        sourceEntityReference: command.sourceEntityReference || null,
+        operationReference: command.operationReference,
         attemptCount: command.attemptCount,
         targetNumber: command.targetNumber || null,
+        deliveryDisposition: command.deliveryDisposition || null,
       },
     });
     return command;
@@ -137,6 +163,9 @@ export async function createCommand(
   const { session, requestId, correlationId, ...commandInput } = input;
   const validated = validateCommand(commandInput);
   const { config, writeConfig, repository } = await runtime(dependencies, false);
+  const createId = dependencies.createId || (() => crypto.randomUUID());
+  const commandId = createId();
+  const operationReference = validated.operationReference || `manual-op:${commandId}`;
   const connectionId = runtimeConnectionId(config);
   await repository.ensureConnection(connectionId, config);
   let mapping = await repository.getActiveMapping(connectionId, validated.commandType);
@@ -150,24 +179,34 @@ export async function createCommand(
     });
   }
   const safeMapping = validateServiceNowWriteFieldMapping(validated.commandType, mapping.fieldMapping);
-  const normalized = normalizeCommand(validated, safeMapping);
-  const idempotencyKey = buildServiceNowWriteIdempotencyKey(validated, connectionId, config.incidentTable);
+  const identityInput = {
+    commandType: validated.commandType,
+    sourceType: validated.sourceType,
+    sourceEntityReference: validated.sourceEntityReference,
+    operationReference,
+  };
+  const idempotencyKey = buildServiceNowWriteIdempotencyKey(identityInput, connectionId, config.incidentTable);
+  const providerCorrelationMarker = validated.commandType === "create_incident"
+    ? buildServiceNowProviderCorrelationMarker(idempotencyKey)
+    : undefined;
+  const normalized = normalizeCommand(validated, safeMapping, providerCorrelationMarker);
   const normalizedPayloadHash = buildServiceNowNormalizedPayloadHash(normalized);
   const now = (dependencies.now || (() => new Date()))().toISOString();
-  const createId = dependencies.createId || (() => crypto.randomUUID());
   try {
     const result = await repository.createCommand({
-      commandId: createId(),
+      commandId,
       commandType: validated.commandType,
       idempotencyKey,
       normalizedPayloadHash,
       connectionId,
       mappingId: mapping.id,
       sourceType: validated.sourceType,
-      sourceReference: validated.sourceReference,
+      sourceEntityReference: validated.sourceEntityReference || "",
+      operationReference,
       targetTable: config.incidentTable,
       targetSysId: normalized.targetSysId || "",
       targetNumber: normalized.targetNumber || "",
+      providerCorrelationMarker: providerCorrelationMarker || "",
       payload: validated.payload,
       normalizedPayload: normalized,
       validationSummary: {
@@ -202,6 +241,7 @@ async function execute(
     session: Session;
     requestId: string;
     correlationId: string;
+    confirmation?: ConfirmedAction;
     abortSignal?: AbortSignal;
   },
   mode: "dry_run" | "live" | "retry",
@@ -222,6 +262,13 @@ async function execute(
       retry: mode === "retry",
       requestId: input.requestId,
       startedAt: startedAt.toISOString(),
+      actorUserId: input.session.userId,
+      ...(input.confirmation ? {
+        confirmed: input.confirmation.confirmed,
+        expectedVersion: input.confirmation.expectedVersion,
+        expectedNormalizedPayloadHash: input.confirmation.expectedNormalizedPayloadHash,
+        confirmationNonceHash: hashServiceNowWriteConfirmationNonce(input.confirmation.confirmationNonce),
+      } : {}),
     });
   } catch (error) {
     operationalError(error);
@@ -235,7 +282,11 @@ async function execute(
         commandId: input.commandId,
         attemptId,
         outcome: "dry_run",
-        retryable: false,
+        deliveryDisposition: "definitely_not_sent",
+        failurePhase: "",
+        retryAllowed: false,
+        retryReason: "",
+        reconciliationReason: "",
         requestSummary,
         responseSummary: { validated: true, providerWritePerformed: false },
         targetSysId: normalized.targetSysId || "",
@@ -262,7 +313,11 @@ async function execute(
       commandId: input.commandId,
       attemptId,
       outcome: "succeeded",
-      retryable: false,
+      deliveryDisposition: "confirmed_succeeded",
+      failurePhase: "",
+      retryAllowed: false,
+      retryReason: "",
+      reconciliationReason: "",
       requestSummary: result.requestSummary,
       responseSummary: result.responseSummary,
       targetSysId: result.targetSysId,
@@ -272,29 +327,47 @@ async function execute(
       finishedAt: now().toISOString(),
     });
   } catch (error) {
-    if (!isIntegrationBoundaryError(error)) {
+    const finishedAt = now();
+    const classified = isServiceNowWriteExecutionError(error);
+    const uncertain = !classified || error.deliveryDisposition === "may_have_committed";
+    const retryAllowed = classified && error.retryAllowed && !uncertain;
+    const deliveryDisposition = classified ? error.deliveryDisposition : "may_have_committed";
+    const failurePhase = classified ? error.failurePhase : "mutation_dispatch";
+    const safeErrorCode = isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_WRITE_EXECUTION_UNCERTAIN";
+    const safeErrorMessage = isIntegrationBoundaryError(error)
+      ? error.safeMessage
+      : "ServiceNow mutation outcome requires reconciliation";
+    const reconciliationReason = classified
+      ? error.reconciliationReason || (uncertain ? "Mutation outcome is not definitive" : "")
+      : "Mutation execution ended without a classified provider outcome";
+    if (uncertain) {
       logServerCritical("SERVICENOW_WRITE_EXECUTION_STATE_UNCERTAIN", error, {
         requestId: input.requestId,
         operation: "servicenow.write.execute",
         commandId: input.commandId,
         attemptId,
+        failurePhase,
       });
-      throw error;
     }
-    const finishedAt = now();
     try {
       await repository.finishAttempt({
         commandId: input.commandId,
         attemptId,
-        outcome: "failed",
-        retryable: error.retryable,
+        outcome: uncertain ? "uncertain" : "failed",
+        deliveryDisposition,
+        failurePhase,
+        retryAllowed,
+        retryReason: retryAllowed ? "Provider definitively allowed a bounded retry" : "",
+        reconciliationReason,
         requestSummary,
         responseSummary: {},
         targetSysId: normalized.targetSysId || "",
         targetNumber: normalized.targetNumber || "",
-        errorCode: error.code,
-        errorMessage: error.safeMessage,
-        nextRetryAt: new Date(finishedAt.getTime() + retryDelayMilliseconds(started.live_attempt_count)).toISOString(),
+        errorCode: safeErrorCode,
+        errorMessage: safeErrorMessage,
+        ...(retryAllowed ? {
+          nextRetryAt: new Date(finishedAt.getTime() + retryDelayMilliseconds(started.live_attempt_count)).toISOString(),
+        } : {}),
         finishedAt: finishedAt.toISOString(),
       });
     } catch (storageError) {
@@ -303,7 +376,7 @@ async function execute(
         operation: "servicenow.write.execute",
         commandId: input.commandId,
         attemptId,
-        providerErrorCode: error.code,
+        providerErrorCode: safeErrorCode,
       });
       throw storageError;
     }
@@ -328,17 +401,126 @@ export function executeCommandDryRun(
 }
 
 export function executeCommand(
-  input: { commandId: string; session: Session; requestId: string; correlationId: string; abortSignal?: AbortSignal },
+  input: { commandId: string; session: Session; requestId: string; correlationId: string; confirmation: ConfirmedAction; abortSignal?: AbortSignal },
   dependencies: Dependencies = {},
 ) {
   return execute(input, "live", dependencies);
 }
 
 export function retryCommand(
-  input: { commandId: string; session: Session; requestId: string; correlationId: string; abortSignal?: AbortSignal },
+  input: { commandId: string; session: Session; requestId: string; correlationId: string; confirmation: ConfirmedAction; abortSignal?: AbortSignal },
   dependencies: Dependencies = {},
 ) {
   return execute(input, "retry", dependencies);
+}
+
+export async function issueCommandConfirmation(
+  input: {
+    commandId: string;
+    action: ServiceNowWriteConfirmation["action"];
+    expectedVersion: number;
+    expectedNormalizedPayloadHash: string;
+    session: Session;
+  },
+  dependencies: Dependencies = {},
+): Promise<ServiceNowWriteConfirmation> {
+  const { repository } = await runtime(dependencies, false);
+  const action = serviceNowWriteConfirmationActionSchema.parse(input.action);
+  const nonce = (dependencies.createNonce || (() => randomBytes(32).toString("base64url")))();
+  const issuedAt = (dependencies.now || (() => new Date()))();
+  const expiresAt = new Date(issuedAt.getTime() + 2 * 60_000).toISOString();
+  try {
+    const stored = await repository.issueConfirmation({
+      commandId: input.commandId,
+      action,
+      actorUserId: input.session.userId,
+      expectedVersion: input.expectedVersion,
+      expectedNormalizedPayloadHash: input.expectedNormalizedPayloadHash,
+      confirmationNonceHash: hashServiceNowWriteConfirmationNonce(nonce),
+      expiresAt,
+      issuedAt: issuedAt.toISOString(),
+    });
+    return {
+      confirmationNonce: nonce,
+      action,
+      commandId: stored.command_id,
+      expectedVersion: stored.command_version,
+      expectedNormalizedPayloadHash: stored.normalized_payload_hash,
+      expiresAt: stored.confirmation_expires_at,
+    };
+  } catch (error) {
+    operationalError(error);
+  }
+}
+
+export async function reconcileCommand(
+  input: {
+    commandId: string;
+    action: ServiceNowWriteReconciliationAction;
+    session: Session;
+    requestId: string;
+    correlationId: string;
+    confirmation: ConfirmedAction;
+    abortSignal?: AbortSignal;
+  },
+  dependencies: Dependencies = {},
+) {
+  const { repository, adapter } = await runtime(dependencies, false);
+  const normalized = await repository.getNormalizedCommand(input.commandId);
+  if (!normalized) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
+  const checkedAt = (dependencies.now || (() => new Date()))().toISOString();
+  let reconciliationResult = input.action === "mark_succeeded_after_verification"
+    ? "confirmed_succeeded"
+    : input.action === "mark_not_applied_after_verification"
+      ? "confirmed_not_applied"
+      : "inconclusive";
+  let safeReadBackSummary: Record<string, unknown> = {
+    method: input.action === "reconcile_by_read_back" ? "provider_read_back" : "manual_verification",
+  };
+  let targetSysId = "";
+  let targetNumber = "";
+  if (input.action === "reconcile_by_read_back") {
+    try {
+      const readBack = await adapter.readBack(
+        normalized,
+        correlationIdSchema.parse(input.correlationId),
+        input.abortSignal,
+      );
+      reconciliationResult = readBack.result;
+      safeReadBackSummary = { ...readBack.summary };
+      targetSysId = readBack.targetSysId || "";
+      targetNumber = readBack.targetNumber || "";
+    } catch (error) {
+      reconciliationResult = "read_back_failed";
+      safeReadBackSummary = {
+        method: "provider_read_back",
+        result: "failed",
+        errorCode: isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_READ_BACK_FAILED",
+      };
+    }
+  }
+  try {
+    await repository.reconcile({
+      commandId: input.commandId,
+      action: input.action,
+      result: reconciliationResult,
+      safeReadBackSummary,
+      targetSysId,
+      targetNumber,
+      actorUserId: input.session.userId,
+      requestId: input.requestId,
+      checkedAt,
+      confirmed: input.confirmation.confirmed,
+      expectedVersion: input.confirmation.expectedVersion,
+      expectedNormalizedPayloadHash: input.confirmation.expectedNormalizedPayloadHash,
+      confirmationNonceHash: hashServiceNowWriteConfirmationNonce(input.confirmation.confirmationNonce),
+    });
+    const command = await repository.getCommand(input.commandId, true);
+    if (!command) throw new Error("ServiceNow write command disappeared after reconciliation");
+    return auditBestEffort(command, input.session, "reconciled", input.requestId, dependencies.audit || writeAudit);
+  } catch (error) {
+    operationalError(error);
+  }
 }
 
 export async function getCommandStatus(commandId: string, dependencies: Dependencies = {}) {
@@ -361,32 +543,42 @@ export function getServiceNowWriteReadiness(
 ): ServiceNowWriteReadiness {
   const relationalStorage = getDataBackend(env) === "supabase-relational";
   const summary = summarizeServiceNowConfig(env);
-  let enabled = false;
+  let liveWriteEnabled = false;
   let incidentTable: string | undefined;
   let safeErrorCode: string | undefined;
   try {
-    enabled = parseServiceNowWriteConfig(env).enabled;
+    liveWriteEnabled = parseServiceNowWriteConfig(env).enabled;
     const config = parseServiceNowConfig(env);
     if (config.enabled) incidentTable = config.incidentTable;
   } catch {
     safeErrorCode = "SERVICENOW_CONFIGURATION_INVALID";
   }
   const configured = summary.configured && Boolean(incidentTable) && !safeErrorCode;
+  const connectionTestable = configured && relationalStorage;
   return {
     configured,
-    enabled,
     relationalStorage,
-    ready: configured && enabled && relationalStorage,
+    connectionTestable,
+    connectionTested: false,
+    liveWriteEnabled,
+    liveWriteReady: connectionTestable && liveWriteEnabled,
     authMode: summary.authMode,
     hostname: summary.hostname,
     incidentTable,
-    safeErrorCode: safeErrorCode || (!relationalStorage ? "SERVICENOW_WRITE_REQUIRES_RELATIONAL" : !enabled ? "SERVICENOW_WRITE_DISABLED" : !configured ? "SERVICENOW_CONFIGURATION_INVALID" : undefined),
+    safeErrorCode: safeErrorCode
+      || (!relationalStorage
+        ? "SERVICENOW_WRITE_REQUIRES_RELATIONAL"
+        : !configured
+          ? "SERVICENOW_CONFIGURATION_INVALID"
+          : !liveWriteEnabled
+            ? "SERVICENOW_WRITE_DISABLED"
+            : undefined),
     safeErrorMessage: !relationalStorage
       ? "Relational storage is required"
-      : !enabled
-        ? "Write execution is disabled"
-        : !configured
-          ? "ServiceNow configuration needs attention"
+      : !configured
+        ? "ServiceNow configuration needs attention"
+        : !liveWriteEnabled
+          ? "Connection testing is available; live mutation remains disabled"
           : undefined,
   };
 }
@@ -395,9 +587,14 @@ export async function testServiceNowWriteReadiness(
   input: { correlationId: string; abortSignal?: AbortSignal },
   dependencies: Dependencies = {},
 ) {
-  const { adapter } = await runtime(dependencies, true);
+  const { adapter } = await runtime(dependencies, false);
   await adapter.testReadiness(correlationIdSchema.parse(input.correlationId), input.abortSignal);
-  return { ...getServiceNowWriteReadiness(dependencies.env || process.env), connectionTested: true, ready: true };
+  const readiness = getServiceNowWriteReadiness(dependencies.env || process.env);
+  return {
+    ...readiness,
+    connectionTested: true,
+    liveWriteReady: readiness.connectionTestable && readiness.liveWriteEnabled,
+  };
 }
 
 export async function getServiceNowWriteOperationsSummary(dependencies: Dependencies = {}) {

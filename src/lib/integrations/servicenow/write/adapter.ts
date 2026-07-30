@@ -3,10 +3,14 @@ import { isIntegrationBoundaryError } from "../../errors";
 import { getServiceNowAuthorization } from "../auth";
 import type { ServiceNowEnabledConfig } from "../config";
 import { serviceNowError } from "../errors";
+import { serviceNowSysIdWriteSchema } from "./schemas";
+import { serviceNowWriteExecutionError } from "./outcomes";
 import type {
   NormalizedServiceNowWriteCommand,
   ServiceNowSafeRequestSummary,
   ServiceNowWriteAdapterResult,
+  ServiceNowWriteFailurePhase,
+  ServiceNowWriteReadBackResult,
 } from "./types";
 
 const maximumResponseBytes = 64 * 1024;
@@ -37,7 +41,7 @@ function writeHttpError(status: number, operation: IntegrationOperation, correla
 
 async function readBoundedJson(response: Response, operation: IntegrationOperation, correlationId: IntegrationCorrelationId) {
   const declared = response.headers.get("content-length");
-  if (declared && Number(declared) > maximumResponseBytes) {
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > maximumResponseBytes)) {
     throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_RESPONSE_TOO_LARGE", safeMessage: "ServiceNow returned an oversized response", retryable: false, operation, correlationId });
   }
   if (!response.body) {
@@ -55,6 +59,9 @@ async function readBoundedJson(response: Response, operation: IntegrationOperati
       throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_RESPONSE_TOO_LARGE", safeMessage: "ServiceNow returned an oversized response", retryable: false, operation, correlationId });
     }
     chunks.push(value);
+  }
+  if (!size) {
+    throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_RESPONSE_EMPTY", safeMessage: "ServiceNow returned an empty response", retryable: false, operation, correlationId });
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -95,6 +102,7 @@ type RequestInput = {
   operation: IntegrationOperation;
   correlationId: IntegrationCorrelationId;
   signal?: AbortSignal;
+  readPhase: Extract<ServiceNowWriteFailurePhase, "number_lookup" | "read_back">;
 };
 
 export class ServiceNowWriteAdapter {
@@ -104,11 +112,23 @@ export class ServiceNowWriteAdapter {
   ) {}
 
   private async request(input: RequestInput) {
-    const authorization = await getServiceNowAuthorization(this.config, {
-      correlationId: input.correlationId,
-      operation: input.operation,
-      signal: input.signal,
-    }, this.dependencies);
+    const mutation = input.method === "POST" || input.method === "PATCH";
+    let authorization: string;
+    try {
+      authorization = await getServiceNowAuthorization(this.config, {
+        correlationId: input.correlationId,
+        operation: input.operation,
+        signal: input.signal,
+      }, this.dependencies);
+    } catch (error) {
+      if (!isIntegrationBoundaryError(error)) throw error;
+      throw serviceNowWriteExecutionError(error, {
+        deliveryDisposition: error.retryable ? "safe_to_retry" : "definitely_rejected",
+        failurePhase: "authorization",
+        retryAllowed: error.retryable,
+      });
+    }
+
     const url = new URL(input.path, this.config.instanceUrl);
     for (const [key, value] of input.params || []) url.searchParams.set(key, value);
     const controller = new AbortController();
@@ -120,8 +140,17 @@ export class ServiceNowWriteAdapter {
       timedOut = true;
       controller.abort();
     }, this.config.timeoutMs);
+    let dispatchStarted = false;
     try {
-      if (input.signal?.aborted) throw serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_ABORTED", safeMessage: "ServiceNow write was cancelled", retryable: false, operation: input.operation, correlationId: input.correlationId });
+      if (input.signal?.aborted) {
+        const error = serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_ABORTED", safeMessage: "ServiceNow request was cancelled before dispatch", retryable: false, operation: input.operation, correlationId: input.correlationId });
+        throw serviceNowWriteExecutionError(error, {
+          deliveryDisposition: "definitely_not_sent",
+          failurePhase: mutation ? "mutation_dispatch" : input.readPhase,
+          retryAllowed: false,
+        });
+      }
+      dispatchStarted = true;
       const response = await this.dependencies.fetch(url, {
         method: input.method,
         headers: {
@@ -135,13 +164,47 @@ export class ServiceNowWriteAdapter {
         cache: "no-store",
         redirect: "error",
       });
-      if (!response.ok) throw writeHttpError(response.status, input.operation, input.correlationId);
-      return { status: response.status, raw: await readBoundedJson(response, input.operation, input.correlationId) };
+      if (!response.ok) {
+        const error = writeHttpError(response.status, input.operation, input.correlationId);
+        const uncertain = mutation && (response.status >= 500 || response.status === 408);
+        throw serviceNowWriteExecutionError(error, {
+          deliveryDisposition: uncertain
+            ? "may_have_committed"
+            : error.retryable
+              ? "safe_to_retry"
+              : "definitely_rejected",
+          failurePhase: mutation ? "mutation_response" : input.readPhase,
+          retryAllowed: !uncertain && error.retryable,
+          ...(uncertain ? { reconciliationReason: "Provider returned an ambiguous mutation response" } : {}),
+        });
+      }
+      let raw: unknown;
+      try {
+        raw = await readBoundedJson(response, input.operation, input.correlationId);
+      } catch (error) {
+        if (!isIntegrationBoundaryError(error)) throw error;
+        throw serviceNowWriteExecutionError(error, {
+          deliveryDisposition: mutation ? "may_have_committed" : "safe_to_retry",
+          failurePhase: mutation ? "response_parse" : input.readPhase,
+          retryAllowed: !mutation,
+          ...(mutation ? { reconciliationReason: "Provider accepted the mutation but returned an invalid response" } : {}),
+        });
+      }
+      return { status: response.status, raw };
     } catch (cause) {
       if (isIntegrationBoundaryError(cause)) throw cause;
-      if (timedOut) throw serviceNowError({ category: "timeout", code: "SERVICENOW_WRITE_TIMEOUT", safeMessage: "ServiceNow write timed out", retryable: true, operation: input.operation, correlationId: input.correlationId, cause });
-      if (input.signal?.aborted) throw serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_ABORTED", safeMessage: "ServiceNow write was cancelled", retryable: false, operation: input.operation, correlationId: input.correlationId, cause });
-      throw serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_NETWORK_UNAVAILABLE", safeMessage: "ServiceNow is unavailable", retryable: true, operation: input.operation, correlationId: input.correlationId, cause });
+      const error = timedOut
+        ? serviceNowError({ category: "timeout", code: "SERVICENOW_WRITE_TIMEOUT", safeMessage: "ServiceNow request timed out", retryable: true, operation: input.operation, correlationId: input.correlationId, cause })
+        : input.signal?.aborted
+          ? serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_ABORTED", safeMessage: "ServiceNow request was cancelled", retryable: false, operation: input.operation, correlationId: input.correlationId, cause })
+          : serviceNowError({ category: "unavailable", code: "SERVICENOW_WRITE_NETWORK_UNAVAILABLE", safeMessage: "ServiceNow is unavailable", retryable: true, operation: input.operation, correlationId: input.correlationId, cause });
+      const uncertain = mutation && dispatchStarted;
+      throw serviceNowWriteExecutionError(error, {
+        deliveryDisposition: uncertain ? "may_have_committed" : "safe_to_retry",
+        failurePhase: mutation ? "mutation_dispatch" : input.readPhase,
+        retryAllowed: !uncertain && error.retryable,
+        ...(uncertain ? { reconciliationReason: "Mutation dispatch ended without a definitive provider response" } : {}),
+      });
     } finally {
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
@@ -162,47 +225,149 @@ export class ServiceNowWriteAdapter {
     };
   }
 
-  private async resolveNumber(number: string, operation: IntegrationOperation, correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
-    const params = new URLSearchParams({
-      sysparm_query: `number=${number}`,
-      sysparm_fields: "sys_id,number",
-      sysparm_limit: "2",
-      sysparm_exclude_reference_link: "true",
-    });
+  private async queryRows(
+    query: string,
+    fields: string[],
+    operation: IntegrationOperation,
+    correlationId: IntegrationCorrelationId,
+    readPhase: "number_lookup" | "read_back",
+    signal?: AbortSignal,
+  ) {
     const response = await this.request({
       method: "GET",
       path: `/api/now/table/${this.config.incidentTable}`,
-      params,
+      params: new URLSearchParams({
+        sysparm_query: query,
+        sysparm_fields: fields.join(","),
+        sysparm_limit: "2",
+        sysparm_exclude_reference_link: "true",
+      }),
       operation,
       correlationId,
       signal,
+      readPhase,
     });
-    if (!response.raw || typeof response.raw !== "object" || Array.isArray(response.raw)) {
-      throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_LOOKUP_INVALID", safeMessage: "ServiceNow returned an invalid lookup response", retryable: false, operation, correlationId });
+    const rows = response.raw && typeof response.raw === "object" && !Array.isArray(response.raw)
+      ? (response.raw as Record<string, unknown>).result
+      : undefined;
+    if (!Array.isArray(rows)) {
+      const error = serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_LOOKUP_INVALID", safeMessage: "ServiceNow returned an invalid lookup response", retryable: true, operation, correlationId });
+      throw serviceNowWriteExecutionError(error, {
+        deliveryDisposition: "safe_to_retry",
+        failurePhase: readPhase,
+        retryAllowed: true,
+      });
     }
-    const rows = (response.raw as Record<string, unknown>).result;
-    if (!Array.isArray(rows) || rows.length !== 1) {
-      throw serviceNowError({
-        category: rows && Array.isArray(rows) && rows.length > 1 ? "conflict" : "validation",
-        code: rows && Array.isArray(rows) && rows.length > 1 ? "SERVICENOW_WRITE_NUMBER_AMBIGUOUS" : "SERVICENOW_WRITE_TARGET_NOT_FOUND",
-        safeMessage: rows && Array.isArray(rows) && rows.length > 1 ? "The ServiceNow Incident number is ambiguous" : "The ServiceNow Incident was not found",
+    return { status: response.status, rows };
+  }
+
+  private safeRowIdentity(
+    row: unknown,
+    operation: IntegrationOperation,
+    correlationId: IntegrationCorrelationId,
+    failurePhase: "number_lookup" | "read_back" = "read_back",
+  ) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw serviceNowWriteExecutionError(
+        serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_LOOKUP_INVALID", safeMessage: "ServiceNow returned an invalid Incident identity", retryable: true, operation, correlationId }),
+        { deliveryDisposition: "safe_to_retry", failurePhase, retryAllowed: true },
+      );
+    }
+    const source = row as Record<string, unknown>;
+    const sysId = typeof source.sys_id === "string" ? source.sys_id.trim().toLowerCase() : "";
+    const number = typeof source.number === "string" ? source.number.trim() : "";
+    if (!serviceNowSysIdWriteSchema.safeParse(sysId).success || !/^[A-Za-z0-9_-]{1,80}$/.test(number)) {
+      throw serviceNowWriteExecutionError(
+        serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_LOOKUP_INVALID", safeMessage: "ServiceNow returned an invalid Incident identity", retryable: true, operation, correlationId }),
+        { deliveryDisposition: "safe_to_retry", failurePhase, retryAllowed: true },
+      );
+    }
+    return { sysId, number, row: source };
+  }
+
+  private async resolveNumber(number: string, operation: IntegrationOperation, correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
+    const { rows } = await this.queryRows(`number=${number}`, ["sys_id", "number"], operation, correlationId, "number_lookup", signal);
+    if (rows.length !== 1) {
+      const error = serviceNowError({
+        category: rows.length > 1 ? "conflict" : "validation",
+        code: rows.length > 1 ? "SERVICENOW_WRITE_NUMBER_AMBIGUOUS" : "SERVICENOW_WRITE_TARGET_NOT_FOUND",
+        safeMessage: rows.length > 1 ? "The ServiceNow Incident number is ambiguous" : "The ServiceNow Incident was not found",
         retryable: false,
         operation,
         correlationId,
       });
+      throw serviceNowWriteExecutionError(error, {
+        deliveryDisposition: "definitely_not_sent",
+        failurePhase: "number_lookup",
+        retryAllowed: false,
+      });
     }
-    const row = rows[0];
-    const sysId = row && typeof row === "object" && !Array.isArray(row) && typeof (row as Record<string, unknown>).sys_id === "string"
-      ? ((row as Record<string, unknown>).sys_id as string).trim().toLowerCase()
-      : "";
-    if (!/^[a-f0-9]{32}$/.test(sysId)) {
-      throw serviceNowError({ category: "malformed_response", code: "SERVICENOW_WRITE_LOOKUP_INVALID", safeMessage: "ServiceNow returned an invalid Incident identity", retryable: false, operation, correlationId });
-    }
-    return sysId;
+    return this.safeRowIdentity(rows[0], operation, correlationId, "number_lookup").sysId;
   }
 
-  async execute(command: NormalizedServiceNowWriteCommand, correlationId: IntegrationCorrelationId, signal?: AbortSignal): Promise<ServiceNowWriteAdapterResult> {
+  private async findByCorrelationMarker(
+    marker: string,
+    operation: IntegrationOperation,
+    correlationId: IntegrationCorrelationId,
+    signal?: AbortSignal,
+  ) {
+    const { status, rows } = await this.queryRows(
+      `correlation_id=${marker}`,
+      ["sys_id", "number", "state"],
+      operation,
+      correlationId,
+      "read_back",
+      signal,
+    );
+    return { status, rows };
+  }
+
+  async execute(
+    command: NormalizedServiceNowWriteCommand,
+    correlationId: IntegrationCorrelationId,
+    signal?: AbortSignal,
+  ): Promise<ServiceNowWriteAdapterResult> {
     const operation = operationFor(command);
+    if (command.commandType === "create_incident") {
+      const markerLookup = await this.findByCorrelationMarker(
+        command.providerCorrelationMarker || "",
+        operation,
+        correlationId,
+        signal,
+      );
+      if (markerLookup.rows.length > 1) {
+        const error = serviceNowError({ category: "conflict", code: "SERVICENOW_WRITE_CORRELATION_AMBIGUOUS", safeMessage: "Multiple ServiceNow Incidents share the command correlation marker", retryable: false, operation, correlationId });
+        throw serviceNowWriteExecutionError(error, {
+          deliveryDisposition: "may_have_committed",
+          failurePhase: "read_back",
+          retryAllowed: false,
+          reconciliationReason: "Correlation marker matched multiple Incidents",
+        });
+      }
+      if (markerLookup.rows.length === 1) {
+        const existing = this.safeRowIdentity(markerLookup.rows[0], operation, correlationId);
+        return {
+          requestSummary: {
+            method: "GET",
+            endpointPath: `/api/now/table/${this.config.incidentTable}`,
+            targetTable: this.config.incidentTable,
+            fieldNames: ["correlation_id", "number", "state", "sys_id"],
+            targetSysId: existing.sysId,
+            targetNumber: existing.number,
+          },
+          responseSummary: {
+            httpStatus: markerLookup.status,
+            sysId: existing.sysId,
+            number: existing.number,
+            state: typeof existing.row.state === "string" ? existing.row.state : undefined,
+            recoveredByCorrelationMarker: true,
+          },
+          targetSysId: existing.sysId,
+          targetNumber: existing.number,
+        };
+      }
+    }
+
     const targetSysId = command.commandType === "create_incident"
       ? undefined
       : command.targetSysId || await this.resolveNumber(command.targetNumber || "", operation, correlationId, signal);
@@ -218,8 +383,20 @@ export class ServiceNowWriteAdapter {
       operation,
       correlationId,
       signal,
+      readPhase: "read_back",
     });
-    const result = safeResult(response.raw, operation, correlationId);
+    let result: ReturnType<typeof safeResult>;
+    try {
+      result = safeResult(response.raw, operation, correlationId);
+    } catch (error) {
+      if (!isIntegrationBoundaryError(error)) throw error;
+      throw serviceNowWriteExecutionError(error, {
+        deliveryDisposition: "may_have_committed",
+        failurePhase: "response_parse",
+        retryAllowed: false,
+        reconciliationReason: "Provider returned an invalid Incident identity after mutation",
+      });
+    }
     return {
       requestSummary: {
         method: command.commandType === "create_incident" ? "POST" : "PATCH",
@@ -240,6 +417,104 @@ export class ServiceNowWriteAdapter {
     };
   }
 
+  async readBack(
+    command: NormalizedServiceNowWriteCommand,
+    correlationId: IntegrationCorrelationId,
+    signal?: AbortSignal,
+  ): Promise<ServiceNowWriteReadBackResult> {
+    const operation = operationFor(command);
+    if (command.commandType === "create_incident") {
+      const lookup = await this.findByCorrelationMarker(
+        command.providerCorrelationMarker || "",
+        operation,
+        correlationId,
+        signal,
+      );
+      if (lookup.rows.length > 1) return { result: "ambiguous", summary: { matchCount: 2, method: "correlation_marker" } };
+      if (!lookup.rows.length) return { result: "not_found", summary: { matchCount: 0, method: "correlation_marker" } };
+      const row = this.safeRowIdentity(lookup.rows[0], operation, correlationId);
+      return {
+        result: "confirmed_succeeded",
+        summary: { matchCount: 1, method: "correlation_marker" },
+        targetSysId: row.sysId,
+        targetNumber: row.number,
+      };
+    }
+
+    if (command.commandType === "add_comment" || command.commandType === "add_work_note") {
+      if (command.targetNumber) {
+        const sysId = await this.resolveNumber(command.targetNumber, operation, correlationId, signal);
+        return {
+          result: "inconclusive",
+          summary: {
+            method: "journal_manual_verification",
+            journalField: command.commandType === "add_comment" ? "comments" : "work_notes",
+            targetIdentityResolved: true,
+          },
+          targetSysId: sysId,
+          targetNumber: command.targetNumber,
+        };
+      }
+      const journalTargetSysId = serviceNowSysIdWriteSchema.parse(command.targetSysId);
+      const response = await this.request({
+        method: "GET",
+        path: `/api/now/table/${this.config.incidentTable}/${journalTargetSysId}`,
+        params: new URLSearchParams({
+          sysparm_fields: "sys_id,number",
+          sysparm_exclude_reference_link: "true",
+        }),
+        operation,
+        correlationId,
+        signal,
+        readPhase: "read_back",
+      });
+      const result = response.raw && typeof response.raw === "object" && !Array.isArray(response.raw)
+        ? (response.raw as Record<string, unknown>).result
+        : undefined;
+      const identity = this.safeRowIdentity(result, operation, correlationId);
+      return {
+        result: "inconclusive",
+        summary: {
+          method: "journal_manual_verification",
+          journalField: command.commandType === "add_comment" ? "comments" : "work_notes",
+          targetIdentityResolved: true,
+        },
+        targetSysId: identity.sysId,
+        targetNumber: identity.number,
+      };
+    }
+
+    const sysId = command.targetSysId
+      || await this.resolveNumber(command.targetNumber || "", operation, correlationId, signal);
+    const response = await this.request({
+      method: "GET",
+      path: `/api/now/table/${this.config.incidentTable}/${sysId}`,
+      params: new URLSearchParams({
+        sysparm_fields: ["sys_id", "number", ...Object.keys(command.fields)].join(","),
+        sysparm_exclude_reference_link: "true",
+      }),
+      operation,
+      correlationId,
+      signal,
+      readPhase: "read_back",
+    });
+    const result = response.raw && typeof response.raw === "object" && !Array.isArray(response.raw)
+      ? (response.raw as Record<string, unknown>).result
+      : undefined;
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      return { result: "not_found", summary: { method: "exact_sys_id", matchedFields: 0, expectedFields: Object.keys(command.fields).length } };
+    }
+    const row = this.safeRowIdentity(result, operation, correlationId);
+    const expected = Object.entries(command.fields);
+    const matchedFields = expected.filter(([field, value]) => String(row.row[field] ?? "") === value).length;
+    return {
+      result: matchedFields === expected.length ? "confirmed_succeeded" : "inconclusive",
+      summary: { method: "exact_sys_id", matchedFields, expectedFields: expected.length },
+      targetSysId: row.sysId,
+      targetNumber: row.number,
+    };
+  }
+
   async testReadiness(correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
     const response = await this.request({
       method: "GET",
@@ -252,6 +527,7 @@ export class ServiceNowWriteAdapter {
       operation: "provider.test",
       correlationId,
       signal,
+      readPhase: "read_back",
     });
     return { connected: true, httpStatus: response.status };
   }

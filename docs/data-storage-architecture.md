@@ -14,7 +14,7 @@ Core entities include customers, tickets, ticket history, audit records, users, 
 
 AI-1.3 Unified Intake is a relational-only integration subsystem. With `supabase-relational`, it uses dedicated `integration_*` and `intake_*` tables and atomic service-role RPCs; it never stores intake records in `app_store` or local JSON. On other backends, pure domain helpers remain available but Unified Intake writes return a safe unavailable error. Existing Email Intake backend routing is unchanged.
 
-AI-2.0 ServiceNow Write is also relational-only. Its command, attempt, mapping, connection, and Ticket-link ledgers use dedicated `servicenow_write_*` tables and service-role-only RPCs. It never stores write commands in `app_store` or local JSON, never falls back to the Vercel filesystem, and remains unavailable for live mutation unless the separate server-side write switch is enabled.
+AI-2.0.1 ServiceNow Write is also relational-only. Its command, attempt, mapping, connection, Ticket-link, and immutable reconciliation ledgers use dedicated `servicenow_write_*` tables. `service_role` has read-only table grants; all mutations use validated service-role-only RPCs. SQL recomputes command identity, mapping normalization, provider marker, and hashes. The subsystem never stores commands in `app_store` or local JSON, never falls back to the Vercel filesystem, and remains unavailable for live mutation unless the separate server-side switch is enabled.
 
 The routing decision is centralized in `src/lib/storage-routing.ts`. Repositories use relational functions only when core routing resolves to `supabase-relational`; `src/lib/json-store.ts` independently resolves auxiliary storage. Supabase-backed errors remain visible and must never fall back to the Vercel filesystem.
 
