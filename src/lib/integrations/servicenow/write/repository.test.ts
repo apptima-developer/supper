@@ -13,6 +13,7 @@ const validRow = {
   target_table: "incident",
   target_sys_id: null,
   target_number: null,
+  command_material_hash: "b".repeat(64),
   normalized_payload_hash: "a".repeat(64),
   provider_correlation_marker: `SUPPER:${"b".repeat(64)}`,
   normalized_payload: {

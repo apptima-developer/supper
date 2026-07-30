@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildServiceNowNormalizedPayloadHash,
   buildServiceNowProviderCorrelationMarker,
+  buildServiceNowWriteCommandMaterialHash,
   buildServiceNowWriteIdempotencyKey,
   hashServiceNowWriteConfirmationNonce,
 } from "./idempotency";
@@ -27,6 +28,55 @@ describe("ServiceNow write idempotency", () => {
         ...logical,
         operationReference: "comment:follow-up-1",
       }, "connection-a", "incident"));
+  });
+
+  it("hashes the full semantic command material with a shared SQL vector", () => {
+    const input = {
+      commandType: "create_incident" as const,
+      sourceType: "supper_ticket" as const,
+      sourceEntityReference: "ticket:T-100",
+      operationReference: "create:initial",
+      payload: {
+        shortDescription: "S",
+        description: "D",
+        supperTicketNo: "T-100",
+        externalReferences: { zeta: "Z", alpha: "A" },
+      },
+      maxAttempts: 3,
+    };
+    const baseline = buildServiceNowWriteCommandMaterialHash(
+      input,
+      "connection-a",
+      "mapping-a",
+      "incident",
+    );
+    expect(baseline).toBe("81ecc7ec1b9b02c6038c4fef63ec4e24e5cc71bb8c66cd7da847ca84bb446971");
+    expect(buildServiceNowWriteCommandMaterialHash({
+      ...input,
+      payload: {
+        ...input.payload,
+        externalReferences: { alpha: "A", zeta: "Z" },
+      },
+    }, "connection-a", "mapping-a", "incident")).toBe(baseline);
+    for (const changed of [
+      { ...input, payload: { ...input.payload, description: "Changed" } },
+      { ...input, payload: { ...input.payload, supperTicketNo: "T-101" } },
+      { ...input, payload: { ...input.payload, externalReferences: { alpha: "B", zeta: "Z" } } },
+      { ...input, maxAttempts: 4 },
+    ]) {
+      expect(buildServiceNowWriteCommandMaterialHash(
+        changed,
+        "connection-a",
+        "mapping-a",
+        "incident",
+      )).not.toBe(baseline);
+    }
+    expect(buildServiceNowWriteCommandMaterialHash(
+      input,
+      "connection-a",
+      "mapping-a",
+      "u_incident",
+    )).not.toBe(baseline);
   });
 
   it("changes the key when connection, source identity, or table changes", () => {

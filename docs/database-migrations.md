@@ -208,11 +208,11 @@ order by routine_name, grantee;
 
 Expected: versions `202607220001` through `202607220004`; `attachment_hash_integrity_failures=0`; `legacy_delivery_triggers=0`; only `service_role` can execute the three public acceptance RPC generations; neither private implementation is directly executable. No table is dropped, no intake row or lifecycle state is deleted, and no provider operation is performed.
 
-## Applying AI-2.0.2 ServiceNow write kernel
+## Applying AI-2.0.3 ServiceNow write kernel
 
 Migration `202607230001_servicenow_write_kernel.sql` was amended before first remote application. Evidence from the audited development sequence showed the migration was created locally, remote execution was explicitly deferred, and no remote SQL command applied it. If version `202607230001` is already present on a target, stop and create a reviewed forward-only correction instead of running this amended file.
 
-The migration records version `202607230001`, creates seven RLS-protected write-kernel tables including short-lived readiness proofs, and exposes validated configuration, mapping, readiness, command, confirmation, attempt, and reconciliation RPCs. It was amended in place only because explicit delivery history proves this version has never been remotely applied. `service_role` can select ledger rows but cannot directly insert, update, or delete them. It contains no credentials, does not alter existing intake or read-side synchronization rows, and performs no ServiceNow request.
+The migration records version `202607230001`, creates seven RLS-protected write-kernel tables including short-lived readiness proofs, and exposes validated configuration, mapping, readiness, command, confirmation, attempt, and reconciliation RPCs. AI-2.0.3 adds the immutable `command_material_hash`, exact semantic-hash reconstruction, database-clock authority, and RPC evidence-classification enforcement. It was amended in place only because explicit delivery history proves this version has never been remotely applied. `service_role` can select ledger rows but cannot directly insert, update, or delete them. It contains no credentials, does not alter existing intake or read-side synchronization rows, and performs no ServiceNow request.
 
 1. Confirm versions `202607220001` through `202607220004` are present, confirm `202607230001` is absent, and take the normal dev recovery checkpoint.
 2. From the exact source revision run the full acceptance suite, including `npm run verify:migrations`, `npm run verify:architecture`, and `npm run verify:servicenow-write-sql`.

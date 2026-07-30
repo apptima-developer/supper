@@ -31,6 +31,7 @@ function summary(overrides: Partial<ServiceNowWriteCommandSummary> = {}): Servic
     sourceType: "manual",
     operationReference: "manual-op:command-id-0000000001",
     targetTable: "incident",
+    commandMaterialHash: hash,
     normalizedPayloadHash: hash,
     validationSummary: { valid: true },
     safeRequestSummary: {},

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   NormalizedServiceNowWriteCommand,
   ServiceNowWriteCommandInput,
+  ServiceNowWritePayloadByType,
 } from "./types";
 
 function digest(value: string) {
@@ -11,6 +12,51 @@ function digest(value: string) {
 function segment(value: string | undefined) {
   const material = value || "";
   return `${Buffer.byteLength(material, "utf8")}:${material}`;
+}
+
+function compareText(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export function buildServiceNowWritePayloadMaterial(
+  payload: ServiceNowWritePayloadByType[ServiceNowWriteCommandInput["commandType"]],
+) {
+  return Object.entries(payload)
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([key, value]) => {
+      if (typeof value === "string") return `s${segment(key)}${segment(value)}`;
+      const references = Object.entries(value || {})
+        .sort(([left], [right]) => compareText(left, right))
+        .map(([referenceKey, referenceValue]) => (
+          `${segment(referenceKey)}${segment(referenceValue)}`
+        ))
+        .join("|");
+      return `o${segment(key)}${references}`;
+    })
+    .join("|");
+}
+
+export function buildServiceNowWriteCommandMaterialHash(
+  input: Pick<ServiceNowWriteCommandInput, "commandType" | "sourceType" | "sourceEntityReference" | "payload"> & {
+    operationReference: string;
+    maxAttempts: number;
+  },
+  connectionId: string,
+  mappingId: string,
+  targetTable: string,
+) {
+  return digest([
+    "servicenow-write-command-material-v1",
+    segment(connectionId),
+    segment(mappingId),
+    segment(input.commandType),
+    segment(input.sourceType),
+    segment(input.sourceEntityReference),
+    segment(input.operationReference),
+    segment(targetTable),
+    segment(buildServiceNowWritePayloadMaterial(input.payload)),
+    segment(String(input.maxAttempts)),
+  ].join("|"));
 }
 
 export function buildServiceNowWriteIdempotencyMaterial(
@@ -50,7 +96,7 @@ export function buildServiceNowNormalizedPayloadMaterial(
   normalized: NormalizedServiceNowWriteCommand,
 ) {
   const fields = Object.entries(normalized.fields)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareText(left, right))
     .map(([key, value]) => `${segment(key)}${segment(value)}`)
     .join("|");
   return [

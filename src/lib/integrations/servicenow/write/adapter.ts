@@ -266,6 +266,11 @@ export class ServiceNowWriteAdapter {
     operation: IntegrationOperation,
     correlationId: IntegrationCorrelationId,
     failurePhase: "number_lookup" | "read_back" = "read_back",
+    expected: {
+      sysId?: string;
+      number?: string;
+      correlationMarker?: string;
+    } = {},
   ) {
     if (!row || typeof row !== "object" || Array.isArray(row)) {
       throw serviceNowWriteExecutionError(
@@ -282,7 +287,25 @@ export class ServiceNowWriteAdapter {
         { deliveryDisposition: "safe_to_retry", failurePhase, retryAllowed: true },
       );
     }
-    return { sysId, number, row: source };
+    const correlationMarker = typeof source.correlation_id === "string"
+      ? source.correlation_id.trim()
+      : "";
+    if ((expected.sysId && sysId !== expected.sysId)
+      || (expected.number && number !== expected.number)
+      || (expected.correlationMarker && correlationMarker !== expected.correlationMarker)) {
+      throw serviceNowWriteExecutionError(
+        serviceNowError({
+          category: "conflict",
+          code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+          safeMessage: "ServiceNow returned an Incident that did not match the exact lookup key",
+          retryable: false,
+          operation,
+          correlationId,
+        }),
+        { deliveryDisposition: "definitely_not_sent", failurePhase, retryAllowed: false },
+      );
+    }
+    return { sysId, number, correlationMarker, row: source };
   }
 
   private async resolveNumber(number: string, operation: IntegrationOperation, correlationId: IntegrationCorrelationId, signal?: AbortSignal) {
@@ -302,7 +325,13 @@ export class ServiceNowWriteAdapter {
         retryAllowed: false,
       });
     }
-    return this.safeRowIdentity(rows[0], operation, correlationId, "number_lookup").sysId;
+    return this.safeRowIdentity(
+      rows[0],
+      operation,
+      correlationId,
+      "number_lookup",
+      { number },
+    );
   }
 
   private async findByCorrelationMarker(
@@ -313,13 +342,22 @@ export class ServiceNowWriteAdapter {
   ) {
     const { status, rows } = await this.queryRows(
       `correlation_id=${marker}`,
-      ["sys_id", "number", "state"],
+      ["sys_id", "number", "state", "correlation_id"],
       operation,
       correlationId,
       "read_back",
       signal,
     );
-    return { status, rows };
+    return {
+      status,
+      rows: rows.map((row) => this.safeRowIdentity(
+        row,
+        operation,
+        correlationId,
+        "read_back",
+        { correlationMarker: marker },
+      )),
+    };
   }
 
   async execute(
@@ -345,7 +383,7 @@ export class ServiceNowWriteAdapter {
         });
       }
       if (markerLookup.rows.length === 1) {
-        const existing = this.safeRowIdentity(markerLookup.rows[0], operation, correlationId);
+        const existing = markerLookup.rows[0];
         return {
           requestSummary: {
             method: "GET",
@@ -370,7 +408,12 @@ export class ServiceNowWriteAdapter {
 
     const targetSysId = command.commandType === "create_incident"
       ? undefined
-      : command.targetSysId || await this.resolveNumber(command.targetNumber || "", operation, correlationId, signal);
+      : command.targetSysId || (await this.resolveNumber(
+        command.targetNumber || "",
+        operation,
+        correlationId,
+        signal,
+      )).sysId;
     const path = `/api/now/table/${this.config.incidentTable}${targetSysId ? `/${targetSysId}` : ""}`;
     const response = await this.request({
       method: command.commandType === "create_incident" ? "POST" : "PATCH",
@@ -396,6 +439,25 @@ export class ServiceNowWriteAdapter {
         retryAllowed: false,
         reconciliationReason: "Provider returned an invalid Incident identity after mutation",
       });
+    }
+    if ((targetSysId && result.sysId !== targetSysId)
+      || (command.targetNumber && result.number !== command.targetNumber)) {
+      throw serviceNowWriteExecutionError(
+        serviceNowError({
+          category: "conflict",
+          code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+          safeMessage: "ServiceNow returned an Incident that did not match the exact command target",
+          retryable: false,
+          operation,
+          correlationId,
+        }),
+        {
+          deliveryDisposition: "may_have_committed",
+          failurePhase: "response_parse",
+          retryAllowed: false,
+          reconciliationReason: "Provider mutation response returned a conflicting Incident identity",
+        },
+      );
     }
     return {
       requestSummary: {
@@ -432,7 +494,7 @@ export class ServiceNowWriteAdapter {
       );
       if (lookup.rows.length > 1) return { result: "ambiguous", summary: { matchCount: 2, method: "correlation_marker" } };
       if (!lookup.rows.length) return { result: "not_found", summary: { matchCount: 0, method: "correlation_marker" } };
-      const row = this.safeRowIdentity(lookup.rows[0], operation, correlationId);
+      const row = lookup.rows[0];
       return {
         result: "confirmed_succeeded",
         summary: { matchCount: 1, method: "correlation_marker" },
@@ -443,7 +505,15 @@ export class ServiceNowWriteAdapter {
 
     if (command.commandType === "add_comment" || command.commandType === "add_work_note") {
       if (command.targetNumber) {
-        const sysId = await this.resolveNumber(command.targetNumber, operation, correlationId, signal);
+        let identity;
+        try {
+          identity = await this.resolveNumber(command.targetNumber, operation, correlationId, signal);
+        } catch (error) {
+          if (isIntegrationBoundaryError(error) && error.code === "SERVICENOW_WRITE_TARGET_NOT_FOUND") {
+            return { result: "not_found", summary: { method: "exact_number", matchCount: 0 } };
+          }
+          throw error;
+        }
         return {
           result: "inconclusive",
           summary: {
@@ -451,27 +521,41 @@ export class ServiceNowWriteAdapter {
             journalField: command.commandType === "add_comment" ? "comments" : "work_notes",
             targetIdentityResolved: true,
           },
-          targetSysId: sysId,
-          targetNumber: command.targetNumber,
+          targetSysId: identity.sysId,
+          targetNumber: identity.number,
         };
       }
       const journalTargetSysId = serviceNowSysIdWriteSchema.parse(command.targetSysId);
-      const response = await this.request({
-        method: "GET",
-        path: `/api/now/table/${this.config.incidentTable}/${journalTargetSysId}`,
-        params: new URLSearchParams({
-          sysparm_fields: "sys_id,number",
-          sysparm_exclude_reference_link: "true",
-        }),
-        operation,
-        correlationId,
-        signal,
-        readPhase: "read_back",
-      });
+      let response;
+      try {
+        response = await this.request({
+          method: "GET",
+          path: `/api/now/table/${this.config.incidentTable}/${journalTargetSysId}`,
+          params: new URLSearchParams({
+            sysparm_fields: "sys_id,number",
+            sysparm_exclude_reference_link: "true",
+          }),
+          operation,
+          correlationId,
+          signal,
+          readPhase: "read_back",
+        });
+      } catch (error) {
+        if (isIntegrationBoundaryError(error) && error.code === "SERVICENOW_WRITE_TARGET_NOT_FOUND") {
+          return { result: "not_found", summary: { method: "exact_sys_id", matchCount: 0 } };
+        }
+        throw error;
+      }
       const result = response.raw && typeof response.raw === "object" && !Array.isArray(response.raw)
         ? (response.raw as Record<string, unknown>).result
         : undefined;
-      const identity = this.safeRowIdentity(result, operation, correlationId);
+      const identity = this.safeRowIdentity(
+        result,
+        operation,
+        correlationId,
+        "read_back",
+        { sysId: journalTargetSysId },
+      );
       return {
         result: "inconclusive",
         summary: {
@@ -484,27 +568,59 @@ export class ServiceNowWriteAdapter {
       };
     }
 
-    const sysId = command.targetSysId
-      || await this.resolveNumber(command.targetNumber || "", operation, correlationId, signal);
-    const response = await this.request({
-      method: "GET",
-      path: `/api/now/table/${this.config.incidentTable}/${sysId}`,
-      params: new URLSearchParams({
-        sysparm_fields: ["sys_id", "number", ...Object.keys(command.fields)].join(","),
-        sysparm_exclude_reference_link: "true",
-      }),
-      operation,
-      correlationId,
-      signal,
-      readPhase: "read_back",
-    });
+    let resolvedNumberIdentity;
+    if (!command.targetSysId) {
+      try {
+        resolvedNumberIdentity = await this.resolveNumber(
+          command.targetNumber || "",
+          operation,
+          correlationId,
+          signal,
+        );
+      } catch (error) {
+        if (isIntegrationBoundaryError(error) && error.code === "SERVICENOW_WRITE_TARGET_NOT_FOUND") {
+          return { result: "not_found", summary: { method: "exact_number", matchCount: 0 } };
+        }
+        throw error;
+      }
+    }
+    const sysId = command.targetSysId || resolvedNumberIdentity!.sysId;
+    let response;
+    try {
+      response = await this.request({
+        method: "GET",
+        path: `/api/now/table/${this.config.incidentTable}/${sysId}`,
+        params: new URLSearchParams({
+          sysparm_fields: ["sys_id", "number", ...Object.keys(command.fields)].join(","),
+          sysparm_exclude_reference_link: "true",
+        }),
+        operation,
+        correlationId,
+        signal,
+        readPhase: "read_back",
+      });
+    } catch (error) {
+      if (isIntegrationBoundaryError(error) && error.code === "SERVICENOW_WRITE_TARGET_NOT_FOUND") {
+        return { result: "not_found", summary: { method: "exact_sys_id", matchCount: 0 } };
+      }
+      throw error;
+    }
     const result = response.raw && typeof response.raw === "object" && !Array.isArray(response.raw)
       ? (response.raw as Record<string, unknown>).result
       : undefined;
     if (!result || typeof result !== "object" || Array.isArray(result)) {
       return { result: "not_found", summary: { method: "exact_sys_id", matchedFields: 0, expectedFields: Object.keys(command.fields).length } };
     }
-    const row = this.safeRowIdentity(result, operation, correlationId);
+    const row = this.safeRowIdentity(
+      result,
+      operation,
+      correlationId,
+      "read_back",
+      {
+        sysId,
+        number: command.targetNumber || resolvedNumberIdentity?.number,
+      },
+    );
     const expected = Object.entries(command.fields);
     const matchedFields = expected.filter(([field, value]) => String(row.row[field] ?? "") === value).length;
     return {

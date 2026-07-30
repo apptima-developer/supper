@@ -204,6 +204,7 @@ export type ServiceNowWriteCommandSummary = {
   targetTable: string;
   targetSysId?: string;
   targetNumber?: string;
+  commandMaterialHash: string;
   normalizedPayloadHash: string;
   providerCorrelationMarker?: string;
   validationSummary: JsonObject;

@@ -14,9 +14,14 @@ import {
   createCommand,
   executeCommand,
   executeCommandDryRun,
+  getCommandStatus,
   issueCommandConfirmation,
+  issueManualOperation,
   getServiceNowWriteReadiness,
+  getServiceNowWriteOperationsSummary,
+  listCommands,
   reconcileCommand,
+  retryCommand,
   testServiceNowWriteReadiness,
 } from "./service";
 import type {
@@ -93,6 +98,7 @@ function commandSummary(overrides: Partial<ServiceNowWriteCommandSummary> = {}):
     sourceType: "manual",
     operationReference: "manual-op:command-id-0000000001",
     targetTable: "incident",
+    commandMaterialHash: hash,
     normalizedPayloadHash: hash,
     providerCorrelationMarker: marker,
     validationSummary: { valid: true },
@@ -177,10 +183,11 @@ describe("ServiceNow write service", () => {
           command_status: "validated" as const,
           command_attempt_count: 0,
           command_version: 1,
+          command_material_hash: payload.commandMaterialHash as string,
           normalized_payload_hash: payload.normalizedPayloadHash as string,
         };
       }
-      if (storedPayload.normalizedPayloadHash !== payload.normalizedPayloadHash) {
+      if (storedPayload.commandMaterialHash !== payload.commandMaterialHash) {
         throw new Error("SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT");
       }
       return {
@@ -189,6 +196,7 @@ describe("ServiceNow write service", () => {
         command_status: "validated" as const,
         command_attempt_count: 0,
         command_version: 1,
+        command_material_hash: storedPayload.commandMaterialHash as string,
         normalized_payload_hash: storedPayload.normalizedPayloadHash as string,
       };
     });
@@ -223,7 +231,11 @@ describe("ServiceNow write service", () => {
       createId: () => `command-replay-${++sequence}`.padEnd(20, "0"),
     };
     const first = await createCommand(request, dependencies);
-    const replay = await createCommand(request, dependencies);
+    const replay = await createCommand({
+      ...request,
+      requestId: "request-replay-0002",
+      correlationId: "request-replay-0002",
+    }, dependencies);
     expect(replay.id).toBe(first.id);
     expect(createStored).toHaveBeenCalledTimes(2);
     expect(new Set(createStored.mock.calls.map(([payload]) => payload.providerCorrelationMarker))).toHaveLength(1);
@@ -231,6 +243,29 @@ describe("ServiceNow write service", () => {
       ...request,
       payload: { shortDescription: "Changed", description: "Description" },
     }, dependencies)).rejects.toMatchObject({ code: "SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT" });
+    for (const changed of [
+      {
+        ...request,
+        payload: {
+          ...request.payload,
+          externalReferences: { source: "changed" },
+        },
+      },
+      {
+        ...request,
+        payload: {
+          ...request.payload,
+          supperTicketNo: "T-CHANGED",
+        },
+      },
+      { ...request, maxAttempts: 2 },
+    ]) {
+      await expect(createCommand(changed, dependencies)).rejects.toMatchObject({
+        code: "SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT",
+      });
+    }
+    expect(new Set(createStored.mock.calls.map(([payload]) => payload.idempotencyKey))).toHaveLength(1);
+    expect(new Set(createStored.mock.calls.map(([payload]) => payload.providerCorrelationMarker))).toHaveLength(1);
   });
 
   it("validates and submits raw command material once while SQL owns normalized identity", async () => {
@@ -240,6 +275,7 @@ describe("ServiceNow write service", () => {
       command_status: "validated" as const,
       command_attempt_count: 0,
       command_version: 1,
+      command_material_hash: hash,
       normalized_payload_hash: hash,
     }));
     const audit = vi.fn(async () => auditFixture);
@@ -278,6 +314,7 @@ describe("ServiceNow write service", () => {
         fields: expect.objectContaining({ correlation_id: expect.stringMatching(/^SUPPER:[a-f0-9]{64}$/) }),
       }),
       idempotencyKey: expect.stringMatching(/^[a-f0-9]{64}$/),
+      commandMaterialHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       normalizedPayloadHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({
@@ -617,8 +654,58 @@ describe("ServiceNow write service", () => {
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
       action: "reconcile_by_read_back",
       result: "confirmed_succeeded",
-      safeReadBackSummary: { method: "correlation_marker", matchCount: 1 },
+      safeReadBackSummary: {
+        method: "correlation_marker",
+        matchCount: 1,
+        evidenceClassification: "provider_matched",
+      },
       confirmationNonceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+  });
+
+  it("keeps an exact target with inconclusive mutation evidence unresolved", async () => {
+    const readBack = vi.fn(async () => ({
+      result: "inconclusive" as const,
+      summary: {
+        method: "exact_sys_id",
+        matchedFields: 1,
+        expectedFields: 2,
+      },
+      targetSysId: "b".repeat(32),
+      targetNumber: "INC0010004",
+    }));
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "reconciliation_required" as const,
+      command_version: 2,
+      reconciliation_result: "inconclusive",
+    }));
+    const result = await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "reconcile_by_read_back",
+      session,
+      requestId: "request-inconclusive-proof",
+      correlationId: "request-inconclusive-proof",
+      confirmation,
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({
+          version: 2,
+          status: "reconciliation_required",
+        })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({ readBack }),
+      audit: async () => auditFixture,
+    });
+    expect(result.status).toBe("reconciliation_required");
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      result: "inconclusive",
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_matched",
+      }),
     }));
   });
 
@@ -710,6 +797,87 @@ describe("ServiceNow write service", () => {
       }),
     })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT" });
     expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["confirmed_succeeded" as const, "SERVICENOW_WRITE_PROVIDER_MATCHED"],
+    ["ambiguous" as const, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS"],
+  ])("blocks mark-not-applied when provider read-back is %s", async (providerResult, code) => {
+    const reconcile = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_not_applied_after_verification",
+      session,
+      requestId: `request-not-applied-${providerResult}`,
+      correlationId: `request-not-applied-${providerResult}`,
+      confirmation,
+      verificationAcknowledged: true,
+      verificationNote: "Independent administrator verification completed.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedUpdate),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: providerResult,
+          summary: { method: "exact_sys_id", matchCount: providerResult === "ambiguous" ? 2 : 1 },
+          ...(providerResult === "confirmed_succeeded" ? {
+            targetSysId: "b".repeat(32),
+            targetNumber: "INC0010004",
+          } : {}),
+        })),
+      }),
+    })).rejects.toMatchObject({ code });
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("records an explicit journal not-applied decision without provider mutation", async () => {
+    const providerExecute = vi.fn();
+    const providerReadBack = vi.fn();
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "retry_scheduled" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_not_applied",
+    }));
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_not_applied_after_verification",
+      session,
+      requestId: "request-journal-not-applied",
+      correlationId: "request-journal-not-applied",
+      confirmation,
+      verificationAcknowledged: true,
+      verificationNote: "Independent journal review completed.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => ({
+          schemaVersion: "servicenow-write-normalized-v2",
+          commandType: "add_comment",
+          targetSysId: "b".repeat(32),
+          fields: { comments: "Reviewed comment" },
+        })),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({
+          commandType: "add_comment",
+          status: "retry_scheduled",
+          version: 2,
+        })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: { ...adapter(), execute: providerExecute, readBack: providerReadBack },
+      audit: async () => auditFixture,
+    });
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(providerReadBack).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      safeReadBackSummary: expect.objectContaining({
+        duplicateJournalRiskAcknowledged: true,
+        providerResult: "journal_presence_not_safely_provable",
+      }),
+    }));
   });
 
   it("maps a defensive repository target conflict to a safe conflict response", async () => {
@@ -814,6 +982,229 @@ describe("ServiceNow write service", () => {
       connectionTestable: true,
       liveWriteEnabled: false,
       liveWriteReady: false,
+    });
+  });
+
+  it("keeps ledger reads and confirmation available without provider credentials", async () => {
+    const unavailableEnv = {
+      DATA_BACKEND: "supabase-relational",
+      SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+      SERVICENOW_ENABLED: "true",
+      SERVICENOW_AUTH_MODE: "basic",
+    };
+    const detail = commandSummary({ status: "reconciliation_required" });
+    const repository = {
+      getCommand: vi.fn(async () => detail),
+      listCommands: vi.fn(async () => ({ commands: [detail], total: 1 })),
+      issueConfirmation: vi.fn(async () => ({
+        command_id: detail.id,
+        command_version: detail.version,
+        normalized_payload_hash: detail.normalizedPayloadHash,
+        confirmation_expires_at: "2026-07-23T01:07:00.000Z",
+      })),
+      getOperationsSummary: vi.fn(async () => ({
+        countsByStatus: { reconciliation_required: 1 },
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    await expect(getCommandStatus(detail.id, {
+      env: unavailableEnv,
+      repository,
+    })).resolves.toBe(detail);
+    await expect(listCommands({ page: 1, limit: 20 }, {
+      env: unavailableEnv,
+      repository,
+    })).resolves.toMatchObject({ total: 1 });
+    await expect(getServiceNowWriteOperationsSummary({
+      env: unavailableEnv,
+      repository,
+    })).resolves.toMatchObject({
+      readiness: { configured: false, relationalStorage: true },
+      countsByStatus: { reconciliation_required: 1 },
+    });
+    await expect(issueCommandConfirmation({
+      commandId: detail.id,
+      action: "mark_succeeded_after_verification",
+      expectedVersion: detail.version,
+      expectedNormalizedPayloadHash: detail.normalizedPayloadHash,
+      session,
+    }, {
+      env: unavailableEnv,
+      repository,
+      createNonce: () => "provider-independent-confirmation-nonce",
+      now: () => new Date("2026-07-23T01:05:00.000Z"),
+    })).resolves.toMatchObject({
+      commandId: detail.id,
+      action: "mark_succeeded_after_verification",
+    });
+    await expect(issueManualOperation({
+      commandType: "create_incident",
+      sourceType: "manual",
+      session,
+    }, {
+      env: unavailableEnv,
+      repository,
+      now: () => new Date("2026-07-23T01:05:00.000Z"),
+    })).resolves.toMatchObject({
+      operationReference: expect.stringMatching(/^manual-op:/),
+    });
+  });
+
+  it("persists bounded read-back failure and permits explicit manual recovery without provider config", async () => {
+    const unavailableEnv = {
+      DATA_BACKEND: "supabase-relational",
+      SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+      SERVICENOW_ENABLED: "true",
+      SERVICENOW_AUTH_MODE: "basic",
+    };
+    const reconcile = vi.fn(async (payload) => ({
+      command_id: payload.commandId,
+      command_status: payload.action === "reconcile_by_read_back"
+        ? "reconciliation_required" as const
+        : "succeeded" as const,
+      command_version: 2,
+      reconciliation_result: payload.result,
+    }));
+    const repository = {
+      getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      reconcile,
+      getCommand: vi.fn(async () => commandSummary({
+        status: "reconciliation_required",
+        version: 2,
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "reconcile_by_read_back",
+      session,
+      requestId: "request-ledger-recovery-read",
+      correlationId: "request-ledger-recovery-read",
+      confirmation,
+    }, {
+      env: unavailableEnv,
+      repository,
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:06:00.000Z"),
+    });
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
+      result: "read_back_failed",
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_unavailable_manual_verification",
+        errorCode: "SERVICENOW_CONFIGURATION_INVALID",
+      }),
+    }));
+
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-ledger-recovery-manual",
+      correlationId: "request-ledger-recovery-manual",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Independent administrator verification completed.",
+    }, {
+      env: unavailableEnv,
+      repository,
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:06:30.000Z"),
+    });
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
+      result: "confirmed_succeeded",
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_unavailable_manual_verification",
+      }),
+    }));
+  });
+
+  it("blocks execute and retry before touching the ledger when provider config is invalid", async () => {
+    const unavailableEnv = {
+      DATA_BACKEND: "supabase-relational",
+      SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+      SERVICENOW_ENABLED: "true",
+      SERVICENOW_AUTH_MODE: "basic",
+    };
+    const beginAttempt = vi.fn();
+    const dependencies = {
+      env: unavailableEnv,
+      repository: { beginAttempt } as unknown as ServiceNowWriteRepository,
+    };
+    const input = {
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-provider-blocked",
+      correlationId: "request-provider-blocked",
+      confirmation,
+    };
+    await expect(executeCommand(input, dependencies)).rejects.toMatchObject({
+      code: "SERVICENOW_CONFIGURATION_INVALID",
+    });
+    await expect(retryCommand(input, dependencies)).rejects.toMatchObject({
+      code: "SERVICENOW_CONFIGURATION_INVALID",
+    });
+    expect(beginAttempt).not.toHaveBeenCalled();
+  });
+
+  it("allows manual success on bounded provider unavailability but blocks provider not-found", async () => {
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "succeeded" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_succeeded",
+    }));
+    const repository = {
+      getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      reconcile,
+      getCommand: vi.fn(async () => commandSummary({ status: "succeeded", version: 2 })),
+    } as unknown as ServiceNowWriteRepository;
+    const input = {
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification" as const,
+      session,
+      requestId: "request-provider-manual-success",
+      correlationId: "request-provider-manual-success",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true as const,
+      verificationNote: "Independent administrator verification completed.",
+    };
+    const unavailable = serviceNowError({
+      category: "unavailable",
+      code: "SERVICENOW_WRITE_NETWORK_UNAVAILABLE",
+      safeMessage: "ServiceNow is unavailable",
+      retryable: true,
+      operation: "ticket.update",
+      correlationId: correlationIdSchema.parse(input.correlationId),
+    });
+    await expect(reconcileCommand(input, {
+      env,
+      repository,
+      adapter: adapter({ readBack: vi.fn(async () => { throw unavailable; }) }),
+      audit: async () => auditFixture,
+    })).resolves.toMatchObject({ status: "succeeded" });
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_unavailable_manual_verification",
+      }),
+    }));
+
+    await expect(reconcileCommand({
+      ...input,
+      requestId: "request-provider-not-found",
+      correlationId: "request-provider-not-found",
+    }, {
+      env,
+      repository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: "not_found" as const,
+          summary: { method: "correlation_marker", matchCount: 0 },
+        })),
+      }),
+    })).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_PROVIDER_NOT_FOUND",
     });
   });
 });

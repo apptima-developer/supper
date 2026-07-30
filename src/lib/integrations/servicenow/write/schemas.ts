@@ -293,6 +293,7 @@ export const serviceNowWriteCommandRowSchema = z.object({
   target_table: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/),
   target_sys_id: serviceNowSysIdWriteSchema.nullable().optional(),
   target_number: serviceNowNumberWriteSchema.nullable().optional(),
+  command_material_hash: hashSchema,
   normalized_payload_hash: hashSchema,
   provider_correlation_marker: serviceNowCorrelationMarkerSchema.nullable().optional(),
   normalized_payload: normalizedServiceNowWriteCommandSchema.optional(),

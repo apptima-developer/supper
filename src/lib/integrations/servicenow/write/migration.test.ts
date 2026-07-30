@@ -25,7 +25,9 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_reconciliation_command_idx",
       "servicenow_write_readiness_expiry_idx",
     ]) expect(sql).toContain(index);
+    expect(sql).toContain("command_material_hash");
     expect(sql).toContain("normalized_payload_hash");
+    expect(sql).toContain("support_servicenow_write_command_material_hash");
     expect(sql).toContain("octet_length(normalized_payload::text) <= 65536");
     expect(sql).toContain("support_intake_json_has_unsafe_key");
   });
@@ -62,6 +64,7 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("servicenow_write_idempotency_conflict");
     expect(sql).toContain("on conflict (idempotency_key) do nothing");
     expect(sql).toContain("servicenow-write-v2");
+    expect(sql).toContain("servicenow-write-command-material-v1");
     expect(sql).toContain("support_servicenow_write_normalize");
     expect(sql).toContain("support_servicenow_write_normalized_hash");
     expect(sql).toContain("provider_correlation_marker");
@@ -86,6 +89,9 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("verificationacknowledged");
     expect(sql).toContain("verificationnote");
     expect(sql).toContain("servicenow_write_verified_target_conflict");
+    expect(sql).toContain("servicenow_write_reconciliation_evidence_invalid");
+    expect(sql).toContain("provider_unavailable_manual_verification");
+    expect(sql).toContain("provider_not_found");
   });
 
   it("enforces fresh readiness and exception-safe payload parsing", () => {
@@ -97,6 +103,10 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("support_servicenow_write_parse_boolean");
     expect(sql).toContain("when invalid_datetime_format or datetime_field_overflow or invalid_text_representation");
     expect(sql).toContain("when invalid_text_representation or numeric_value_out_of_range");
+    expect(sql).toContain("statement_timestamp()");
+    expect(sql).toContain("v_command.next_retry_at>v_db_now");
+    expect(sql).toContain("v_command.confirmation_expires_at<v_db_now");
+    expect(sql).toContain("v_readiness.expires_at <= v_db_now");
   });
 
   it("records the forward-only migration and uses the portable intake hash helper", () => {

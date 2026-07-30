@@ -12,6 +12,7 @@ import { ServiceNowWriteAdapter } from "./adapter";
 import { parseServiceNowWriteConfig } from "./config";
 import {
   buildServiceNowWriteConfigurationFingerprint,
+  buildServiceNowWriteCommandMaterialHash,
   buildServiceNowNormalizedPayloadHash,
   buildServiceNowProviderCorrelationMarker,
   buildServiceNowWriteIdempotencyKey,
@@ -122,6 +123,7 @@ function operationalError(error: unknown): never {
   if (message.includes("SERVICENOW_WRITE_VERSION_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERSION_CONFLICT", "ServiceNow write command changed; review it again");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED", "ServiceNow write command does not require reconciliation");
   if (message.includes("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the ServiceNow write command");
+  if (message.includes("SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID", "ServiceNow write reconciliation evidence does not support this decision");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_INVALID")) throw new HttpError(400, "SERVICENOW_WRITE_RECONCILIATION_INVALID", "ServiceNow write reconciliation evidence is invalid");
   if (message.includes("SERVICENOW_WRITE_DRY_RUN_NOT_ALLOWED")
     || message.includes("SERVICENOW_WRITE_EXECUTION_NOT_ALLOWED")
@@ -172,17 +174,41 @@ async function auditBestEffort(
   }
 }
 
-async function runtime(dependencies: Dependencies, requireWriteEnabled: boolean) {
+async function ledgerRuntime(dependencies: Dependencies) {
   const env = dependencies.env || process.env;
   requireRelational(env);
+  const repository = dependencies.repository || new ServiceNowWriteRepository();
+  return { env, repository };
+}
+
+async function providerRuntime(dependencies: Dependencies, requireWriteEnabled: boolean) {
+  const { env, repository } = await ledgerRuntime(dependencies);
   const config = requireServiceNowConfig(env);
   const writeConfig = parseServiceNowWriteConfig(env);
   if (requireWriteEnabled && !writeConfig.enabled) {
     throw new HttpError(503, "SERVICENOW_WRITE_DISABLED", "ServiceNow write execution is disabled");
   }
-  const repository = dependencies.repository || new ServiceNowWriteRepository();
   const adapter = dependencies.adapter || new ServiceNowWriteAdapter(config, { fetch: dependencies.fetch || fetch });
   return { env, config, writeConfig, repository, adapter };
+}
+
+async function optionalProviderRuntime(dependencies: Dependencies) {
+  try {
+    return {
+      available: true as const,
+      ...await providerRuntime(dependencies, false),
+    };
+  } catch (error) {
+    if (!(error instanceof HttpError)
+      || !["SERVICENOW_DISABLED", "SERVICENOW_CONFIGURATION_INVALID"].includes(error.code)) {
+      throw error;
+    }
+    return {
+      available: false as const,
+      ...await ledgerRuntime(dependencies),
+      providerErrorCode: error.code,
+    };
+  }
 }
 
 export function validateCommand(input: unknown): ServiceNowWriteCommandInput {
@@ -198,7 +224,7 @@ export async function issueManualOperation(
   },
   dependencies: Dependencies = {},
 ): Promise<ServiceNowManualOperationIdentity> {
-  await runtime(dependencies, false);
+  await ledgerRuntime(dependencies);
   return issueManualOperationIdentity({
     session: input.session,
     commandType: input.commandType,
@@ -215,7 +241,7 @@ export async function createCommand(
 ) {
   const { session, requestId, correlationId, ...commandInput } = input;
   const validated = validateCommand(commandInput);
-  const { env, config, writeConfig, repository } = await runtime(dependencies, false);
+  const { env, config, writeConfig, repository } = await providerRuntime(dependencies, false);
   const createId = dependencies.createId || (() => crypto.randomUUID());
   const commandId = createId();
   const operationReference = validated.sourceType === "manual"
@@ -259,12 +285,25 @@ export async function createCommand(
     : undefined;
   const normalized = normalizeCommand(validated, safeMapping, providerCorrelationMarker);
   const normalizedPayloadHash = buildServiceNowNormalizedPayloadHash(normalized);
+  const maxAttempts = Math.min(
+    validated.maxAttempts || writeConfig.maxAttempts,
+    writeConfig.maxAttempts,
+  );
+  const commandMaterialHash = buildServiceNowWriteCommandMaterialHash({
+    commandType: validated.commandType,
+    sourceType: validated.sourceType,
+    sourceEntityReference: validated.sourceEntityReference,
+    operationReference,
+    payload: validated.payload,
+    maxAttempts,
+  }, connectionId, mapping.id, config.incidentTable);
   const now = (dependencies.now || (() => new Date()))().toISOString();
   try {
     const result = await repository.createCommand({
       commandId,
       commandType: validated.commandType,
       idempotencyKey,
+      commandMaterialHash,
       normalizedPayloadHash,
       connectionId,
       mappingId: mapping.id,
@@ -283,7 +322,7 @@ export async function createCommand(
         mappedFields: Object.keys(normalized.fields).sort(),
         warningCodes: [],
       },
-      maxAttempts: Math.min(validated.maxAttempts || writeConfig.maxAttempts, writeConfig.maxAttempts),
+      maxAttempts,
       createdBy: session.userId,
       requestId,
       correlationId,
@@ -338,7 +377,7 @@ async function execute(
   dependencies: Dependencies,
 ) {
   const live = mode !== "dry_run";
-  const { env, config, repository, adapter } = await runtime(dependencies, live);
+  const { env, config, repository, adapter } = await providerRuntime(dependencies, live);
   const now = dependencies.now || (() => new Date());
   if (live) {
     await requireFreshReadinessProof(
@@ -523,7 +562,7 @@ export async function issueCommandConfirmation(
   },
   dependencies: Dependencies = {},
 ): Promise<ServiceNowWriteConfirmation> {
-  const { repository } = await runtime(dependencies, false);
+  const { repository } = await ledgerRuntime(dependencies);
   const action = serviceNowWriteConfirmationActionSchema.parse(input.action);
   const nonce = (dependencies.createNonce || (() => randomBytes(32).toString("base64url")))();
   const issuedAt = (dependencies.now || (() => new Date()))();
@@ -568,7 +607,7 @@ export async function reconcileCommand(
   },
   dependencies: Dependencies = {},
 ) {
-  const { repository, adapter } = await runtime(dependencies, false);
+  const { repository } = await ledgerRuntime(dependencies);
   const normalized = await repository.getNormalizedCommand(input.commandId);
   if (!normalized) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
   const checkedAt = (dependencies.now || (() => new Date()))().toISOString();
@@ -583,23 +622,48 @@ export async function reconcileCommand(
   let targetSysId = input.verifiedTargetSysId || "";
   let targetNumber = input.verifiedTargetNumber || "";
   if (input.action === "reconcile_by_read_back") {
-    try {
-      const readBack = await adapter.readBack(
-        normalized,
-        correlationIdSchema.parse(input.correlationId),
-        input.abortSignal,
-      );
-      reconciliationResult = readBack.result;
-      safeReadBackSummary = { ...readBack.summary };
-      targetSysId = readBack.targetSysId || "";
-      targetNumber = readBack.targetNumber || "";
-    } catch (error) {
+    const provider = await optionalProviderRuntime(dependencies);
+    if (!provider.available) {
       reconciliationResult = "read_back_failed";
       safeReadBackSummary = {
         method: "provider_read_back",
         result: "failed",
-        errorCode: isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_READ_BACK_FAILED",
+        evidenceClassification: "provider_unavailable_manual_verification",
+        errorCode: provider.providerErrorCode,
       };
+    } else {
+      try {
+        const readBack = await provider.adapter.readBack(
+          normalized,
+          correlationIdSchema.parse(input.correlationId),
+          input.abortSignal,
+        );
+        reconciliationResult = readBack.result;
+        safeReadBackSummary = {
+          ...readBack.summary,
+          evidenceClassification: readBack.result === "confirmed_succeeded"
+            ? "provider_matched"
+            : readBack.result === "not_found"
+              ? "provider_not_found"
+              : readBack.result === "ambiguous"
+                ? "provider_ambiguous"
+                : "provider_matched",
+        };
+        targetSysId = readBack.targetSysId || "";
+        targetNumber = readBack.targetNumber || "";
+      } catch (error) {
+        const lookupMismatch = isIntegrationBoundaryError(error)
+          && error.code === "SERVICENOW_WRITE_LOOKUP_MISMATCH";
+        reconciliationResult = lookupMismatch ? "inconclusive" : "read_back_failed";
+        safeReadBackSummary = {
+          method: "provider_read_back",
+          result: "failed",
+          evidenceClassification: lookupMismatch
+            ? "provider_target_conflict"
+            : "provider_unavailable_manual_verification",
+          errorCode: isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_READ_BACK_FAILED",
+        };
+      }
     }
   } else if (input.action === "mark_succeeded_after_verification") {
     if (!input.verificationAcknowledged || !input.verificationNote || !targetSysId || !targetNumber) {
@@ -609,26 +673,39 @@ export async function reconcileCommand(
       || (normalized.targetNumber && normalized.targetNumber !== targetNumber)) {
       throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the original command target");
     }
-    let providerVerification = "unavailable";
-    try {
-      const readBack = await adapter.readBack(
-        normalized,
-        correlationIdSchema.parse(input.correlationId),
-        input.abortSignal,
-      );
-      if (readBack.result === "ambiguous") {
-        throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS", "Provider read-back matched multiple Incidents");
+    let evidenceClassification = "provider_unavailable_manual_verification";
+    const provider = await optionalProviderRuntime(dependencies);
+    if (provider.available) {
+      try {
+        const readBack = await provider.adapter.readBack(
+          normalized,
+          correlationIdSchema.parse(input.correlationId),
+          input.abortSignal,
+        );
+        if (readBack.result === "not_found") {
+          throw new HttpError(409, "SERVICENOW_WRITE_PROVIDER_NOT_FOUND", "Provider read-back did not find the verified Incident");
+        }
+        if (readBack.result === "ambiguous") {
+          throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS", "Provider read-back matched multiple Incidents");
+        }
+        if (!readBack.targetSysId || !readBack.targetNumber) {
+          throw new HttpError(409, "SERVICENOW_WRITE_PROVIDER_PROOF_REQUIRED", "Provider read-back did not return one exact Incident identity");
+        }
+        if (readBack.targetSysId !== targetSysId || readBack.targetNumber !== targetNumber) {
+          throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with provider read-back");
+        }
+        evidenceClassification = "provider_matched";
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        if (isIntegrationBoundaryError(error)
+          && error.code === "SERVICENOW_WRITE_LOOKUP_MISMATCH") {
+          throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Provider read-back returned a conflicting Incident identity");
+        }
+        if (!isIntegrationBoundaryError(error)
+          || !["unavailable", "timeout"].includes(error.category)) {
+          throw error;
+        }
       }
-      if ((readBack.targetSysId && readBack.targetSysId !== targetSysId)
-        || (readBack.targetNumber && readBack.targetNumber !== targetNumber)) {
-        throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with provider read-back");
-      }
-      providerVerification = readBack.targetSysId && readBack.targetNumber
-        ? "matched"
-        : readBack.result;
-    } catch (error) {
-      if (error instanceof HttpError) throw error;
-      providerVerification = isIntegrationBoundaryError(error) ? "provider_unavailable" : "read_back_unavailable";
     }
     safeReadBackSummary = {
       method: "manual_verified_target",
@@ -636,16 +713,58 @@ export async function reconcileCommand(
       targetNumber,
       verificationAcknowledged: true,
       verificationEvidenceProvided: true,
-      providerVerification,
+      evidenceClassification,
     };
   } else {
     if (!input.verificationAcknowledged || !input.verificationNote) {
       throw new HttpError(400, "SERVICENOW_WRITE_VERIFICATION_REQUIRED", "Explicit verification evidence is required");
     }
+    let evidenceClassification = "provider_unavailable_manual_verification";
+    let providerResult = "manual_override";
+    if (normalized.commandType === "add_comment" || normalized.commandType === "add_work_note") {
+      providerResult = "journal_presence_not_safely_provable";
+    } else {
+      const provider = await optionalProviderRuntime(dependencies);
+      if (provider.available) {
+        try {
+          const readBack = await provider.adapter.readBack(
+            normalized,
+            correlationIdSchema.parse(input.correlationId),
+            input.abortSignal,
+          );
+          providerResult = readBack.result;
+          if (readBack.result === "confirmed_succeeded") {
+            throw new HttpError(409, "SERVICENOW_WRITE_PROVIDER_MATCHED", "Provider read-back confirms the reviewed mutation is present");
+          }
+          if (readBack.result === "ambiguous") {
+            throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS", "Provider read-back matched multiple Incidents");
+          }
+          evidenceClassification = "provider_not_found";
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          if (isIntegrationBoundaryError(error)
+            && error.code === "SERVICENOW_WRITE_LOOKUP_MISMATCH") {
+            throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Provider read-back returned a conflicting Incident identity");
+          }
+          if (!isIntegrationBoundaryError(error)
+            || !["unavailable", "timeout"].includes(error.category)) {
+            throw error;
+          }
+          providerResult = "provider_unavailable";
+        }
+      } else {
+        providerResult = provider.providerErrorCode;
+      }
+    }
     safeReadBackSummary = {
       method: "manual_verified_not_applied",
       verificationAcknowledged: true,
       verificationEvidenceProvided: true,
+      evidenceClassification,
+      providerResult,
+      ...(normalized.commandType === "add_comment" || normalized.commandType === "add_work_note"
+        ? { duplicateJournalRiskAcknowledged: true }
+        : {}),
     };
   }
   try {
@@ -677,7 +796,7 @@ export async function reconcileCommand(
 }
 
 export async function getCommandStatus(commandId: string, dependencies: Dependencies = {}) {
-  const { repository } = await runtime(dependencies, false);
+  const { repository } = await ledgerRuntime(dependencies);
   const command = await repository.getCommand(commandId, true);
   if (!command) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
   return command;
@@ -687,7 +806,7 @@ export async function listCommands(
   filters: Parameters<ServiceNowWriteRepository["listCommands"]>[0],
   dependencies: Dependencies = {},
 ) {
-  const { repository } = await runtime(dependencies, false);
+  const { repository } = await ledgerRuntime(dependencies);
   return repository.listCommands(filters);
 }
 
@@ -775,7 +894,7 @@ export async function testServiceNowWriteReadiness(
   input: { correlationId: string; session: Session; abortSignal?: AbortSignal },
   dependencies: Dependencies = {},
 ) {
-  const { env, config, adapter, repository } = await runtime(dependencies, false);
+  const { env, config, adapter, repository } = await providerRuntime(dependencies, false);
   const now = dependencies.now || (() => new Date());
   const testedAt = now();
   const fingerprint = configurationFingerprint(config, env);

@@ -1,6 +1,6 @@
 # Controlled ServiceNow Write Kernel
 
-AI-2.0.2 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
+AI-2.0.3 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
 
 This milestone does not connect Unified Intake to automatic creation. It adds no LINE OA or email provider, attachment upload, outbound webhook, Freshservice write, queue, cron, scheduler, or worker.
 
@@ -15,6 +15,8 @@ Every command has separate identity fields:
 The browser retains that token until command creation succeeds. If the first command response is lost, resubmitting identical material with the same token returns the existing command and preserves one provider marker. Changed material conflicts with `SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT`; an expired, differently scoped, or caller-invented identity is rejected. Starting a genuinely new manual operation explicitly obtains a new token.
 
 The v2 logical key hashes the version, connection, command type, operation reference, source type, source entity reference, and target table. Different operation identities allow multiple updates, comments, or work notes on the same Ticket.
+
+Two independent immutable hashes protect different boundaries. `command_material_hash` is the semantic SUPPER request identity: schema version, connection, mapping, command/source/operation identity, target table, the complete validated original payload including `externalReferences` and `supperTicketNo`, and the resolved `maxAttempts`. It deliberately excludes generated transport material such as command/request/correlation IDs and timestamps. `normalized_payload_hash` covers only the exact reviewed provider mutation produced by the active mapping. TypeScript and PostgreSQL build both values independently and share fixed parity vectors. A replay is unchanged only when the full command material matches.
 
 | Command | Required payload | Optional payload |
 | --- | --- | --- |
@@ -41,6 +43,8 @@ Create commands always receive the server-owned marker `SUPPER:<logical-idempote
 - no match permits POST;
 - one match recovers the Incident and performs no POST;
 - multiple matches require reconciliation.
+
+Every provider lookup verifies the returned lookup key before using an identity. Number queries require the same returned number, marker queries require the same returned `correlation_id`, and direct record reads require the same returned `sys_id`. When a number resolves both identifiers, both must come from that one row and any later read must preserve that exact pair. A missing or mismatched key returns `SERVICENOW_WRITE_LOOKUP_MISMATCH`; no POST or PATCH follows.
 
 `supperTicketNo` is evidence only and is never the provider idempotency marker.
 
@@ -75,7 +79,9 @@ Administrators with `settings:manage` may:
 - `mark_succeeded_after_verification`: requires lowercase 32-character `verifiedTargetSysId`, a bounded `verifiedTargetNumber`, a bounded evidence note, and explicit acknowledgment;
 - `mark_not_applied_after_verification`: requires a bounded evidence note and explicit acknowledgment, then permits a bounded manual retry when attempts remain.
 
-For create, an exact marker match must agree with a manually supplied pair. For update and journal commands, exact read-back resolves the missing member of the original `sys_id`/number pair when ServiceNow is available; a conflicting pair is rejected. A reviewed pair may complete reconciliation when provider read-back is unavailable. Reconciliation performs GET only, never repeats the POST/PATCH mutation, creates at most one matching Ticket link, and appends an immutable event. The evidence note itself is validated but not copied into the safe history summary.
+For create, an exact marker match must agree with a manually supplied pair. For update and journal commands, exact read-back resolves the missing member of the original `sys_id`/number pair when ServiceNow is available; a conflicting pair is rejected. Provider `not_found` can never support Mark Succeeded. A provider match blocks Mark Not Applied for create/update, while ambiguity remains unresolved. Manual success or not-applied recovery without provider proof is allowed only when configuration is unavailable or bounded GET fails as unavailable/timeout, and its safe summary records `provider_unavailable_manual_verification`. Journal presence cannot be proven by ordinary GET, so the UI shows a stronger duplicate-journal warning and never replays it automatically.
+
+Ledger recovery is provider-independent. Command lists/details/history, confirmation issuance, and explicit manual decisions require relational storage but do not require a ServiceNow URL, credentials, or adapter. Execute, retry, creation, readiness, and provider read-back still require valid provider configuration. Reconciliation performs GET only, never repeats the POST/PATCH mutation, creates at most one matching Ticket link, and appends an immutable event. The evidence note itself is validated but not copied into the safe history summary.
 
 ## Storage and security
 
@@ -89,7 +95,7 @@ Migration `supabase/migrations/202607230001_servicenow_write_kernel.sql` creates
 - `servicenow_write_reconciliation_events`
 - `servicenow_write_readiness_proofs`
 
-All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, normalized payload, marker, and normalized hash from raw command material and the active mapping.
+All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, full command material hash, normalized payload, marker, and normalized payload hash from raw command material and the active mapping.
 
 Database rows are parsed with strict Zod schemas before presentation. Browser-safe output never includes credentials, authorization headers, raw provider bodies, original payloads, or long narrative values.
 
@@ -99,7 +105,7 @@ Readiness reports configuration validity separately from proof state. The bounde
 
 `liveWriteReady` requires relational storage, valid configuration, the live switch, and a fresh successful proof whose fingerprint matches the current connection. Connection or mapping changes invalidate the proof. Execute and retry enforce the proof both in the application and in the attempt RPC before any attempt row or provider mutation. Missing, expired, failed, or mismatched proof returns `SERVICENOW_WRITE_READINESS_REQUIRED` without consuming an attempt.
 
-Every write RPC parses JSON timestamps, integers, and booleans through guarded SQL helpers. Impossible dates, overflow, malformed types, invalid bounds, and chronology violations return bounded application codes rather than PostgreSQL cast details.
+Every write RPC parses JSON timestamps, integers, and booleans through guarded SQL helpers. The database `statement_timestamp()` is authoritative for readiness freshness, two-minute confirmations, retry availability, attempt storage, and reconciliation chronology. Caller timestamps must remain within a documented two-minute transport skew and cannot extend any lifetime; successful readiness is stored for exactly five database-clock minutes. Impossible dates, overflow, malformed types, invalid bounds, and chronology violations return bounded application codes rather than PostgreSQL cast details.
 
 ## Configuration
 
@@ -166,13 +172,14 @@ Expected: one migration row; RLS on all seven write tables; `service_role` table
 3. Confirm connection testing is available, live mutation is blocked, and **Test readiness** performs a GET successfully.
 4. Create separate manual commands for all four command types. Verify exact target validation, safe preview field names, and hidden narrative values.
 5. Run dry-runs and confirm no provider mutation and no live attempt consumption.
-6. Submit one manual command, simulate a lost HTTP response, and submit the same browser operation again. Confirm one command and one unchanged marker. Change material while retaining that operation and confirm conflict; then choose **Start a new operation** and confirm a new command.
+6. Submit one manual command, simulate a lost HTTP response, and submit the same browser operation again. Confirm one command and one unchanged marker. Change description, `externalReferences`, `supperTicketNo`, target, or `maxAttempts` while retaining that operation and confirm conflict. Change only request/command transport IDs and confirm an unchanged replay; then choose **Start a new operation** and confirm a new command.
 7. Enable live writes only on the isolated Preview and redeploy.
 8. Execute one disposable create after the server confirmation. Confirm the exact `correlation_id` marker and recovered target.
 9. Simulate a definitive safe retry condition and confirm Retry appears only for `retry_scheduled`.
 10. Simulate an ambiguous response and confirm `reconciliation_required`, no next retry, and no Retry button.
-11. Exercise read-back and manual verified success using both target identifiers, bounded evidence, and acknowledgment. Confirm a conflicting pair is rejected, the mutation is not replayed, one Ticket link exists, history is safe, and stale/replayed confirmation is rejected.
-12. Let a readiness proof expire or change `SERVICENOW_CREDENTIAL_VERSION`. Confirm execute/retry are blocked, no attempt is consumed, run **Test readiness**, and confirm live readiness returns.
-13. Disable live writes and redeploy after acceptance.
+11. Exercise read-back and manual verified success using both target identifiers, bounded evidence, and acknowledgment. Confirm provider not-found blocks success, provider match blocks unsafe not-applied, ambiguity stays unresolved, a conflicting pair is rejected, the mutation is not replayed, one Ticket link exists, history is safe, and stale/replayed confirmation is rejected.
+12. Remove the Preview ServiceNow URL/credential temporarily. Confirm command list/detail and confirmation still load, explicit provider-unavailable manual recovery remains possible, read-back records a bounded unavailable result, and Execute/Retry stay blocked. Restore the values and redeploy.
+13. Let a readiness proof expire or change `SERVICENOW_CREDENTIAL_VERSION`. Confirm execute/retry are blocked, no attempt is consumed, run **Test readiness**, and confirm live readiness returns. Also verify a future browser timestamp cannot extend proof or confirmation lifetime.
+14. Disable live writes and redeploy after acceptance.
 
 Never use production identifiers or paste credentials, provider bodies, or customer narratives into acceptance evidence.

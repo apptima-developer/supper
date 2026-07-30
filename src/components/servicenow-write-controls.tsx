@@ -565,6 +565,11 @@ export function ServiceNowWriteControls() {
             {(pendingAction.action === "mark_succeeded_after_verification"
               || pendingAction.action === "mark_not_applied_after_verification")
               && <p className="mt-2 font-medium">This records a reviewed outcome and never resends the ServiceNow mutation.</p>}
+            {pendingAction.action === "mark_not_applied_after_verification"
+              && ["add_comment", "add_work_note"].includes(pendingAction.command.commandType)
+              && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">
+                ServiceNow cannot prove that a journal entry is absent. An incorrect decision can create a duplicate comment or work note later. This action never replays the journal automatically and requires explicit independent verification.
+              </p>}
           </div>
           {pendingAction.action === "mark_succeeded_after_verification" && <div className="grid gap-3 sm:grid-cols-2">
             <div><Label required>Verified ServiceNow sys_id</Label><Input value={verifiedTargetSysId} onChange={(event) => setVerifiedTargetSysId(event.target.value)} placeholder="Lowercase 32-character sys_id" /></div>

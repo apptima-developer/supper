@@ -102,6 +102,7 @@ export function safeServiceNowWriteCommand(
     targetTable: row.target_table,
     targetSysId: row.target_sys_id || undefined,
     targetNumber: row.target_number || undefined,
+    commandMaterialHash: row.command_material_hash,
     normalizedPayloadHash: row.normalized_payload_hash,
     providerCorrelationMarker: row.provider_correlation_marker || undefined,
     validationSummary: asJsonObject(row.validation_summary),
@@ -137,6 +138,7 @@ const createResultSchema = z.object({
   command_status: serviceNowWriteStatusSchema,
   command_attempt_count: z.number().int().nonnegative(),
   command_version: z.number().int().positive(),
+  command_material_hash: z.string().regex(/^[a-f0-9]{64}$/),
   normalized_payload_hash: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
@@ -190,7 +192,7 @@ const mappingSelect = "id,field_mapping";
 const commandSelect = [
   "id", "version", "command_type", "status", "source_type", "source_entity_reference",
   "operation_reference", "target_table", "target_sys_id", "target_number",
-  "normalized_payload_hash", "provider_correlation_marker", "validation_summary",
+  "command_material_hash", "normalized_payload_hash", "provider_correlation_marker", "validation_summary",
   "safe_request_summary", "safe_response_summary", "delivery_disposition",
   "failure_phase", "retry_allowed", "retry_reason", "reconciliation_reason",
   "reconciliation_checked_at", "reconciled_by_user_id", "reconciliation_result",

@@ -72,6 +72,7 @@ describe("ServiceNow write adapter", () => {
       sys_id: "b".repeat(32),
       number: "INC0010002",
       state: "2",
+      correlation_id: marker,
     }]));
     const result = await new ServiceNowWriteAdapter(config, {
       fetch: fetchMock as typeof fetch,
@@ -86,8 +87,8 @@ describe("ServiceNow write adapter", () => {
 
   it("requires reconciliation when a create marker matches multiple incidents", async () => {
     const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, [
-      { sys_id: "b".repeat(32), number: "INC0010002" },
-      { sys_id: "c".repeat(32), number: "INC0010003" },
+      { sys_id: "b".repeat(32), number: "INC0010002", correlation_id: marker },
+      { sys_id: "c".repeat(32), number: "INC0010003", correlation_id: marker },
     ]));
     await expect(new ServiceNowWriteAdapter(config, {
       fetch: fetchMock as typeof fetch,
@@ -115,6 +116,131 @@ describe("ServiceNow write adapter", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain(`/incident/${"b".repeat(32)}`);
     expect(fetchMock.mock.calls[1][1]?.method).toBe("PATCH");
     expect(result.targetSysId).toBe("b".repeat(32));
+  });
+
+  it("rejects a mismatched number lookup before PATCH", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, [{
+      sys_id: "b".repeat(32),
+      number: "INC0099999",
+    }]));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).execute({
+      ...updateCommand,
+      targetSysId: undefined,
+      targetNumber: "INC0010002",
+    }, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "definitely_not_sent",
+      retryAllowed: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["different", `SUPPER:${"b".repeat(64)}`],
+  ])("rejects a %s correlation marker before POST", async (_label, returnedMarker) => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, [{
+      sys_id: "b".repeat(32),
+      number: "INC0010002",
+      ...(returnedMarker ? { correlation_id: returnedMarker } : {}),
+    }]));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).execute(createCommand, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "definitely_not_sent",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it("rejects a mismatched sys_id read-back", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, {
+      sys_id: "e".repeat(32),
+      number: "INC0010005",
+      state: "2",
+    }));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).readBack(updateCommand, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "definitely_not_sent",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it("rejects a mixed target pair returned by separate number and sys_id reads", async () => {
+    const sysId = "b".repeat(32);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(providerResponse(200, [{
+        sys_id: sysId,
+        number: "INC0010002",
+      }]))
+      .mockResolvedValueOnce(providerResponse(200, {
+        sys_id: sysId,
+        number: "INC0099999",
+        state: "2",
+      }));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).readBack({
+      ...updateCommand,
+      targetSysId: undefined,
+      targetNumber: "INC0010002",
+    }, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "definitely_not_sent",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every((call) => call[1]?.method === "GET")).toBe(true);
+  });
+
+  it("rejects a mixed target pair returned by a direct sys_id read", async () => {
+    const sysId = "b".repeat(32);
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, {
+      sys_id: sysId,
+      number: "INC0099999",
+      state: "2",
+    }));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).readBack({
+      ...updateCommand,
+      targetSysId: sysId,
+      targetNumber: "INC0010002",
+    }, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "definitely_not_sent",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it("treats a mismatched mutation response pair as uncertain and never retryable", async () => {
+    const sysId = "b".repeat(32);
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, {
+      sys_id: sysId,
+      number: "INC0099999",
+      state: "2",
+    }));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).execute({
+      ...updateCommand,
+      targetSysId: sysId,
+      targetNumber: "INC0010002",
+    }, correlationId)).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+      deliveryDisposition: "may_have_committed",
+      failurePhase: "response_parse",
+      retryAllowed: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("PATCH");
   });
 
   it("keeps definitive rejection separate from retryable pre-commit responses", async () => {
