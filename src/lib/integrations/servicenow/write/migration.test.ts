@@ -90,8 +90,21 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("verificationnote");
     expect(sql).toContain("servicenow_write_verified_target_conflict");
     expect(sql).toContain("servicenow_write_reconciliation_evidence_invalid");
-    expect(sql).toContain("provider_unavailable_manual_verification");
-    expect(sql).toContain("provider_not_found");
+    expect(sql).toContain("support_validate_servicenow_reconciliation_evidence");
+    for (const evidence of [
+      "provider_matched",
+      "provider_not_found",
+      "provider_ambiguous",
+      "provider_inconclusive",
+      "provider_target_conflict",
+      "provider_unavailable",
+      "provider_unavailable_manual_verification",
+      "provider_target_matched_manual_verification",
+      "journal_manual_verification",
+    ]) expect(sql).toContain(evidence);
+    expect(sql).toContain("evidence_classification text not null");
+    expect(sql).toContain("coalesce(safe_read_back_summary->>'evidenceclassification','') = evidence_classification");
+    expect(sql).toContain("duplicatejournalriskacknowledged");
   });
 
   it("enforces fresh readiness and exception-safe payload parsing", () => {

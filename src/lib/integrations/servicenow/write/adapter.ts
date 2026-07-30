@@ -459,6 +459,73 @@ export class ServiceNowWriteAdapter {
         },
       );
     }
+    let postWriteLookupHttpStatus: number | undefined;
+    if (command.commandType === "create_incident") {
+      try {
+        const marker = command.providerCorrelationMarker || "";
+        const verified = await this.findByCorrelationMarker(
+          marker,
+          operation,
+          correlationId,
+          signal,
+        );
+        if (verified.rows.length !== 1) {
+          throw serviceNowError({
+            category: "conflict",
+            code: verified.rows.length > 1
+              ? "SERVICENOW_WRITE_CORRELATION_AMBIGUOUS"
+              : "SERVICENOW_WRITE_POST_CREATE_NOT_FOUND",
+            safeMessage: verified.rows.length > 1
+              ? "Multiple ServiceNow Incidents share the command correlation marker"
+              : "ServiceNow did not return the created Incident by its exact correlation marker",
+            retryable: false,
+            operation,
+            correlationId,
+          });
+        }
+        const exact = verified.rows[0];
+        if (exact.sysId !== result.sysId || exact.number !== result.number) {
+          throw serviceNowError({
+            category: "conflict",
+            code: "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+            safeMessage: "ServiceNow post-create verification returned a conflicting Incident identity",
+            retryable: false,
+            operation,
+            correlationId,
+          });
+        }
+        postWriteLookupHttpStatus = verified.status;
+      } catch (error) {
+        const cause = isIntegrationBoundaryError(error)
+          ? error
+          : serviceNowError({
+            category: "internal",
+            code: "SERVICENOW_WRITE_POST_CREATE_VERIFICATION_FAILED",
+            safeMessage: "ServiceNow could not verify the created Incident",
+            retryable: false,
+            operation,
+            correlationId,
+            cause: error,
+          });
+        throw serviceNowWriteExecutionError(
+          serviceNowError({
+            category: cause.category,
+            code: cause.code,
+            safeMessage: cause.safeMessage,
+            retryable: false,
+            operation,
+            correlationId,
+            cause,
+          }),
+          {
+            deliveryDisposition: "may_have_committed",
+            failurePhase: "read_back",
+            retryAllowed: false,
+            reconciliationReason: "Post-create correlation-marker verification was not exact",
+          },
+        );
+      }
+    }
     return {
       requestSummary: {
         method: command.commandType === "create_incident" ? "POST" : "PATCH",
@@ -473,6 +540,10 @@ export class ServiceNowWriteAdapter {
         sysId: result.sysId,
         number: result.number,
         state: result.state,
+        ...(command.commandType === "create_incident" ? {
+          postWriteMarkerVerified: true,
+          postWriteLookupHttpStatus,
+        } : {}),
       },
       targetSysId: result.sysId,
       targetNumber: result.number,

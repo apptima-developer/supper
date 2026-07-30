@@ -206,6 +206,9 @@ export function handleServiceNowWriteReconciliationPost(
       verifiedTargetSysId: "verifiedTargetSysId" in body ? body.verifiedTargetSysId : undefined,
       verifiedTargetNumber: "verifiedTargetNumber" in body ? body.verifiedTargetNumber : undefined,
       verificationAcknowledged: "verificationAcknowledged" in body ? body.verificationAcknowledged : undefined,
+      duplicateJournalRiskAcknowledged: "duplicateJournalRiskAcknowledged" in body
+        ? body.duplicateJournalRiskAcknowledged
+        : undefined,
       verificationNote: "verificationNote" in body ? body.verificationNote : undefined,
       abortSignal: request.signal,
     }, { repository });

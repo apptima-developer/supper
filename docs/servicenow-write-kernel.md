@@ -1,6 +1,6 @@
 # Controlled ServiceNow Write Kernel
 
-AI-2.0.3 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
+AI-2.0.4 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
 
 This milestone does not connect Unified Intake to automatic creation. It adds no LINE OA or email provider, attachment upload, outbound webhook, Freshservice write, queue, cron, scheduler, or worker.
 
@@ -44,6 +44,8 @@ Create commands always receive the server-owned marker `SUPPER:<logical-idempote
 - one match recovers the Incident and performs no POST;
 - multiple matches require reconciliation.
 
+When the lookup returns no row, the adapter sends exactly one POST, parses only the bounded candidate `sys_id` and Incident number, and immediately performs a second exact GET with the same correlation marker. Success requires exactly one returned row whose marker, `sys_id`, and number all equal the request marker and POST candidate. Missing, ambiguous, conflicting, malformed, timed-out, network-failed, or HTTP 5xx verification becomes `may_have_committed` in the `read_back` phase with retry disabled. Discovery never sends a second POST.
+
 Every provider lookup verifies the returned lookup key before using an identity. Number queries require the same returned number, marker queries require the same returned `correlation_id`, and direct record reads require the same returned `sys_id`. When a number resolves both identifiers, both must come from that one row and any later read must preserve that exact pair. A missing or mismatched key returns `SERVICENOW_WRITE_LOOKUP_MISMATCH`; no POST or PATCH follows.
 
 `supperTicketNo` is evidence only and is never the provider idempotency marker.
@@ -54,7 +56,7 @@ The ledger records both a delivery disposition and failure phase.
 
 Delivery dispositions are `definitely_not_sent`, `definitely_rejected`, `safe_to_retry`, `confirmed_succeeded`, and `may_have_committed`. Failure phases are `configuration`, `authorization`, `number_lookup`, `mutation_dispatch`, `mutation_response`, `response_parse`, and `read_back`.
 
-Once POST or PATCH dispatch begins, timeout, network disconnect, abort, HTTP 5xx, malformed/empty/oversized 2xx, and invalid returned identity are `may_have_committed`. The attempt finishes as `uncertain`; the command enters `reconciliation_required`; `retry_allowed` is false; and `next_retry_at` is empty. Journal uncertainty follows the same rule.
+Once POST or PATCH dispatch begins, timeout, network disconnect, abort, HTTP 5xx, malformed/empty/oversized 2xx, invalid returned identity, and failed post-create marker proof are `may_have_committed`. The attempt finishes as `uncertain`; the command enters `reconciliation_required`; `retry_allowed` is false; and `next_retry_at` is empty. Journal uncertainty follows the same rule.
 
 Only a definitive `safe_to_retry` outcome can become `retry_scheduled`, and only while attempts remain. Retry also requires the live-write switch, a due `next_retry_at`, and a fresh server confirmation. `failed`, `reconciliation_required`, `succeeded`, `executing`, `cancelled`, and exhausted commands cannot retry.
 
@@ -79,7 +81,22 @@ Administrators with `settings:manage` may:
 - `mark_succeeded_after_verification`: requires lowercase 32-character `verifiedTargetSysId`, a bounded `verifiedTargetNumber`, a bounded evidence note, and explicit acknowledgment;
 - `mark_not_applied_after_verification`: requires a bounded evidence note and explicit acknowledgment, then permits a bounded manual retry when attempts remain.
 
-For create, an exact marker match must agree with a manually supplied pair. For update and journal commands, exact read-back resolves the missing member of the original `sys_id`/number pair when ServiceNow is available; a conflicting pair is rejected. Provider `not_found` can never support Mark Succeeded. A provider match blocks Mark Not Applied for create/update, while ambiguity remains unresolved. Manual success or not-applied recovery without provider proof is allowed only when configuration is unavailable or bounded GET fails as unavailable/timeout, and its safe summary records `provider_unavailable_manual_verification`. Journal presence cannot be proven by ordinary GET, so the UI shows a stronger duplicate-journal warning and never replays it automatically.
+The following matrix is enforced independently by TypeScript and the immutable SQL validator `support_validate_servicenow_reconciliation_evidence`:
+
+| Action | Result | Evidence | Target / acknowledgment |
+| --- | --- | --- | --- |
+| read back | `confirmed_succeeded` | `provider_matched` | exact complete pair |
+| read back | `not_found` | `provider_not_found` | no pair; stays unresolved |
+| read back | `ambiguous` | `provider_ambiguous` | no pair; stays unresolved |
+| read back | `inconclusive` | `provider_inconclusive` | exact pair; stays unresolved |
+| read back | `read_back_failed` | `provider_unavailable` or `provider_target_conflict` | no pair; stays unresolved |
+| mark succeeded | `confirmed_succeeded` | `provider_matched`, `provider_target_matched_manual_verification`, or `provider_unavailable_manual_verification` | exact pair, evidence note, acknowledgment |
+| mark not applied, create/update | `confirmed_not_applied` | `provider_not_found` or `provider_unavailable_manual_verification` | no pair, evidence note, acknowledgment |
+| mark not applied, journal | `confirmed_not_applied` | `journal_manual_verification` | no pair, evidence note, acknowledgment, duplicate-journal-risk acknowledgment |
+
+`provider_inconclusive` means ServiceNow identified the exact Incident but the reviewed mutation content did not match completely. It is neither a provider match nor proof of absence, so it cannot produce `retry_scheduled`. Provider `not_found` blocks success; provider match, ambiguity, conflict, and inconclusive evidence block Mark Not Applied. `provider_unavailable` describes an automatic read-back failure only; the manual variant is used only after explicit administrator verification. Journal review never claims provider absence or unavailability and performs no provider mutation.
+
+For create, an exact marker match must agree with a manually supplied pair. For update and journal commands, exact read-back resolves the missing member of the original `sys_id`/number pair when ServiceNow is available; a conflicting pair is rejected. Journal presence cannot be proven by ordinary GET, so the UI requires the separate duplicate-risk acknowledgment and never replays it automatically.
 
 Ledger recovery is provider-independent. Command lists/details/history, confirmation issuance, and explicit manual decisions require relational storage but do not require a ServiceNow URL, credentials, or adapter. Execute, retry, creation, readiness, and provider read-back still require valid provider configuration. Reconciliation performs GET only, never repeats the POST/PATCH mutation, creates at most one matching Ticket link, and appends an immutable event. The evidence note itself is validated but not copied into the safe history summary.
 
@@ -95,7 +112,7 @@ Migration `supabase/migrations/202607230001_servicenow_write_kernel.sql` creates
 - `servicenow_write_reconciliation_events`
 - `servicenow_write_readiness_proofs`
 
-All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, full command material hash, normalized payload, marker, and normalized payload hash from raw command material and the active mapping.
+All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, full command material hash, normalized payload, marker, and normalized payload hash from raw command material and the active mapping. Reconciliation events persist the explicit evidence classification, and their bounded safe summary must carry the same classification.
 
 Database rows are parsed with strict Zod schemas before presentation. Browser-safe output never includes credentials, authorization headers, raw provider bodies, original payloads, or long narrative values.
 
@@ -119,7 +136,7 @@ The attempt limit is 1 through 10. `SERVICENOW_CREDENTIAL_VERSION` is optional, 
 
 ## Migration strategy
 
-`202607230001` was amended before first remote application. Evidence: the audited baseline contained the file only locally, the preceding delivery explicitly deferred manual SQL execution, and no remote SQL command was run. If the version is present on any target, stop; do not run the amended file or edit applied history.
+`202607230001` was amended through AI-2.0.4 before first remote application. Evidence: the audited baseline contained the file only locally, every preceding delivery explicitly deferred manual SQL execution, and no remote SQL command was run. If the version is present on any target, stop; do not run the amended file or edit applied history. Create and review a forward-only `202607230002` correction instead.
 
 Manual application to the isolated `supper-ai-dev` project only:
 
@@ -174,10 +191,10 @@ Expected: one migration row; RLS on all seven write tables; `service_role` table
 5. Run dry-runs and confirm no provider mutation and no live attempt consumption.
 6. Submit one manual command, simulate a lost HTTP response, and submit the same browser operation again. Confirm one command and one unchanged marker. Change description, `externalReferences`, `supperTicketNo`, target, or `maxAttempts` while retaining that operation and confirm conflict. Change only request/command transport IDs and confirm an unchanged replay; then choose **Start a new operation** and confirm a new command.
 7. Enable live writes only on the isolated Preview and redeploy.
-8. Execute one disposable create after the server confirmation. Confirm the exact `correlation_id` marker and recovered target.
+8. Execute one disposable create after the server confirmation. Confirm one pre-POST marker GET, exactly one POST, one post-POST marker GET, and success only after the same marker/`sys_id`/number are proven.
 9. Simulate a definitive safe retry condition and confirm Retry appears only for `retry_scheduled`.
-10. Simulate an ambiguous response and confirm `reconciliation_required`, no next retry, and no Retry button.
-11. Exercise read-back and manual verified success using both target identifiers, bounded evidence, and acknowledgment. Confirm provider not-found blocks success, provider match blocks unsafe not-applied, ambiguity stays unresolved, a conflicting pair is rejected, the mutation is not replayed, one Ticket link exists, history is safe, and stale/replayed confirmation is rejected.
+10. Simulate missing, ambiguous, conflicting, timed-out, malformed, and HTTP 5xx post-create proof. Confirm `reconciliation_required`, `failurePhase=read_back`, no next retry, no Retry button, and no second POST.
+11. Exercise every documented action/evidence combination. Confirm `provider_inconclusive` stays unresolved, provider not-found blocks success, provider match/inconclusive/ambiguity/conflict block unsafe not-applied, journal review requires duplicate-risk acknowledgment and performs no provider call, one successful Ticket link exists, unresolved cases create no link, history shows the evidence classification, and stale/replayed confirmation is rejected.
 12. Remove the Preview ServiceNow URL/credential temporarily. Confirm command list/detail and confirmation still load, explicit provider-unavailable manual recovery remains possible, read-back records a bounded unavailable result, and Execute/Retry stay blocked. Restore the values and redeploy.
 13. Let a readiness proof expire or change `SERVICENOW_CREDENTIAL_VERSION`. Confirm execute/retry are blocked, no attempt is consumed, run **Test readiness**, and confirm live readiness returns. Also verify a future browser timestamp cannot extend proof or confirmation lifetime.
 14. Disable live writes and redeploy after acceptance.

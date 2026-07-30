@@ -4,8 +4,10 @@ import { containsControlCharacters } from "@/lib/integrations/validation";
 import {
   serviceNowWriteCommandTypes,
   serviceNowWriteDeliveryDispositions,
+  serviceNowWriteEvidenceClassifications,
   serviceNowWriteFailurePhases,
   serviceNowWriteReconciliationActions,
+  serviceNowWriteReconciliationResults,
   serviceNowWriteSourceTypes,
   serviceNowWriteStatuses,
 } from "./types";
@@ -38,6 +40,8 @@ export const serviceNowWriteSourceTypeSchema = z.enum(serviceNowWriteSourceTypes
 export const serviceNowWriteDeliveryDispositionSchema = z.enum(serviceNowWriteDeliveryDispositions);
 export const serviceNowWriteFailurePhaseSchema = z.enum(serviceNowWriteFailurePhases);
 export const serviceNowWriteReconciliationActionSchema = z.enum(serviceNowWriteReconciliationActions);
+export const serviceNowWriteEvidenceClassificationSchema = z.enum(serviceNowWriteEvidenceClassifications);
+export const serviceNowWriteReconciliationResultSchema = z.enum(serviceNowWriteReconciliationResults);
 export const serviceNowWriteCommandIdSchema = z.string().trim().min(16).max(200)
   .regex(/^[A-Za-z0-9._:-]+$/, "Invalid command ID");
 export const serviceNowSysIdWriteSchema = z.string().trim().regex(/^[a-f0-9]{32}$/, "Invalid ServiceNow sys_id");
@@ -195,6 +199,8 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   number: serviceNowNumberWriteSchema.optional(),
   state: z.string().max(80).optional(),
   recoveredByCorrelationMarker: z.boolean().optional(),
+  postWriteMarkerVerified: z.boolean().optional(),
+  postWriteLookupHttpStatus: z.number().int().min(100).max(599).optional(),
 }).strict();
 
 export const serviceNowValidationSummarySchema = z.object({
@@ -231,6 +237,7 @@ export const reconcileServiceNowWriteCommandRequestSchema = z.discriminatedUnion
   confirmedServiceNowWriteActionRequestSchema.extend({
     action: z.literal("mark_not_applied_after_verification"),
     verificationAcknowledged: z.literal(true),
+    duplicateJournalRiskAcknowledged: z.literal(true).optional(),
     verificationNote: verificationNoteSchema,
   }).strict(),
   confirmedServiceNowWriteActionRequestSchema.extend({
@@ -307,7 +314,7 @@ export const serviceNowWriteCommandRowSchema = z.object({
   reconciliation_reason: nullableText(240),
   reconciliation_checked_at: nullableTimestamp,
   reconciled_by_user_id: nullableText(200),
-  reconciliation_result: nullableText(100),
+  reconciliation_result: serviceNowWriteReconciliationResultSchema.nullable().optional(),
   error_code: nullableText(80),
   error_message: nullableText(240),
   attempt_count: z.number().int().min(0).max(10),
@@ -323,13 +330,22 @@ export const serviceNowWriteCommandRowSchema = z.object({
 export const serviceNowWriteReconciliationEventRowSchema = z.object({
   id: z.string().min(1).max(200),
   action: serviceNowWriteReconciliationActionSchema,
-  result: z.string().min(1).max(100),
+  result: serviceNowWriteReconciliationResultSchema,
+  evidence_classification: serviceNowWriteEvidenceClassificationSchema,
   safe_read_back_summary: boundedSafeObject,
   actor_user_id: z.string().min(1).max(200),
   command_version_before: z.number().int().positive(),
   command_version_after: z.number().int().positive(),
   created_at: timestampSchema,
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.safe_read_back_summary.evidenceClassification !== value.evidence_classification) {
+    context.addIssue({
+      code: "custom",
+      message: "Persisted reconciliation evidence classification is inconsistent",
+      path: ["safe_read_back_summary", "evidenceClassification"],
+    });
+  }
+});
 
 export function queryObject(request: Request) {
   return Object.fromEntries(new URL(request.url).searchParams.entries());

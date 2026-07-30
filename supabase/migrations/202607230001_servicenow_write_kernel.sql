@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.3: controlled ServiceNow write recovery.
+-- SUPPER AI-2.0.4: reconciliation truth and exact create proof.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -123,9 +123,10 @@ create table if not exists public.servicenow_write_commands (
   reconciled_by_user_id text check (
     reconciled_by_user_id is null or length(btrim(reconciled_by_user_id)) between 1 and 200
   ),
-  reconciliation_result text check (
-    reconciliation_result is null or reconciliation_result ~ '^[a-z_]{1,100}$'
-  ),
+  reconciliation_result text check (reconciliation_result is null or reconciliation_result in (
+    'confirmed_succeeded', 'confirmed_not_applied', 'not_found',
+    'ambiguous', 'inconclusive', 'read_back_failed'
+  )),
   error_code text check (error_code is null or error_code ~ '^[A-Z0-9_]{1,80}$'),
   error_message text check (error_message is null or length(error_message) between 1 and 240),
   attempt_count integer not null default 0 check (attempt_count between 0 and 10),
@@ -231,11 +232,22 @@ create table if not exists public.servicenow_write_reconciliation_events (
     'reconcile_by_read_back', 'mark_succeeded_after_verification',
     'mark_not_applied_after_verification'
   )),
-  result text not null check (result ~ '^[a-z_]{1,100}$'),
+  result text not null check (result in (
+    'confirmed_succeeded', 'confirmed_not_applied', 'not_found',
+    'ambiguous', 'inconclusive', 'read_back_failed'
+  )),
+  evidence_classification text not null check (evidence_classification in (
+    'provider_matched', 'provider_not_found', 'provider_ambiguous',
+    'provider_inconclusive', 'provider_target_conflict', 'provider_unavailable',
+    'provider_unavailable_manual_verification',
+    'provider_target_matched_manual_verification',
+    'journal_manual_verification'
+  )),
   safe_read_back_summary jsonb not null default '{}'::jsonb check (
     jsonb_typeof(safe_read_back_summary) = 'object'
     and octet_length(safe_read_back_summary::text) <= 8192
     and not public.support_intake_json_has_unsafe_key(safe_read_back_summary)
+    and coalesce(safe_read_back_summary->>'evidenceClassification','') = evidence_classification
   ),
   actor_user_id text not null check (length(btrim(actor_user_id)) between 1 and 200),
   request_id text check (request_id is null or length(request_id) between 8 and 100),
@@ -1633,6 +1645,122 @@ begin
 end;
 $$;
 
+create or replace function public.support_validate_servicenow_reconciliation_evidence(
+  p_action text,
+  p_result text,
+  p_evidence_classification text,
+  p_command_type text,
+  p_target_sys_id text,
+  p_target_number text,
+  p_verification_acknowledged boolean,
+  p_duplicate_journal_risk_acknowledged boolean
+)
+returns void
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_has_target_pair boolean :=
+    p_target_sys_id is not null and p_target_number is not null;
+  v_has_partial_target boolean :=
+    (p_target_sys_id is null) <> (p_target_number is null);
+  v_valid boolean := false;
+begin
+  if p_action not in (
+      'reconcile_by_read_back',
+      'mark_succeeded_after_verification',
+      'mark_not_applied_after_verification'
+    )
+    or p_result not in (
+      'confirmed_succeeded', 'confirmed_not_applied', 'not_found',
+      'ambiguous', 'inconclusive', 'read_back_failed'
+    )
+    or p_evidence_classification not in (
+      'provider_matched', 'provider_not_found', 'provider_ambiguous',
+      'provider_inconclusive', 'provider_target_conflict', 'provider_unavailable',
+      'provider_unavailable_manual_verification',
+      'provider_target_matched_manual_verification',
+      'journal_manual_verification'
+    )
+    or p_command_type not in (
+      'create_incident', 'update_incident', 'add_comment', 'add_work_note'
+    )
+    or v_has_partial_target then
+    raise exception using
+      errcode='22023',
+      message='SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID';
+  end if;
+
+  if p_action = 'reconcile_by_read_back' then
+    v_valid :=
+      not coalesce(p_verification_acknowledged, false)
+      and not coalesce(p_duplicate_journal_risk_acknowledged, false)
+      and (
+        (p_result = 'confirmed_succeeded'
+          and p_evidence_classification = 'provider_matched'
+          and v_has_target_pair)
+        or
+        (p_result = 'not_found'
+          and p_evidence_classification = 'provider_not_found'
+          and not v_has_target_pair)
+        or
+        (p_result = 'ambiguous'
+          and p_evidence_classification = 'provider_ambiguous'
+          and not v_has_target_pair)
+        or
+        (p_result = 'inconclusive'
+          and p_evidence_classification = 'provider_inconclusive'
+          and v_has_target_pair)
+        or
+        (p_result = 'read_back_failed'
+          and p_evidence_classification in (
+            'provider_unavailable', 'provider_target_conflict'
+          )
+          and not v_has_target_pair)
+      );
+  elsif p_action = 'mark_succeeded_after_verification' then
+    v_valid :=
+      p_result = 'confirmed_succeeded'
+      and p_evidence_classification in (
+        'provider_matched',
+        'provider_target_matched_manual_verification',
+        'provider_unavailable_manual_verification'
+      )
+      and v_has_target_pair
+      and p_verification_acknowledged is true
+      and not coalesce(p_duplicate_journal_risk_acknowledged, false);
+  elsif p_action = 'mark_not_applied_after_verification' then
+    v_valid :=
+      p_result = 'confirmed_not_applied'
+      and not v_has_target_pair
+      and p_verification_acknowledged is true
+      and (
+        (
+          p_command_type in ('create_incident', 'update_incident')
+          and p_evidence_classification in (
+            'provider_not_found',
+            'provider_unavailable_manual_verification'
+          )
+          and not coalesce(p_duplicate_journal_risk_acknowledged, false)
+        )
+        or
+        (
+          p_command_type in ('add_comment', 'add_work_note')
+          and p_evidence_classification = 'journal_manual_verification'
+          and p_duplicate_journal_risk_acknowledged is true
+        )
+      );
+  end if;
+
+  if not v_valid then
+    raise exception using
+      errcode='22023',
+      message='SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID';
+  end if;
+end;
+$$;
+
 create or replace function public.support_reconcile_servicenow_write_command(p_payload jsonb)
 returns table (
   command_id text,
@@ -1655,6 +1783,7 @@ declare
   v_target_sys_id text;
   v_target_number text;
   v_verification_acknowledged boolean;
+  v_duplicate_journal_risk_acknowledged boolean;
   v_verification_note text;
   v_evidence_classification text;
   v_db_now timestamptz := statement_timestamp();
@@ -1667,7 +1796,8 @@ begin
         'commandId','action','result','safeReadBackSummary','targetSysId','targetNumber',
         'actorUserId','requestId','checkedAt','confirmed','expectedVersion',
         'expectedNormalizedPayloadHash','confirmationNonceHash',
-        'verificationAcknowledged','verificationNote'
+        'verificationAcknowledged','duplicateJournalRiskAcknowledged',
+        'verificationNote'
       )
     )
     or jsonb_typeof(p_payload->'confirmed')<>'boolean'
@@ -1678,7 +1808,10 @@ begin
       'reconcile_by_read_back','mark_succeeded_after_verification',
       'mark_not_applied_after_verification'
     )
-    or p_payload->>'result' !~ '^[a-z_]{1,100}$'
+    or p_payload->>'result' not in (
+      'confirmed_succeeded', 'confirmed_not_applied', 'not_found',
+      'ambiguous', 'inconclusive', 'read_back_failed'
+    )
     or jsonb_typeof(coalesce(p_payload->'safeReadBackSummary','{}'::jsonb))<>'object'
     or octet_length(coalesce(p_payload->'safeReadBackSummary','{}'::jsonb)::text)>8192 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
@@ -1716,6 +1849,13 @@ begin
       p_payload->'verificationAcknowledged', 'SERVICENOW_WRITE_RECONCILIATION_INVALID'
     );
   end if;
+  if p_payload ? 'duplicateJournalRiskAcknowledged' then
+    v_duplicate_journal_risk_acknowledged :=
+      public.support_servicenow_write_parse_boolean(
+        p_payload->'duplicateJournalRiskAcknowledged',
+        'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+      );
+  end if;
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
     or (v_target_number is not null and v_target_number !~ '^[A-Za-z0-9_-]{1,80}$')
     or (
@@ -1724,14 +1864,6 @@ begin
         not v_verification_acknowledged
         or length(coalesce(v_verification_note,'')) not between 1 and 500
       )
-    )
-    or (
-      v_action = 'mark_succeeded_after_verification'
-      and (v_target_sys_id is null or v_target_number is null)
-    )
-    or (
-      v_action = 'mark_not_applied_after_verification'
-      and (v_target_sys_id is not null or v_target_number is not null)
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
   end if;
@@ -1742,30 +1874,6 @@ begin
   end if;
   if v_command.status<>'reconciliation_required' then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED';
-  end if;
-  if v_evidence_classification not in (
-      'provider_matched',
-      'provider_unavailable_manual_verification',
-      'provider_not_found',
-      'provider_ambiguous',
-      'provider_target_conflict'
-    )
-    or (
-      v_action='mark_succeeded_after_verification'
-      and v_evidence_classification not in (
-        'provider_matched',
-        'provider_unavailable_manual_verification'
-      )
-    )
-    or (
-      v_action='mark_not_applied_after_verification'
-      and v_command.command_type in ('create_incident','update_incident')
-      and v_evidence_classification not in (
-        'provider_not_found',
-        'provider_unavailable_manual_verification'
-      )
-    ) then
-    raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID';
   end if;
   if (v_command.target_sys_id is not null and v_target_sys_id is not null
       and v_command.target_sys_id <> v_target_sys_id)
@@ -1782,13 +1890,16 @@ begin
     or (v_command.last_attempt_at is not null and v_checked_at<v_command.last_attempt_at) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
-  if v_action='mark_succeeded_after_verification' and v_result<>'confirmed_succeeded'
-    or v_action='mark_not_applied_after_verification' and v_result<>'confirmed_not_applied'
-    or v_action='reconcile_by_read_back' and v_result not in (
-      'confirmed_succeeded','not_found','ambiguous','inconclusive','read_back_failed'
-    ) then
-    raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
-  end if;
+  perform public.support_validate_servicenow_reconciliation_evidence(
+    v_action,
+    v_result,
+    v_evidence_classification,
+    v_command.command_type,
+    v_target_sys_id,
+    v_target_number,
+    v_verification_acknowledged,
+    v_duplicate_journal_risk_acknowledged
+  );
   if v_result='confirmed_succeeded' then
     v_status := 'succeeded';
     v_target_sys_id := coalesce(v_target_sys_id,v_command.target_sys_id);
@@ -1807,8 +1918,16 @@ begin
   v_version_before := v_command.version;
   update public.servicenow_write_commands command_record set
     version=command_record.version+1,status=v_status,
-    target_sys_id=coalesce(v_target_sys_id,command_record.target_sys_id),
-    target_number=coalesce(v_target_number,command_record.target_number),
+    target_sys_id=case
+      when v_result='confirmed_succeeded'
+        then coalesce(v_target_sys_id,command_record.target_sys_id)
+      else command_record.target_sys_id
+    end,
+    target_number=case
+      when v_result='confirmed_succeeded'
+        then coalesce(v_target_number,command_record.target_number)
+      else command_record.target_number
+    end,
     delivery_disposition=case
       when v_result='confirmed_succeeded' then 'confirmed_succeeded'
       when v_result='confirmed_not_applied' then 'safe_to_retry'
@@ -1824,13 +1943,15 @@ begin
     confirmation_expires_at=null,updated_at=v_checked_at
   where command_record.id=v_command.id returning * into v_command;
   insert into public.servicenow_write_reconciliation_events (
-    id,command_id,action,result,safe_read_back_summary,actor_user_id,request_id,
+    id,command_id,action,result,evidence_classification,
+    safe_read_back_summary,actor_user_id,request_id,
     command_version_before,command_version_after,created_at
   ) values (
     'sn-reconcile-'||public.support_intake_sha256_hex(
       v_command.id||':'||v_command.version::text||':'||v_action||':'||v_checked_at::text
     ),
-    v_command.id,v_action,v_result,coalesce(p_payload->'safeReadBackSummary','{}'::jsonb),
+    v_command.id,v_action,v_result,v_evidence_classification,
+    coalesce(p_payload->'safeReadBackSummary','{}'::jsonb),
     p_payload->>'actorUserId',nullif(p_payload->>'requestId',''),
     v_version_before,v_command.version,v_checked_at
   );
@@ -1934,6 +2055,7 @@ revoke all privileges on function public.support_servicenow_write_command_materi
 revoke all privileges on function public.support_servicenow_write_normalize(text,jsonb,jsonb,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_normalized_hash(jsonb) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_confirmation_hash(text) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_protect_command_identity() from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_protect_attempt_identity() from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_block_reconciliation_change() from public, anon, authenticated, service_role;
@@ -1964,22 +2086,24 @@ revoke execute on function public.support_reconcile_servicenow_write_command(jso
 grant execute on function public.support_reconcile_servicenow_write_command(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.3 authoritative command ledger with separate semantic command and normalized provider hashes. Direct service-role mutation is denied.';
+  'AI-2.0.4 authoritative command ledger with separate semantic command and normalized provider hashes. Direct service-role mutation is denied.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.3 attempt ledger with explicit delivery disposition and uncertain outcome.';
+  'AI-2.0.4 attempt ledger with explicit delivery disposition and uncertain outcome.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.3 immutable administrator reconciliation history with bounded evidence classification.';
+  'AI-2.0.4 immutable reconciliation history with an explicit evidence classification constrained by the action matrix.';
 comment on table public.servicenow_write_readiness_proofs is
-  'AI-2.0.3 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
+  'AI-2.0.4 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.3 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+  'AI-2.0.4 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean) is
+  'AI-2.0.4 rejects contradictory reconciliation action, result, evidence, command type, target pair, and acknowledgment combinations.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.3 consumes one-time confirmation, enforces evidence policy, and records mutation-free reconciliation using database time.';
+  'AI-2.0.4 consumes one-time confirmation, enforces the evidence matrix, and records mutation-free reconciliation using database time.';
 comment on function public.support_record_servicenow_write_readiness(jsonb) is
-  'AI-2.0.3 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
+  'AI-2.0.4 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.3 controlled ServiceNow write recovery',null,current_user)
+values ('202607230001','AI-2.0.4 ServiceNow reconciliation truth and exact create proof',null,current_user)
 on conflict (version) do nothing;
 
 commit;

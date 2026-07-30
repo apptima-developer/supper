@@ -30,6 +30,10 @@ const writeUiSource = readFileSync(
   path.join(root, "src/components/servicenow-write-controls.tsx"),
   "utf8",
 );
+const writeTypesSource = readFileSync(
+  path.join(root, "src/lib/integrations/servicenow/write/types.ts"),
+  "utf8",
+);
 for (const required of [
   "SignJWT",
   "jwtVerify",
@@ -47,25 +51,45 @@ if (writeServiceSource.includes("`manual-op:${commandId}`")) {
   throw new Error("Manual operation identity is still derived from a per-request command ID");
 }
 if (!writeUiSource.includes("setManualOperation(operation)")
-  || !writeUiSource.includes("manualOperationToken: operation.operationToken")) {
-  throw new Error("Browser lost-response replay does not retain the server-issued operation token");
+  || !writeUiSource.includes("manualOperationToken: operation.operationToken")
+  || !writeUiSource.includes("duplicateJournalRiskAcknowledged")
+  || !writeUiSource.includes("event.evidenceClassification")) {
+  throw new Error("ServiceNow write controls are missing operation replay or reconciliation evidence safeguards");
 }
 for (const required of [
   "ledgerRuntime",
   "providerRuntime",
   "optionalProviderRuntime",
-  "provider_unavailable_manual_verification",
 ]) {
   if (!writeServiceSource.includes(required)) {
     throw new Error(`ServiceNow recovery runtime is missing ${required}`);
   }
 }
+for (const classification of [
+  "provider_matched",
+  "provider_not_found",
+  "provider_ambiguous",
+  "provider_inconclusive",
+  "provider_target_conflict",
+  "provider_unavailable",
+  "provider_unavailable_manual_verification",
+  "provider_target_matched_manual_verification",
+  "journal_manual_verification",
+]) {
+  if (!writeTypesSource.includes(classification)
+    || !writeServiceSource.includes(classification)) {
+    throw new Error(`ServiceNow reconciliation evidence is missing ${classification}`);
+  }
+}
 for (const required of [
   "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+  "SERVICENOW_WRITE_POST_CREATE_NOT_FOUND",
   "correlation_id",
   "expected.number",
   "expected.sysId",
   "expected.correlationMarker",
+  "postWriteMarkerVerified",
+  "postWriteLookupHttpStatus",
 ]) {
   if (!writeAdapterSource.includes(required)) {
     throw new Error(`ServiceNow exact lookup verification is missing ${required}`);
@@ -339,6 +363,268 @@ as $$
   );
 $$;
 
+create or replace function public.supper_test_prepare_reconciliation(
+  p_command_id text,
+  p_command_type text,
+  p_operation_reference text
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_payload jsonb;
+begin
+  if p_command_type = 'create_incident' then
+    perform * from public.support_create_servicenow_write_command(
+      public.supper_test_write_payload(
+        p_command_id,
+        'manual-op:'||p_operation_reference,
+        'Reconciliation matrix test'
+      )
+    );
+  else
+    v_payload := case p_command_type
+      when 'update_incident' then
+        jsonb_build_object('sysId',repeat('d',32),'state','2')
+      when 'add_comment' then
+        jsonb_build_object('number','INC0010001','text','Reviewed matrix comment')
+      when 'add_work_note' then
+        jsonb_build_object('sysId',repeat('d',32),'text','Reviewed matrix work note')
+      else null
+    end;
+    perform * from public.support_create_servicenow_write_command(
+      public.supper_test_write_payload_for(
+        p_command_id,
+        p_command_type,
+        p_operation_reference,
+        v_payload
+      )
+    );
+  end if;
+  update public.servicenow_write_commands
+  set status='reconciliation_required',
+    delivery_disposition='may_have_committed',
+    failure_phase='read_back',
+    retry_allowed=false,
+    next_retry_at=null
+  where id=p_command_id;
+end;
+$$;
+
+do $$
+declare
+  v_case record;
+  v_version integer;
+  v_hash text;
+  v_nonce text;
+  v_payload jsonb;
+  v_status text;
+  v_attempt_count integer;
+begin
+  select count(*) into v_attempt_count from public.servicenow_write_attempts;
+  for v_case in
+    select *
+    from jsonb_to_recordset('[
+      {"suffix":"matched","commandType":"create_incident","action":"reconcile_by_read_back","result":"confirmed_succeeded","evidence":"provider_matched","targetSysId":"11111111111111111111111111111111","targetNumber":"INC0011001","expectedStatus":"succeeded"},
+      {"suffix":"not-found","commandType":"create_incident","action":"reconcile_by_read_back","result":"not_found","evidence":"provider_not_found","expectedStatus":"reconciliation_required"},
+      {"suffix":"ambiguous","commandType":"create_incident","action":"reconcile_by_read_back","result":"ambiguous","evidence":"provider_ambiguous","expectedStatus":"reconciliation_required"},
+      {"suffix":"inconclusive","commandType":"update_incident","action":"reconcile_by_read_back","result":"inconclusive","evidence":"provider_inconclusive","targetSysId":"dddddddddddddddddddddddddddddddd","targetNumber":"INC0011004","expectedStatus":"reconciliation_required"},
+      {"suffix":"target-conflict","commandType":"create_incident","action":"reconcile_by_read_back","result":"read_back_failed","evidence":"provider_target_conflict","expectedStatus":"reconciliation_required"},
+      {"suffix":"unavailable","commandType":"create_incident","action":"reconcile_by_read_back","result":"read_back_failed","evidence":"provider_unavailable","expectedStatus":"reconciliation_required"},
+      {"suffix":"unavailable-manual","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_unavailable_manual_verification","targetSysId":"77777777777777777777777777777777","targetNumber":"INC0011007","expectedStatus":"succeeded"},
+      {"suffix":"target-manual","commandType":"update_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_target_matched_manual_verification","targetSysId":"dddddddddddddddddddddddddddddddd","targetNumber":"INC0011008","expectedStatus":"succeeded"},
+      {"suffix":"journal-manual","commandType":"add_comment","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"journal_manual_verification","duplicateRisk":true,"expectedStatus":"retry_scheduled"}
+    ]'::jsonb) as x(
+      suffix text,
+      "commandType" text,
+      action text,
+      result text,
+      evidence text,
+      "targetSysId" text,
+      "targetNumber" text,
+      "duplicateRisk" boolean,
+      "expectedStatus" text
+    )
+  loop
+    perform public.supper_test_prepare_reconciliation(
+      'matrix-valid-'||v_case.suffix,
+      v_case."commandType",
+      'matrix-valid:'||v_case.suffix
+    );
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands
+    where id='matrix-valid-'||v_case.suffix;
+    v_nonce := public.support_intake_sha256_hex('matrix-valid:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','matrix-valid-'||v_case.suffix,
+      'action',v_case.action,
+      'actorUserId','admin-user',
+      'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    v_payload := jsonb_build_object(
+      'commandId','matrix-valid-'||v_case.suffix,
+      'action',v_case.action,
+      'result',v_case.result,
+      'safeReadBackSummary',jsonb_build_object(
+        'method','matrix_verifier',
+        'evidenceClassification',v_case.evidence
+      ),
+      'targetSysId',coalesce(v_case."targetSysId",''),
+      'targetNumber',coalesce(v_case."targetNumber",''),
+      'actorUserId','admin-user',
+      'requestId','matrix-valid-'||v_case.suffix,
+      'checkedAt',public.supper_test_iso(statement_timestamp()),
+      'confirmed',true,
+      'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce
+    );
+    if v_case.action <> 'reconcile_by_read_back' then
+      v_payload := v_payload || jsonb_build_object(
+        'verificationAcknowledged',true,
+        'verificationNote','Independent matrix verification completed.'
+      );
+    end if;
+    if coalesce(v_case."duplicateRisk",false) then
+      v_payload := v_payload || jsonb_build_object(
+        'duplicateJournalRiskAcknowledged',true
+      );
+    end if;
+    perform * from public.support_reconcile_servicenow_write_command(v_payload);
+    select status into v_status
+    from public.servicenow_write_commands
+    where id='matrix-valid-'||v_case.suffix;
+    if v_status <> v_case."expectedStatus" then
+      raise exception 'Valid matrix case % produced status %',v_case.suffix,v_status;
+    end if;
+    if not exists (
+      select 1
+      from public.servicenow_write_reconciliation_events
+      where command_id='matrix-valid-'||v_case.suffix
+        and result=v_case.result
+        and evidence_classification=v_case.evidence
+        and safe_read_back_summary->>'evidenceClassification'=v_case.evidence
+    ) then
+      raise exception 'Valid matrix case % did not persist truthful evidence',v_case.suffix;
+    end if;
+    if v_case."expectedStatus"='reconciliation_required'
+      and exists (
+        select 1
+        from public.servicenow_write_commands command_record
+        join public.servicenow_ticket_links ticket_link
+          on ticket_link.supper_ticket_id=command_record.source_entity_reference
+        where command_record.id='matrix-valid-'||v_case.suffix
+      ) then
+      raise exception 'Unresolved matrix case % created a Ticket link',v_case.suffix;
+    end if;
+  end loop;
+  if (select count(*) from public.servicenow_write_attempts) <> v_attempt_count then
+    raise exception 'Reconciliation matrix performed a provider mutation attempt';
+  end if;
+end;
+$$;
+
+do $$
+declare
+  v_case record;
+  v_version integer;
+  v_hash text;
+  v_nonce text;
+  v_payload jsonb;
+begin
+  for v_case in
+    select *
+    from jsonb_to_recordset('[
+      {"suffix":"read-success-unavailable","commandType":"create_incident","action":"reconcile_by_read_back","result":"confirmed_succeeded","evidence":"provider_unavailable_manual_verification","targetSysId":"11111111111111111111111111111111","targetNumber":"INC0020001"},
+      {"suffix":"not-applied-inconclusive","commandType":"update_incident","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"provider_inconclusive"},
+      {"suffix":"journal-provider-match","commandType":"add_comment","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"provider_matched","duplicateRisk":true},
+      {"suffix":"success-not-found","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_not_found","targetSysId":"22222222222222222222222222222222","targetNumber":"INC0020004"},
+      {"suffix":"success-target-conflict","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_target_conflict","targetSysId":"33333333333333333333333333333333","targetNumber":"INC0020005"},
+      {"suffix":"journal-no-risk-ack","commandType":"add_work_note","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"journal_manual_verification"}
+    ]'::jsonb) as x(
+      suffix text,
+      "commandType" text,
+      action text,
+      result text,
+      evidence text,
+      "targetSysId" text,
+      "targetNumber" text,
+      "duplicateRisk" boolean
+    )
+  loop
+    perform public.supper_test_prepare_reconciliation(
+      'matrix-invalid-'||v_case.suffix,
+      v_case."commandType",
+      'matrix-invalid:'||v_case.suffix
+    );
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands
+    where id='matrix-invalid-'||v_case.suffix;
+    v_nonce := public.support_intake_sha256_hex('matrix-invalid:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','matrix-invalid-'||v_case.suffix,
+      'action',v_case.action,
+      'actorUserId','admin-user',
+      'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    v_payload := jsonb_build_object(
+      'commandId','matrix-invalid-'||v_case.suffix,
+      'action',v_case.action,
+      'result',v_case.result,
+      'safeReadBackSummary',jsonb_build_object(
+        'method','forged_matrix_verifier',
+        'evidenceClassification',v_case.evidence
+      ),
+      'targetSysId',coalesce(v_case."targetSysId",''),
+      'targetNumber',coalesce(v_case."targetNumber",''),
+      'actorUserId','admin-user',
+      'requestId','matrix-invalid-'||v_case.suffix,
+      'checkedAt',public.supper_test_iso(statement_timestamp()),
+      'confirmed',true,
+      'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce
+    );
+    if v_case.action <> 'reconcile_by_read_back' then
+      v_payload := v_payload || jsonb_build_object(
+        'verificationAcknowledged',true,
+        'verificationNote','Forged matrix verification must fail.'
+      );
+    end if;
+    if coalesce(v_case."duplicateRisk",false) then
+      v_payload := v_payload || jsonb_build_object(
+        'duplicateJournalRiskAcknowledged',true
+      );
+    end if;
+    begin
+      perform * from public.support_reconcile_servicenow_write_command(v_payload);
+      raise exception 'Contradictory matrix case % was accepted',v_case.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm <> 'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then
+        raise;
+      end if;
+    end;
+    if not exists (
+      select 1 from public.servicenow_write_commands
+      where id='matrix-invalid-'||v_case.suffix
+        and status='reconciliation_required'
+        and not retry_allowed
+        and next_retry_at is null
+    ) then
+      raise exception 'Rejected matrix case % changed command state',v_case.suffix;
+    end if;
+  end loop;
+end;
+$$;
+
 do $$
 declare
   v_result record;
@@ -543,9 +829,11 @@ begin
   );
   if (
     select count(*) from public.servicenow_write_commands
-    where source_type='supper_ticket'
-      and source_entity_reference='ticket-write-00000001'
-      and command_type in ('add_comment','add_work_note')
+    where id in (
+      'command-comment-00000001',
+      'command-comment-00000002',
+      'command-work-note-0000001'
+    )
   )<>3 then
     raise exception 'Multiple operations on one Ticket were not preserved';
   end if;
@@ -707,9 +995,9 @@ begin
   perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
     'commandId','command-test-0000000001','action','reconcile_by_read_back',
     'result','inconclusive','safeReadBackSummary',jsonb_build_object(
-      'method','correlation_marker','evidenceClassification','provider_matched'
+      'method','exact_target','evidenceClassification','provider_inconclusive'
     ),
-    'targetSysId','','targetNumber','','actorUserId','admin-user',
+    'targetSysId',repeat('1',32),'targetNumber','INC0010001','actorUserId','admin-user',
     'requestId','request-write-sql-0004','checkedAt','2026-07-23T01:02:30.000Z',
     'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
     'confirmationNonceHash',repeat('e',64)
@@ -717,6 +1005,7 @@ begin
   if not exists (
     select 1 from public.servicenow_write_reconciliation_events
     where command_id='command-test-0000000001' and result='inconclusive'
+      and evidence_classification='provider_inconclusive'
   ) then raise exception 'Reconciliation event was not appended'; end if;
 
   begin
@@ -755,7 +1044,7 @@ begin
     'commandId','command-test-0000000001','action','mark_not_applied_after_verification',
     'result','confirmed_not_applied','safeReadBackSummary',jsonb_build_object(
       'method','manual_verification',
-      'evidenceClassification','provider_unavailable_manual_verification'
+      'evidenceClassification','provider_not_found'
     ),
     'targetSysId','','targetNumber','','actorUserId','admin-user',
     'verificationAcknowledged',true,'verificationNote','Exact target lookup found no applied mutation.',
@@ -887,7 +1176,7 @@ begin
     ));
     raise exception 'Manual success without a complete target pair was accepted';
   exception when invalid_parameter_value then
-    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_INVALID' then raise; end if;
+    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
   end;
   perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
     'commandId','command-verified-00000001','action','mark_succeeded_after_verification',

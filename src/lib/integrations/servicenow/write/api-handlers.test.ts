@@ -226,6 +226,33 @@ describe("ServiceNow write API security", () => {
     );
   });
 
+  it("forwards the explicit duplicate-journal-risk acknowledgment", async () => {
+    const reconcile = vi.fn(async () => summary({ status: "retry_scheduled" }));
+    const response = await handleServiceNowWriteReconciliationPost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/reconcile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...confirmationBody("mark_not_applied_after_verification"),
+          verificationAcknowledged: true,
+          duplicateJournalRiskAcknowledged: true,
+          verificationNote: "Independent journal review completed.",
+        }),
+      }),
+      commandId,
+      { getSession: async () => admin, repository, reconcile },
+    );
+    expect(response.status).toBe(200);
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "mark_not_applied_after_verification",
+        verificationAcknowledged: true,
+        duplicateJournalRiskAcknowledged: true,
+      }),
+      { repository },
+    );
+  });
+
   it("rejects bodies on dry-run and readiness routes", async () => {
     const dryRun = vi.fn();
     const readiness = vi.fn();

@@ -658,6 +658,8 @@ describe("ServiceNow write service", () => {
         method: "correlation_marker",
         matchCount: 1,
         evidenceClassification: "provider_matched",
+        targetSysId: "c".repeat(32),
+        targetNumber: "INC0010003",
       },
       confirmationNonceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
@@ -704,7 +706,7 @@ describe("ServiceNow write service", () => {
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
       result: "inconclusive",
       safeReadBackSummary: expect.objectContaining({
-        evidenceClassification: "provider_matched",
+        evidenceClassification: "provider_inconclusive",
       }),
     }));
   });
@@ -768,6 +770,49 @@ describe("ServiceNow write service", () => {
     }));
   });
 
+  it("records exact provider identity with inconclusive content as manual target verification", async () => {
+    const readBack = vi.fn(async () => ({
+      result: "inconclusive" as const,
+      summary: { method: "exact_sys_id", matchedFields: 1, expectedFields: 2 },
+      targetSysId: "b".repeat(32),
+      targetNumber: "INC0010004",
+    }));
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "succeeded" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_succeeded",
+    }));
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-provider-target-manual",
+      correlationId: "request-provider-target-manual",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Verified the exact target and mutation independently.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedUpdate),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({ status: "succeeded", version: 2 })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({ readBack }),
+      audit: async () => auditFixture,
+    });
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      result: "confirmed_succeeded",
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_target_matched_manual_verification",
+        providerResult: "inconclusive",
+      }),
+    }));
+  });
+
   it("rejects a manually verified pair that conflicts with provider read-back", async () => {
     const reconcile = vi.fn();
     await expect(reconcileCommand({
@@ -802,6 +847,7 @@ describe("ServiceNow write service", () => {
   it.each([
     ["confirmed_succeeded" as const, "SERVICENOW_WRITE_PROVIDER_MATCHED"],
     ["ambiguous" as const, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS"],
+    ["inconclusive" as const, "SERVICENOW_WRITE_PROVIDER_INCONCLUSIVE"],
   ])("blocks mark-not-applied when provider read-back is %s", async (providerResult, code) => {
     const reconcile = vi.fn();
     await expect(reconcileCommand({
@@ -824,6 +870,9 @@ describe("ServiceNow write service", () => {
           result: providerResult,
           summary: { method: "exact_sys_id", matchCount: providerResult === "ambiguous" ? 2 : 1 },
           ...(providerResult === "confirmed_succeeded" ? {
+            targetSysId: "b".repeat(32),
+            targetNumber: "INC0010004",
+          } : providerResult === "inconclusive" ? {
             targetSysId: "b".repeat(32),
             targetNumber: "INC0010004",
           } : {}),
@@ -850,6 +899,7 @@ describe("ServiceNow write service", () => {
       correlationId: "request-journal-not-applied",
       confirmation,
       verificationAcknowledged: true,
+      duplicateJournalRiskAcknowledged: true,
       verificationNote: "Independent journal review completed.",
     }, {
       env,
@@ -874,10 +924,42 @@ describe("ServiceNow write service", () => {
     expect(providerReadBack).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
       safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "journal_manual_verification",
         duplicateJournalRiskAcknowledged: true,
         providerResult: "journal_presence_not_safely_provable",
       }),
     }));
+  });
+
+  it("rejects journal not-applied review without duplicate-risk acknowledgment", async () => {
+    const reconcile = vi.fn();
+    const providerReadBack = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_not_applied_after_verification",
+      session,
+      requestId: "request-journal-missing-risk-ack",
+      correlationId: "request-journal-missing-risk-ack",
+      confirmation,
+      verificationAcknowledged: true,
+      verificationNote: "Independent journal review completed.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => ({
+          schemaVersion: "servicenow-write-normalized-v2",
+          commandType: "add_work_note",
+          targetSysId: "b".repeat(32),
+          fields: { work_notes: "Reviewed note" },
+        })),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({ readBack: providerReadBack }),
+    })).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_DUPLICATE_JOURNAL_ACK_REQUIRED",
+    });
+    expect(providerReadBack).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("maps a defensive repository target conflict to a safe conflict response", async () => {
@@ -1088,7 +1170,7 @@ describe("ServiceNow write service", () => {
     expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
       result: "read_back_failed",
       safeReadBackSummary: expect.objectContaining({
-        evidenceClassification: "provider_unavailable_manual_verification",
+        evidenceClassification: "provider_unavailable",
         errorCode: "SERVICENOW_CONFIGURATION_INVALID",
       }),
     }));

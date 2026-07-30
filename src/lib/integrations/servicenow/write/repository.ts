@@ -9,6 +9,7 @@ import {
   serviceNowWriteCommandRowSchema,
   serviceNowWriteCommandTypeSchema,
   serviceNowWriteReconciliationEventRowSchema,
+  serviceNowWriteReconciliationResultSchema,
   serviceNowWriteReadinessProofRowSchema,
   serviceNowWriteStatusSchema,
 } from "./schemas";
@@ -175,7 +176,7 @@ const reconciliationResultSchema = z.object({
   command_id: z.string(),
   command_status: serviceNowWriteStatusSchema,
   command_version: z.number().int().positive(),
-  reconciliation_result: z.string().min(1).max(100),
+  reconciliation_result: serviceNowWriteReconciliationResultSchema,
 });
 
 const readinessProofResultSchema = z.object({
@@ -206,7 +207,7 @@ const attemptSelect = [
   "reconciliation_reason", "safe_error_code", "safe_error_message", "started_at", "finished_at",
 ].join(",");
 const reconciliationSelect = [
-  "id", "action", "result", "safe_read_back_summary", "actor_user_id",
+  "id", "action", "result", "evidence_classification", "safe_read_back_summary", "actor_user_id",
   "command_version_before", "command_version_after", "created_at",
 ].join(",");
 
@@ -334,6 +335,7 @@ export class ServiceNowWriteRepository {
       id: row.id,
       action: row.action,
       result: row.result,
+      evidenceClassification: row.evidence_classification,
       safeReadBackSummary: asJsonObject(row.safe_read_back_summary),
       actorUserId: row.actor_user_id,
       commandVersionBefore: row.command_version_before,

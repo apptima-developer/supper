@@ -33,9 +33,11 @@ import type {
   ServiceNowWriteCommandInput,
   ServiceNowWriteCommandSummary,
   ServiceNowWriteConfirmation,
+  ServiceNowWriteEvidenceClassification,
   ServiceNowManualOperationIdentity,
   ServiceNowWriteReadiness,
   ServiceNowWriteReconciliationAction,
+  ServiceNowWriteReconciliationResult,
 } from "./types";
 
 type AuditWriter = typeof writeAudit;
@@ -602,6 +604,7 @@ export async function reconcileCommand(
     verifiedTargetSysId?: string;
     verifiedTargetNumber?: string;
     verificationAcknowledged?: true;
+    duplicateJournalRiskAcknowledged?: true;
     verificationNote?: string;
     abortSignal?: AbortSignal;
   },
@@ -611,11 +614,12 @@ export async function reconcileCommand(
   const normalized = await repository.getNormalizedCommand(input.commandId);
   if (!normalized) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
   const checkedAt = (dependencies.now || (() => new Date()))().toISOString();
-  let reconciliationResult = input.action === "mark_succeeded_after_verification"
+  let reconciliationResult: ServiceNowWriteReconciliationResult = input.action === "mark_succeeded_after_verification"
     ? "confirmed_succeeded"
     : input.action === "mark_not_applied_after_verification"
       ? "confirmed_not_applied"
       : "inconclusive";
+  let evidenceClassification: ServiceNowWriteEvidenceClassification = "provider_inconclusive";
   let safeReadBackSummary: Record<string, unknown> = {
     method: input.action === "reconcile_by_read_back" ? "provider_read_back" : "manual_verification",
   };
@@ -625,10 +629,11 @@ export async function reconcileCommand(
     const provider = await optionalProviderRuntime(dependencies);
     if (!provider.available) {
       reconciliationResult = "read_back_failed";
+      evidenceClassification = "provider_unavailable";
       safeReadBackSummary = {
         method: "provider_read_back",
         result: "failed",
-        evidenceClassification: "provider_unavailable_manual_verification",
+        evidenceClassification,
         errorCode: provider.providerErrorCode,
       };
     } else {
@@ -639,28 +644,50 @@ export async function reconcileCommand(
           input.abortSignal,
         );
         reconciliationResult = readBack.result;
-        safeReadBackSummary = {
-          ...readBack.summary,
-          evidenceClassification: readBack.result === "confirmed_succeeded"
-            ? "provider_matched"
-            : readBack.result === "not_found"
-              ? "provider_not_found"
-              : readBack.result === "ambiguous"
-                ? "provider_ambiguous"
-                : "provider_matched",
-        };
-        targetSysId = readBack.targetSysId || "";
-        targetNumber = readBack.targetNumber || "";
+        evidenceClassification = readBack.result === "confirmed_succeeded"
+          ? "provider_matched"
+          : readBack.result === "not_found"
+            ? "provider_not_found"
+            : readBack.result === "ambiguous"
+              ? "provider_ambiguous"
+              : "provider_inconclusive";
+        if ((readBack.result === "confirmed_succeeded" || readBack.result === "inconclusive")
+          && (!readBack.targetSysId || !readBack.targetNumber)) {
+          reconciliationResult = "read_back_failed";
+          evidenceClassification = "provider_target_conflict";
+          safeReadBackSummary = {
+            method: "provider_read_back",
+            result: "failed",
+            evidenceClassification,
+            errorCode: "SERVICENOW_WRITE_PROVIDER_PROOF_REQUIRED",
+          };
+        } else {
+          safeReadBackSummary = {
+            ...readBack.summary,
+            evidenceClassification,
+            ...((readBack.result === "confirmed_succeeded" || readBack.result === "inconclusive")
+              ? {
+                targetSysId: readBack.targetSysId,
+                targetNumber: readBack.targetNumber,
+              }
+              : {}),
+          };
+          if (readBack.result === "confirmed_succeeded" || readBack.result === "inconclusive") {
+            targetSysId = readBack.targetSysId || "";
+            targetNumber = readBack.targetNumber || "";
+          }
+        }
       } catch (error) {
         const lookupMismatch = isIntegrationBoundaryError(error)
           && error.code === "SERVICENOW_WRITE_LOOKUP_MISMATCH";
-        reconciliationResult = lookupMismatch ? "inconclusive" : "read_back_failed";
+        reconciliationResult = "read_back_failed";
+        evidenceClassification = lookupMismatch
+          ? "provider_target_conflict"
+          : "provider_unavailable";
         safeReadBackSummary = {
           method: "provider_read_back",
           result: "failed",
-          evidenceClassification: lookupMismatch
-            ? "provider_target_conflict"
-            : "provider_unavailable_manual_verification",
+          evidenceClassification,
           errorCode: isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_READ_BACK_FAILED",
         };
       }
@@ -673,7 +700,8 @@ export async function reconcileCommand(
       || (normalized.targetNumber && normalized.targetNumber !== targetNumber)) {
       throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the original command target");
     }
-    let evidenceClassification = "provider_unavailable_manual_verification";
+    evidenceClassification = "provider_unavailable_manual_verification";
+    let providerResult = "provider_configuration_unavailable";
     const provider = await optionalProviderRuntime(dependencies);
     if (provider.available) {
       try {
@@ -682,6 +710,7 @@ export async function reconcileCommand(
           correlationIdSchema.parse(input.correlationId),
           input.abortSignal,
         );
+        providerResult = readBack.result;
         if (readBack.result === "not_found") {
           throw new HttpError(409, "SERVICENOW_WRITE_PROVIDER_NOT_FOUND", "Provider read-back did not find the verified Incident");
         }
@@ -694,7 +723,9 @@ export async function reconcileCommand(
         if (readBack.targetSysId !== targetSysId || readBack.targetNumber !== targetNumber) {
           throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with provider read-back");
         }
-        evidenceClassification = "provider_matched";
+        evidenceClassification = readBack.result === "confirmed_succeeded"
+          ? "provider_matched"
+          : "provider_target_matched_manual_verification";
       } catch (error) {
         if (error instanceof HttpError) throw error;
         if (isIntegrationBoundaryError(error)
@@ -705,7 +736,10 @@ export async function reconcileCommand(
           || !["unavailable", "timeout"].includes(error.category)) {
           throw error;
         }
+        providerResult = "provider_unavailable";
       }
+    } else {
+      providerResult = provider.providerErrorCode;
     }
     safeReadBackSummary = {
       method: "manual_verified_target",
@@ -714,16 +748,25 @@ export async function reconcileCommand(
       verificationAcknowledged: true,
       verificationEvidenceProvided: true,
       evidenceClassification,
+      providerResult,
     };
   } else {
     if (!input.verificationAcknowledged || !input.verificationNote) {
       throw new HttpError(400, "SERVICENOW_WRITE_VERIFICATION_REQUIRED", "Explicit verification evidence is required");
     }
-    let evidenceClassification = "provider_unavailable_manual_verification";
     let providerResult = "manual_override";
     if (normalized.commandType === "add_comment" || normalized.commandType === "add_work_note") {
+      if (!input.duplicateJournalRiskAcknowledged) {
+        throw new HttpError(
+          400,
+          "SERVICENOW_WRITE_DUPLICATE_JOURNAL_ACK_REQUIRED",
+          "Explicit duplicate-journal-risk acknowledgment is required",
+        );
+      }
+      evidenceClassification = "journal_manual_verification";
       providerResult = "journal_presence_not_safely_provable";
     } else {
+      evidenceClassification = "provider_unavailable_manual_verification";
       const provider = await optionalProviderRuntime(dependencies);
       if (provider.available) {
         try {
@@ -738,6 +781,13 @@ export async function reconcileCommand(
           }
           if (readBack.result === "ambiguous") {
             throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS", "Provider read-back matched multiple Incidents");
+          }
+          if (readBack.result === "inconclusive") {
+            throw new HttpError(
+              409,
+              "SERVICENOW_WRITE_PROVIDER_INCONCLUSIVE",
+              "Provider read-back could not prove the reviewed mutation was not applied",
+            );
           }
           evidenceClassification = "provider_not_found";
         } catch (error) {
@@ -763,7 +813,7 @@ export async function reconcileCommand(
       evidenceClassification,
       providerResult,
       ...(normalized.commandType === "add_comment" || normalized.commandType === "add_work_note"
-        ? { duplicateJournalRiskAcknowledged: true }
+        ? { duplicateJournalRiskAcknowledged: input.duplicateJournalRiskAcknowledged }
         : {}),
     };
   }
@@ -777,6 +827,9 @@ export async function reconcileCommand(
       targetNumber,
       ...(input.action === "reconcile_by_read_back" ? {} : {
         verificationAcknowledged: input.verificationAcknowledged,
+        ...(input.duplicateJournalRiskAcknowledged
+          ? { duplicateJournalRiskAcknowledged: input.duplicateJournalRiskAcknowledged }
+          : {}),
         verificationNote: input.verificationNote,
       }),
       actorUserId: input.session.userId,

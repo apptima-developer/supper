@@ -169,6 +169,7 @@ export function ServiceNowWriteControls() {
   const [verifiedTargetNumber, setVerifiedTargetNumber] = useState("");
   const [verificationNote, setVerificationNote] = useState("");
   const [verificationAcknowledged, setVerificationAcknowledged] = useState(false);
+  const [duplicateJournalRiskAcknowledged, setDuplicateJournalRiskAcknowledged] = useState(false);
 
   const loadSummary = useCallback(async () => {
     setSummary(await api<ServiceNowWriteOperationsSummary>("/api/integrations/servicenow/write/operations"));
@@ -302,6 +303,9 @@ export function ServiceNowWriteControls() {
             ...(action === "mark_not_applied_after_verification" ? {
               verificationAcknowledged,
               verificationNote,
+              ...(["add_comment", "add_work_note"].includes(command.commandType)
+                ? { duplicateJournalRiskAcknowledged }
+                : {}),
             } : {}),
           } : {}),
         }),
@@ -324,6 +328,7 @@ export function ServiceNowWriteControls() {
         : await confirmedAction(command, action);
       setSelected(updated);
       setVerificationAcknowledged(false);
+      setDuplicateJournalRiskAcknowledged(false);
       setVerificationNote("");
       if (updated.status === "succeeded") toast.success("ServiceNow write succeeded");
       else if (updated.status === "dry_run_ready") toast.success("Dry run validated without a provider write");
@@ -373,6 +378,7 @@ export function ServiceNowWriteControls() {
     setVerifiedTargetNumber(command.targetNumber || "");
     setVerificationNote("");
     setVerificationAcknowledged(false);
+    setDuplicateJournalRiskAcknowledged(false);
     setPendingAction({ command, action });
   }
 
@@ -541,7 +547,7 @@ export function ServiceNowWriteControls() {
             {(attempt.failurePhase || attempt.deliveryDisposition) && <p className="mt-2 text-slate-500">{attempt.failurePhase || "-"} · {attempt.deliveryDisposition || "-"} · retry {attempt.retryAllowed ? "allowed" : "blocked"}</p>}
           </div>)}{!selected.attempts?.length && <p className="text-slate-400">No attempt recorded yet.</p>}</div></div>
           <div><p className="mb-2 font-semibold">Reconciliation history</p><div className="space-y-2">{selected.reconciliationHistory?.map((event) => <div key={event.id} className="rounded-xl border border-amber-100 bg-amber-50/40 p-3 dark:border-amber-900 dark:bg-amber-950/10">
-            <div className="flex flex-wrap items-center justify-between gap-2"><div><Badge tone={event.result === "confirmed_succeeded" ? "emerald" : event.result === "confirmed_not_applied" ? "blue" : "amber"}>{event.result}</Badge><span className="ml-2">{event.action.replaceAll("_", " ")}</span></div><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><Badge tone={event.result === "confirmed_succeeded" ? "emerald" : event.result === "confirmed_not_applied" ? "blue" : "amber"}>{event.result}</Badge><span className="ml-2">{event.action.replaceAll("_", " ")} · {event.evidenceClassification}</span></div><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
             <p className="mt-2 text-slate-500">Command version {event.commandVersionBefore} → {event.commandVersionAfter}</p>
             {Object.keys(event.safeReadBackSummary).length > 0 && <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-slate-950 p-2 text-[10px] leading-5 text-amber-100">{JSON.stringify(event.safeReadBackSummary, null, 2)}</pre>}
           </div>)}{!selected.reconciliationHistory?.length && <p className="text-slate-400">No reconciliation decision recorded.</p>}</div></div>
@@ -583,7 +589,13 @@ export function ServiceNowWriteControls() {
               <span>I independently verified this target/outcome. No ServiceNow mutation will be replayed.</span>
             </label>
           </>}
-          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingAction(undefined)}>Cancel</Button><Button onClick={() => commandAction(pendingAction.command, pendingAction.action)} disabled={(pendingAction.action === "mark_succeeded_after_verification" && (!verifiedTargetSysId || !verifiedTargetNumber || !verificationNote || !verificationAcknowledged)) || (pendingAction.action === "mark_not_applied_after_verification" && (!verificationNote || !verificationAcknowledged))}><Play size={14} />Confirm action</Button></div>
+          {pendingAction.action === "mark_not_applied_after_verification"
+            && ["add_comment", "add_work_note"].includes(pendingAction.command.commandType)
+            && <label className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">
+              <input type="checkbox" className="mt-0.5" checked={duplicateJournalRiskAcknowledged} onChange={(event) => setDuplicateJournalRiskAcknowledged(event.target.checked)} />
+              <span>I accept that ServiceNow cannot prove journal absence and a later manual retry may duplicate this comment or work note.</span>
+            </label>}
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingAction(undefined)}>Cancel</Button><Button onClick={() => commandAction(pendingAction.command, pendingAction.action)} disabled={(pendingAction.action === "mark_succeeded_after_verification" && (!verifiedTargetSysId || !verifiedTargetNumber || !verificationNote || !verificationAcknowledged)) || (pendingAction.action === "mark_not_applied_after_verification" && (!verificationNote || !verificationAcknowledged || (["add_comment", "add_work_note"].includes(pendingAction.command.commandType) && !duplicateJournalRiskAcknowledged)))}><Play size={14} />Confirm action</Button></div>
         </div>}
       </DialogContent>
     </Dialog>

@@ -49,10 +49,16 @@ describe("ServiceNow write adapter", () => {
         number: "INC0010001",
         state: "1",
         description: "raw provider value that must not be summarized",
-      }));
+      }))
+      .mockResolvedValueOnce(providerResponse(200, [{
+        sys_id: "a".repeat(32),
+        number: "INC0010001",
+        state: "1",
+        correlation_id: marker,
+      }]));
     const adapter = new ServiceNowWriteAdapter(config, { fetch: fetchMock as typeof fetch });
     const result = await adapter.execute(createCommand, correlationId);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(String(fetchMock.mock.calls[0][0])).toContain(`sysparm_query=correlation_id%3D${encodeURIComponent(marker)}`);
     const [url, init] = fetchMock.mock.calls[1];
     expect(String(url)).toContain("/api/now/table/incident");
@@ -63,7 +69,11 @@ describe("ServiceNow write adapter", () => {
       sysId: "a".repeat(32),
       number: "INC0010001",
       state: "1",
+      postWriteMarkerVerified: true,
+      postWriteLookupHttpStatus: 200,
     });
+    expect(String(fetchMock.mock.calls[2][0])).toContain(`sysparm_query=correlation_id%3D${encodeURIComponent(marker)}`);
+    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
     expect(JSON.stringify(result)).not.toContain("raw provider value");
   });
 
@@ -99,6 +109,117 @@ describe("ServiceNow write adapter", () => {
       retryAllowed: false,
     });
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["zero marker records", []],
+    ["a row missing the marker", [{
+      sys_id: "a".repeat(32),
+      number: "INC0010001",
+    }]],
+    ["a different marker", [{
+      sys_id: "a".repeat(32),
+      number: "INC0010001",
+      correlation_id: `SUPPER:${"b".repeat(64)}`,
+    }]],
+    ["ambiguous marker records", [
+      {
+        sys_id: "a".repeat(32),
+        number: "INC0010001",
+        correlation_id: marker,
+      },
+      {
+        sys_id: "b".repeat(32),
+        number: "INC0010002",
+        correlation_id: marker,
+      },
+    ]],
+    ["a mismatched sys_id", [{
+      sys_id: "b".repeat(32),
+      number: "INC0010001",
+      correlation_id: marker,
+    }]],
+    ["a mismatched number", [{
+      sys_id: "a".repeat(32),
+      number: "INC0099999",
+      correlation_id: marker,
+    }]],
+  ])("keeps a create uncertain when post-write proof returns %s", async (_label, verificationRows) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(providerResponse(200, []))
+      .mockResolvedValueOnce(providerResponse(201, {
+        sys_id: "a".repeat(32),
+        number: "INC0010001",
+        state: "1",
+      }))
+      .mockResolvedValueOnce(providerResponse(200, verificationRows));
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).execute(createCommand, correlationId)).rejects.toMatchObject({
+      deliveryDisposition: "may_have_committed",
+      failurePhase: "read_back",
+      retryAllowed: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
+  });
+
+  it("keeps a create uncertain when post-write marker verification times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(providerResponse(200, []))
+        .mockResolvedValueOnce(providerResponse(201, {
+          sys_id: "a".repeat(32),
+          number: "INC0010001",
+          state: "1",
+        }))
+        .mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        }));
+      const execution = new ServiceNowWriteAdapter(
+        { ...config, timeoutMs: 10 },
+        { fetch: fetchMock as typeof fetch },
+      ).execute(createCommand, correlationId);
+      const rejection = expect(execution).rejects.toMatchObject({
+        code: "SERVICENOW_WRITE_TIMEOUT",
+        deliveryDisposition: "may_have_committed",
+        failurePhase: "read_back",
+        retryAllowed: false,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+      await rejection;
+      expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["HTTP 5xx", () => Promise.resolve(providerResponse(503, {}))],
+    ["a malformed response", () => Promise.resolve(new Response("{", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))],
+    ["a network failure", () => Promise.reject(new TypeError("network unavailable"))],
+  ])("keeps a create uncertain when post-write proof has %s", async (_label, proofResponse) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(providerResponse(200, []))
+      .mockResolvedValueOnce(providerResponse(201, {
+        sys_id: "a".repeat(32),
+        number: "INC0010001",
+        state: "1",
+      }))
+      .mockImplementationOnce(proofResponse);
+    await expect(new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).execute(createCommand, correlationId)).rejects.toMatchObject({
+      deliveryDisposition: "may_have_committed",
+      failurePhase: "read_back",
+      retryAllowed: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
   });
 
   it("resolves exactly one Incident number before PATCH", async () => {

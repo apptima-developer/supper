@@ -56,6 +56,29 @@ export const serviceNowWriteReconciliationActions = [
 ] as const;
 export type ServiceNowWriteReconciliationAction = (typeof serviceNowWriteReconciliationActions)[number];
 
+export const serviceNowWriteEvidenceClassifications = [
+  "provider_matched",
+  "provider_not_found",
+  "provider_ambiguous",
+  "provider_inconclusive",
+  "provider_target_conflict",
+  "provider_unavailable",
+  "provider_unavailable_manual_verification",
+  "provider_target_matched_manual_verification",
+  "journal_manual_verification",
+] as const;
+export type ServiceNowWriteEvidenceClassification = (typeof serviceNowWriteEvidenceClassifications)[number];
+
+export const serviceNowWriteReconciliationResults = [
+  "confirmed_succeeded",
+  "confirmed_not_applied",
+  "not_found",
+  "ambiguous",
+  "inconclusive",
+  "read_back_failed",
+] as const;
+export type ServiceNowWriteReconciliationResult = (typeof serviceNowWriteReconciliationResults)[number];
+
 export type ServiceNowCreateIncidentInput = {
   shortDescription: string;
   description: string;
@@ -140,6 +163,8 @@ export type ServiceNowSafeResponseSummary = {
   number?: string;
   state?: string;
   recoveredByCorrelationMarker?: boolean;
+  postWriteMarkerVerified?: boolean;
+  postWriteLookupHttpStatus?: number;
 };
 
 export type ServiceNowWriteAdapterResult = {
@@ -185,7 +210,8 @@ export type ServiceNowWriteAttemptSummary = {
 export type ServiceNowWriteReconciliationEventSummary = {
   id: string;
   action: ServiceNowWriteReconciliationAction;
-  result: string;
+  result: ServiceNowWriteReconciliationResult;
+  evidenceClassification: ServiceNowWriteEvidenceClassification;
   safeReadBackSummary: JsonObject;
   actorUserId: string;
   commandVersionBefore: number;
@@ -217,7 +243,7 @@ export type ServiceNowWriteCommandSummary = {
   reconciliationReason?: string;
   reconciliationCheckedAt?: string;
   reconciledByUserId?: string;
-  reconciliationResult?: string;
+  reconciliationResult?: ServiceNowWriteReconciliationResult;
   errorCode?: string;
   errorMessage?: string;
   attemptCount: number;
