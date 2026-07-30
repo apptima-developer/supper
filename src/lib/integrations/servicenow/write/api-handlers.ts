@@ -14,6 +14,7 @@ import { ServiceNowWriteRepository } from "./repository";
 import {
   confirmedServiceNowWriteActionRequestSchema,
   createServiceNowWriteCommandRequestSchema,
+  issueServiceNowManualOperationRequestSchema,
   issueServiceNowWriteConfirmationRequestSchema,
   queryObject,
   reconcileServiceNowWriteCommandRequestSchema,
@@ -27,6 +28,7 @@ import {
   getCommandStatus,
   getServiceNowWriteOperationsSummary,
   issueCommandConfirmation,
+  issueManualOperation,
   listCommands,
   reconcileCommand,
   retryCommand,
@@ -37,6 +39,7 @@ export type ServiceNowWriteApiDependencies = {
   getSession: () => Promise<Session | null>;
   repository?: ServiceNowWriteRepository;
   create?: typeof createCommand;
+  issueManualOperation?: typeof issueManualOperation;
   dryRun?: typeof executeCommandDryRun;
   execute?: typeof executeCommand;
   retry?: typeof retryCommand;
@@ -107,6 +110,20 @@ export function handleServiceNowWriteCommandsPost(request: Request, dependencies
       requestId: correlationId,
       correlationId,
     }, { repository });
+    return jsonResponseWithRequestId(result, request, { status: 201 }, correlationId);
+  });
+}
+
+export function handleServiceNowWriteManualOperationPost(
+  request: Request,
+  dependencies: ServiceNowWriteApiDependencies,
+) {
+  return authorized(request, dependencies, async (session, correlationId) => {
+    const body = await readJsonBody(request, issueServiceNowManualOperationRequestSchema, 4 * 1024);
+    const result = await (dependencies.issueManualOperation || issueManualOperation)({
+      ...body,
+      session,
+    });
     return jsonResponseWithRequestId(result, request, { status: 201 }, correlationId);
   });
 }
@@ -186,6 +203,10 @@ export function handleServiceNowWriteReconciliationPost(
       requestId: correlationId,
       correlationId,
       confirmation: body,
+      verifiedTargetSysId: "verifiedTargetSysId" in body ? body.verifiedTargetSysId : undefined,
+      verifiedTargetNumber: "verifiedTargetNumber" in body ? body.verifiedTargetNumber : undefined,
+      verificationAcknowledged: "verificationAcknowledged" in body ? body.verificationAcknowledged : undefined,
+      verificationNote: "verificationNote" in body ? body.verificationNote : undefined,
       abortSignal: request.signal,
     }, { repository });
     return jsonResponseWithRequestId(result, request, {}, correlationId);
@@ -217,11 +238,12 @@ export function handleServiceNowWriteCommandRetryPost(
 }
 
 export function handleServiceNowWriteReadinessPost(request: Request, dependencies: ServiceNowWriteApiDependencies) {
-  return authorized(request, dependencies, async (_session, correlationId) => {
+  return authorized(request, dependencies, async (session, correlationId) => {
     const bytes = await readLimitedBodyBytes(request, 1);
     if (bytes.byteLength) throw new HttpError(400, "UNEXPECTED_REQUEST_BODY", "This operation does not accept a request body");
     const result = await (dependencies.readiness || testServiceNowWriteReadiness)({
       correlationId,
+      session,
       abortSignal: request.signal,
     });
     return jsonResponseWithRequestId(result, request, {}, correlationId);

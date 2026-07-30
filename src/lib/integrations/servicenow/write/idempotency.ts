@@ -70,3 +70,18 @@ export function buildServiceNowNormalizedPayloadHash(normalized: NormalizedServi
 export function hashServiceNowWriteConfirmationNonce(nonce: string) {
   return digest(`servicenow-write-confirmation-v1|${segment(nonce)}`);
 }
+
+export function buildServiceNowWriteConfigurationFingerprint(input: {
+  instanceHostname: string;
+  incidentTable: string;
+  authMode: string;
+  credentialVersion?: string;
+}) {
+  return digest([
+    "servicenow-write-configuration-v1",
+    segment(input.instanceHostname.trim().toLowerCase()),
+    segment(input.incidentTable.trim().toLowerCase()),
+    segment(input.authMode.trim().toLowerCase()),
+    segment(input.credentialVersion?.trim() || "unversioned"),
+  ].join("|"));
+}

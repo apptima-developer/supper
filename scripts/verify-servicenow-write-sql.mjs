@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -9,6 +9,39 @@ const socketDirectory = `/tmp/supper-write-pg-socket-${suffix}`;
 const logPath = `/tmp/supper-write-pg-${suffix}.log`;
 const port = String(56_000 + (process.pid % 1_000));
 let started = false;
+
+const manualIdentitySource = readFileSync(
+  path.join(root, "src/lib/integrations/servicenow/write/manual-operation.ts"),
+  "utf8",
+);
+const writeServiceSource = readFileSync(
+  path.join(root, "src/lib/integrations/servicenow/write/service.ts"),
+  "utf8",
+);
+const writeUiSource = readFileSync(
+  path.join(root, "src/components/servicenow-write-controls.tsx"),
+  "utf8",
+);
+for (const required of [
+  "SignJWT",
+  "jwtVerify",
+  "operationReference",
+  "commandType",
+  "sourceEntityReference",
+  "environment",
+  "expiresAt",
+]) {
+  if (!manualIdentitySource.includes(required)) {
+    throw new Error(`Manual operation identity is missing ${required}`);
+  }
+}
+if (writeServiceSource.includes("`manual-op:${commandId}`")) {
+  throw new Error("Manual operation identity is still derived from a per-request command ID");
+}
+if (!writeUiSource.includes("setManualOperation(operation)")
+  || !writeUiSource.includes("manualOperationToken: operation.operationToken")) {
+  throw new Error("Browser lost-response replay does not retain the server-issued operation token");
+}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", ...options });
@@ -67,7 +100,9 @@ const acceptanceSql = String.raw`
 select * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
   'id','connection-test-00000001','name','Test PDI','active',true,
   'authMode','basic','instanceUrl','https://example.service-now.com',
-  'incidentTable','incident','timeoutMs',15000,
+  'incidentTable','incident','configVersion','unversioned',
+  'configurationFingerprint','b32a9f49f25d2986b9c37ec94bc6d32fbb5242969c83727cf3d65cb912f9c274',
+  'timeoutMs',15000,
   'metadata',jsonb_build_object('source','sql-test'),
   'updatedAt','2026-07-23T01:00:00.000Z'
 ));
@@ -105,6 +140,16 @@ select * from public.support_upsert_servicenow_write_mapping(jsonb_build_object(
   'commandType','add_work_note','mappingName','SUPPER default','active',true,
   'fieldMapping','{"text":"work_notes"}'::jsonb,
   'metadata','{}'::jsonb,'updatedAt','2026-07-23T01:00:00.000Z'
+));
+
+select * from public.support_record_servicenow_write_readiness(jsonb_build_object(
+  'connectionId','connection-test-00000001',
+  'configurationFingerprint','b32a9f49f25d2986b9c37ec94bc6d32fbb5242969c83727cf3d65cb912f9c274',
+  'testedAt','2026-07-23T01:00:00.000Z',
+  'expiresAt','2026-07-23T01:10:00.000Z',
+  'testStatus','succeeded','safeHttpStatus',200,
+  'testedByUserId','admin-user','safeErrorCode','',
+  'updatedAt','2026-07-23T01:00:00.000Z'
 ));
 
 create or replace function public.supper_test_write_payload(
@@ -222,6 +267,11 @@ declare
   v_version integer;
   v_hash text;
 begin
+  if public.support_servicenow_write_configuration_fingerprint(
+    'https://example.service-now.com','incident','basic','unversioned'
+  )<>'b32a9f49f25d2986b9c37ec94bc6d32fbb5242969c83727cf3d65cb912f9c274' then
+    raise exception 'TypeScript/PostgreSQL configuration fingerprint parity failed';
+  end if;
   if public.support_servicenow_write_idempotency_hash(
     'connection-a','create_incident','create:initial',
     'supper_ticket','ticket:T-100','incident'
@@ -247,6 +297,21 @@ begin
     raise exception 'Initial command creation failed';
   end if;
 
+  begin
+    perform * from public.support_create_servicenow_write_command(
+      jsonb_set(
+        public.supper_test_write_payload(
+          'command-test-negative-0001','manual-op:sql-negative-0001'
+        ),
+        '{maxAttempts}',
+        '-1'::jsonb
+      )
+    );
+    raise exception 'Negative maxAttempts was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_COMMAND_INVALID' then raise; end if;
+  end;
+
   select * into v_result from public.support_create_servicenow_write_command(
     jsonb_set(v_command,'{commandId}','"command-test-0000000002"'::jsonb)
   );
@@ -263,6 +328,56 @@ begin
     raise exception 'Changed material reused one operation';
   exception when unique_violation then
     if sqlerrm<>'SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_parse_timestamp(
+      to_jsonb('2026-02-30T01:00:00.000Z'::text),
+      'SERVICENOW_WRITE_TIMESTAMP_INVALID'
+    );
+    raise exception 'Impossible calendar date was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_TIMESTAMP_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_parse_timestamp(
+      to_jsonb('2025-02-29T01:00:00.000Z'::text),
+      'SERVICENOW_WRITE_TIMESTAMP_INVALID'
+    );
+    raise exception 'Impossible leap day was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_TIMESTAMP_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_parse_timestamp(
+      to_jsonb('2026-13-01T01:00:00.000Z'::text),
+      'SERVICENOW_WRITE_TIMESTAMP_INVALID'
+    );
+    raise exception 'Impossible calendar month was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_TIMESTAMP_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_parse_integer(
+      '999999999999999999999999'::jsonb,
+      'SERVICENOW_WRITE_INTEGER_INVALID'
+    );
+    raise exception 'Overflowing integer was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_INTEGER_INVALID' then raise; end if;
+  end;
+
+  begin
+    perform public.support_servicenow_write_parse_boolean(
+      '"truthy"'::jsonb,
+      'SERVICENOW_WRITE_BOOLEAN_INVALID'
+    );
+    raise exception 'Malformed boolean was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm not in ('SERVICENOW_WRITE_BOOLEAN_INVALID','SERVICENOW_WRITE_VALUE_INVALID') then raise; end if;
   end;
 
   select * into v_result from public.support_create_servicenow_write_command(
@@ -488,6 +603,7 @@ begin
     'commandId','command-test-0000000001','action','mark_not_applied_after_verification',
     'result','confirmed_not_applied','safeReadBackSummary',jsonb_build_object('method','manual_verification'),
     'targetSysId','','targetNumber','','actorUserId','admin-user',
+    'verificationAcknowledged',true,'verificationNote','Exact target lookup found no applied mutation.',
     'requestId','request-write-sql-0005','checkedAt','2026-07-23T01:03:30.000Z',
     'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
     'confirmationNonceHash',repeat('d',64)
@@ -544,6 +660,128 @@ begin
     select 1 from public.servicenow_write_commands
     where id='command-test-0000000001' and status='failed' and not retry_allowed
   ) then raise exception 'Definitive rejection remained retryable'; end if;
+
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload(
+      'command-verified-00000001','manual-op:verified-success','Verified success body',
+      'supper_ticket','ticket-write-00000001'
+    )
+  );
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-verified-00000001';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-verified-00000001','action','execute','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('9',64),
+    'issuedAt','2026-07-23T01:04:00.000Z','expiresAt','2026-07-23T01:06:00.000Z'
+  ));
+  perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-verified-00000001','attemptId','attempt-verified-00000001',
+    'executionMode','live','retry',false,'requestId','request-write-sql-verified',
+    'startedAt','2026-07-23T01:04:10.000Z','actorUserId','admin-user',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('9',64)
+  ));
+  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-verified-00000001','attemptId','attempt-verified-00000001',
+    'outcome','uncertain','deliveryDisposition','may_have_committed',
+    'failurePhase','mutation_response','retryAllowed',false,
+    'retryReason','','reconciliationReason','Provider response was lost',
+    'requestSummary',jsonb_build_object('method','POST'),'responseSummary','{}'::jsonb,
+    'targetSysId','','targetNumber','','errorCode','SERVICENOW_WRITE_RESPONSE_LOST',
+    'errorMessage','ServiceNow response was not definitive',
+    'finishedAt','2026-07-23T01:04:11.000Z'
+  ));
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-verified-00000001';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-verified-00000001','action','mark_succeeded_after_verification',
+    'actorUserId','admin-user','expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('8',64),
+    'issuedAt','2026-07-23T01:04:20.000Z','expiresAt','2026-07-23T01:06:00.000Z'
+  ));
+  begin
+    perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+      'commandId','command-verified-00000001','action','mark_succeeded_after_verification',
+      'result','confirmed_succeeded','safeReadBackSummary',jsonb_build_object('method','manual_verified_target'),
+      'targetSysId','','targetNumber','','actorUserId','admin-user',
+      'verificationAcknowledged',true,'verificationNote','Verified exact target.',
+      'requestId','request-write-sql-missing-target','checkedAt','2026-07-23T01:04:30.000Z',
+      'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('8',64)
+    ));
+    raise exception 'Manual success without a complete target pair was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_INVALID' then raise; end if;
+  end;
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','command-verified-00000001','action','mark_succeeded_after_verification',
+    'result','confirmed_succeeded',
+    'safeReadBackSummary',jsonb_build_object(
+      'method','manual_verified_target','verificationEvidenceProvided',true
+    ),
+    'targetSysId',repeat('7',32),'targetNumber','INC0017777','actorUserId','admin-user',
+    'verificationAcknowledged',true,'verificationNote','Verified exact target independently.',
+    'requestId','request-write-sql-success','checkedAt','2026-07-23T01:04:31.000Z',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('8',64)
+  ));
+  if (
+    select count(*) from public.servicenow_ticket_links
+    where supper_ticket_id='ticket-write-00000001'
+      and servicenow_sys_id=repeat('7',32)
+      and servicenow_number='INC0017777'
+  )<>1 then
+    raise exception 'Verified reconciliation did not create exactly one Ticket link';
+  end if;
+  if exists (
+    select 1 from public.servicenow_write_reconciliation_events
+    where command_id='command-verified-00000001'
+      and safe_read_back_summary::text ilike '%verified exact target independently%'
+  ) then
+    raise exception 'Raw verification note entered reconciliation history';
+  end if;
+
+  perform * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
+    'id','connection-test-00000001','name','Test PDI','active',true,
+    'authMode','basic','instanceUrl','https://example.service-now.com',
+    'incidentTable','incident','configVersion','rotated',
+    'configurationFingerprint','eb7f725367657b0a1763468f09198b537840521fea61b6ad9acbd28a9ce50648',
+    'timeoutMs',15000,'metadata',jsonb_build_object('source','sql-test'),
+    'updatedAt','2026-07-23T01:05:00.000Z'
+  ));
+  if exists (
+    select 1 from public.servicenow_write_readiness_proofs
+    where connection_id='connection-test-00000001'
+  ) then
+    raise exception 'Connection configuration change did not invalidate readiness';
+  end if;
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-test-0000000004';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-test-0000000004','action','execute','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('6',64),
+    'issuedAt','2026-07-23T01:05:01.000Z','expiresAt','2026-07-23T01:07:00.000Z'
+  ));
+  begin
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-test-0000000004','attemptId','attempt-no-readiness-0001',
+      'executionMode','live','retry',false,'requestId','request-write-sql-no-proof',
+      'startedAt','2026-07-23T01:05:10.000Z','actorUserId','admin-user',
+      'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('6',64)
+    ));
+    raise exception 'Live attempt started without fresh readiness';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_READINESS_REQUIRED' then raise; end if;
+  end;
+  if exists (
+    select 1 from public.servicenow_write_attempts
+    where id='attempt-no-readiness-0001'
+  ) then
+    raise exception 'Failed readiness consumed a live attempt';
+  end if;
 end;
 $$;
 
@@ -555,7 +793,8 @@ begin
     or has_table_privilege('service_role','public.servicenow_write_commands','update')
     or has_table_privilege('service_role','public.servicenow_write_attempts','insert')
     or has_table_privilege('service_role','public.servicenow_ticket_links','update')
-    or has_table_privilege('service_role','public.servicenow_write_reconciliation_events','insert') then
+    or has_table_privilege('service_role','public.servicenow_write_reconciliation_events','insert')
+    or has_table_privilege('service_role','public.servicenow_write_readiness_proofs','insert') then
     raise exception 'service_role can directly mutate an authoritative ledger';
   end if;
   if has_table_privilege('anon','public.servicenow_write_commands','select')
@@ -564,13 +803,15 @@ begin
   end if;
   if has_function_privilege('public','public.support_create_servicenow_write_command(jsonb)','execute')
     or has_function_privilege('anon','public.support_begin_servicenow_write_attempt(jsonb)','execute')
-    or has_function_privilege('authenticated','public.support_reconcile_servicenow_write_command(jsonb)','execute') then
+    or has_function_privilege('authenticated','public.support_reconcile_servicenow_write_command(jsonb)','execute')
+    or has_function_privilege('public','public.support_record_servicenow_write_readiness(jsonb)','execute') then
     raise exception 'Privileged write RPC is browser executable';
   end if;
   if not has_function_privilege('service_role','public.support_create_servicenow_write_command(jsonb)','execute')
     or not has_function_privilege('service_role','public.support_issue_servicenow_write_confirmation(jsonb)','execute')
     or not has_function_privilege('service_role','public.support_begin_servicenow_write_attempt(jsonb)','execute')
     or not has_function_privilege('service_role','public.support_finish_servicenow_write_attempt(jsonb)','execute')
+    or not has_function_privilege('service_role','public.support_record_servicenow_write_readiness(jsonb)','execute')
     or not has_function_privilege('service_role','public.support_reconcile_servicenow_write_command(jsonb)','execute') then
     raise exception 'service_role cannot execute controlled write RPCs';
   end if;
@@ -598,7 +839,7 @@ try {
   psql([], acceptanceSql);
   const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice after real intake migrations; database-owned identity, allowlisted mappings, uncertain outcomes, one-time confirmation, append-only reconciliation, and ledger grants passed.");
+  console.log("ServiceNow write migration executed twice after real intake migrations; replay-stable identity, verified reconciliation, fresh readiness proof, safe SQL parsing, allowlisted mappings, uncertain outcomes, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

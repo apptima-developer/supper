@@ -1,6 +1,6 @@
 # Controlled ServiceNow Write Kernel
 
-AI-2.0.1 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
+AI-2.0.2 is an administrator-operated, server-only write boundary for ServiceNow Incidents. It requires `DATA_BACKEND=supabase-relational`, reuses server-only ServiceNow credentials, and keeps live provider mutation disabled until `SERVICENOW_WRITE_ENABLED=true`.
 
 This milestone does not connect Unified Intake to automatic creation. It adds no LINE OA or email provider, attachment upload, outbound webhook, Freshservice write, queue, cron, scheduler, or worker.
 
@@ -10,9 +10,11 @@ Every command has separate identity fields:
 
 - `sourceType` identifies the originating domain.
 - `sourceEntityReference` identifies the canonical SUPPER Ticket, Intake conversation, or outbox row. It is optional bounded context for manual commands.
-- `operationReference` identifies one immutable domain operation. Manual commands receive a server-generated operation reference when one is omitted.
+- `operationReference` identifies one immutable domain operation. A manual command first obtains a signed, five-minute operation token from `POST /api/integrations/servicenow/write/manual-operation`. The token binds the generated operation reference to user, command type, manual source context, environment, and expiry.
 
-The v2 logical key hashes the version, connection, command type, operation reference, source type, source entity reference, and target table. The same operation with unchanged normalized material returns the existing command; changed material conflicts. Different operation references allow multiple updates, comments, or work notes on the same Ticket.
+The browser retains that token until command creation succeeds. If the first command response is lost, resubmitting identical material with the same token returns the existing command and preserves one provider marker. Changed material conflicts with `SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT`; an expired, differently scoped, or caller-invented identity is rejected. Starting a genuinely new manual operation explicitly obtains a new token.
+
+The v2 logical key hashes the version, connection, command type, operation reference, source type, source entity reference, and target table. Different operation identities allow multiple updates, comments, or work notes on the same Ticket.
 
 | Command | Required payload | Optional payload |
 | --- | --- | --- |
@@ -70,10 +72,10 @@ The nonce expires after two minutes, is stored only as a hash, is scoped to comm
 Administrators with `settings:manage` may:
 
 - `reconcile_by_read_back`: read only; create uses the exact marker, update compares reviewed fields by exact `sys_id`, and journals remain inconclusive without a reviewed journal verification method;
-- `mark_succeeded_after_verification`: record externally verified success;
-- `mark_not_applied_after_verification`: record verified non-application and permit a bounded manual retry when attempts remain.
+- `mark_succeeded_after_verification`: requires lowercase 32-character `verifiedTargetSysId`, a bounded `verifiedTargetNumber`, a bounded evidence note, and explicit acknowledgment;
+- `mark_not_applied_after_verification`: requires a bounded evidence note and explicit acknowledgment, then permits a bounded manual retry when attempts remain.
 
-Reconciliation never repeats the mutation. Every decision appends an immutable event with actor, action, result, command versions, timestamp, and bounded safe read-back summary.
+For create, an exact marker match must agree with a manually supplied pair. For update and journal commands, exact read-back resolves the missing member of the original `sys_id`/number pair when ServiceNow is available; a conflicting pair is rejected. A reviewed pair may complete reconciliation when provider read-back is unavailable. Reconciliation performs GET only, never repeats the POST/PATCH mutation, creates at most one matching Ticket link, and appends an immutable event. The evidence note itself is validated but not copied into the safe history summary.
 
 ## Storage and security
 
@@ -85,6 +87,7 @@ Migration `supabase/migrations/202607230001_servicenow_write_kernel.sql` creates
 - `servicenow_write_attempts`
 - `servicenow_ticket_links`
 - `servicenow_write_reconciliation_events`
+- `servicenow_write_readiness_proofs`
 
 All tables have RLS and no browser policy. `service_role` may read them but receives no direct insert, update, or delete grants. Configuration and mapping upserts, command creation, confirmation issuance, attempt transitions, ticket-link completion, and reconciliation occur only through reviewed `SECURITY DEFINER` RPCs with controlled search paths. SQL recomputes logical identity, normalized payload, marker, and normalized hash from raw command material and the active mapping.
 
@@ -92,16 +95,21 @@ Database rows are parsed with strict Zod schemas before presentation. Browser-sa
 
 ## Readiness
 
-Readiness reports `configured`, `relationalStorage`, `connectionTestable`, `connectionTested`, `liveWriteEnabled`, and `liveWriteReady`. An administrator can run the bounded GET-only connection test while `SERVICENOW_WRITE_ENABLED=false`. The test creates no command or attempt and performs no POST/PATCH. Live execute and retry remain blocked.
+Readiness reports configuration validity separately from proof state. The bounded GET-only test remains available while `SERVICENOW_WRITE_ENABLED=false` and records a sanitized five-minute proof containing connection ID, a non-secret configuration fingerprint, test/expiry times, outcome, safe HTTP status/error code, and actor ID. The fingerprint covers normalized hostname, Incident table, auth mode, and optional non-secret configuration version. It never contains a password, client secret, token, or authorization header.
+
+`liveWriteReady` requires relational storage, valid configuration, the live switch, and a fresh successful proof whose fingerprint matches the current connection. Connection or mapping changes invalidate the proof. Execute and retry enforce the proof both in the application and in the attempt RPC before any attempt row or provider mutation. Missing, expired, failed, or mismatched proof returns `SERVICENOW_WRITE_READINESS_REQUIRED` without consuming an attempt.
+
+Every write RPC parses JSON timestamps, integers, and booleans through guarded SQL helpers. Impossible dates, overflow, malformed types, invalid bounds, and chronology violations return bounded application codes rather than PostgreSQL cast details.
 
 ## Configuration
 
 ```dotenv
 SERVICENOW_WRITE_ENABLED=false
 SERVICENOW_WRITE_MAX_ATTEMPTS=3
+SERVICENOW_CREDENTIAL_VERSION=unversioned
 ```
 
-The attempt limit is 1 through 10. No ServiceNow secret may use a `NEXT_PUBLIC_` name.
+The attempt limit is 1 through 10. `SERVICENOW_CREDENTIAL_VERSION` is optional, non-secret rotation metadata; change it when the configured credential changes so old readiness proof cannot authorize the new configuration. No ServiceNow secret may use a `NEXT_PUBLIC_` name.
 
 ## Migration strategy
 
@@ -139,6 +147,7 @@ where routine_schema = 'public'
   and routine_name in (
     'support_upsert_servicenow_write_connection',
     'support_upsert_servicenow_write_mapping',
+    'support_record_servicenow_write_readiness',
     'support_create_servicenow_write_command',
     'support_issue_servicenow_write_confirmation',
     'support_begin_servicenow_write_attempt',
@@ -148,7 +157,7 @@ where routine_schema = 'public'
 order by routine_name, grantee;
 ```
 
-Expected: one migration row; RLS on all six write tables; `service_role` table access is select-only; and privileged RPC execution belongs only to `service_role`.
+Expected: one migration row; RLS on all seven write tables; `service_role` table access is select-only; and privileged RPC execution belongs only to `service_role`.
 
 ## Preview smoke test
 
@@ -157,12 +166,13 @@ Expected: one migration row; RLS on all six write tables; `service_role` table a
 3. Confirm connection testing is available, live mutation is blocked, and **Test readiness** performs a GET successfully.
 4. Create separate manual commands for all four command types. Verify exact target validation, safe preview field names, and hidden narrative values.
 5. Run dry-runs and confirm no provider mutation and no live attempt consumption.
-6. Repeat one operation reference with unchanged material and confirm deduplication. Change its material and confirm conflict. Use a new operation reference on the same Ticket and confirm a new command.
+6. Submit one manual command, simulate a lost HTTP response, and submit the same browser operation again. Confirm one command and one unchanged marker. Change material while retaining that operation and confirm conflict; then choose **Start a new operation** and confirm a new command.
 7. Enable live writes only on the isolated Preview and redeploy.
 8. Execute one disposable create after the server confirmation. Confirm the exact `correlation_id` marker and recovered target.
 9. Simulate a definitive safe retry condition and confirm Retry appears only for `retry_scheduled`.
 10. Simulate an ambiguous response and confirm `reconciliation_required`, no next retry, and no Retry button.
-11. Exercise read-back and one manual reconciliation decision. Confirm the immutable history and stale/replayed confirmation rejection.
-12. Disable live writes and redeploy after acceptance.
+11. Exercise read-back and manual verified success using both target identifiers, bounded evidence, and acknowledgment. Confirm a conflicting pair is rejected, the mutation is not replayed, one Ticket link exists, history is safe, and stale/replayed confirmation is rejected.
+12. Let a readiness proof expire or change `SERVICENOW_CREDENTIAL_VERSION`. Confirm execute/retry are blocked, no attempt is consumed, run **Test readiness**, and confirm live readiness returns.
+13. Disable live writes and redeploy after acceptance.
 
 Never use production identifiers or paste credentials, provider bodies, or customer narratives into acceptance evidence.

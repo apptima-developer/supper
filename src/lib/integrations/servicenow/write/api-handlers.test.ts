@@ -8,6 +8,7 @@ import {
   handleServiceNowWriteCommandsGet,
   handleServiceNowWriteCommandsPost,
   handleServiceNowWriteConfirmationPost,
+  handleServiceNowWriteManualOperationPost,
   handleServiceNowWriteReadinessPost,
   handleServiceNowWriteReconciliationPost,
 } from "./api-handlers";
@@ -19,6 +20,7 @@ const support: Session = { userId: "support-id", username: "support", name: "Sup
 const repository = {} as ServiceNowWriteRepository;
 const hash = "a".repeat(64);
 const commandId = "command-id-0000000001";
+const operationToken = "a".repeat(120);
 
 function summary(overrides: Partial<ServiceNowWriteCommandSummary> = {}): ServiceNowWriteCommandSummary {
   return {
@@ -54,6 +56,33 @@ function confirmationBody(action?: string) {
 }
 
 describe("ServiceNow write API security", () => {
+  it("issues a protected bounded manual operation identity", async () => {
+    const issueManualOperation = vi.fn(async () => ({
+      operationToken,
+      operationReference: `manual-op:${"b".repeat(64)}`,
+      expiresAt: "2026-07-23T01:05:00.000Z",
+    }));
+    const response = await handleServiceNowWriteManualOperationPost(
+      new Request("https://app.test/api/integrations/servicenow/write/manual-operation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          commandType: "create_incident",
+          sourceType: "manual",
+          sourceEntityReference: "draft:100",
+        }),
+      }),
+      { getSession: async () => admin, issueManualOperation },
+    );
+    expect(response.status).toBe(201);
+    expect(issueManualOperation).toHaveBeenCalledWith(expect.objectContaining({
+      commandType: "create_incident",
+      sourceType: "manual",
+      sourceEntityReference: "draft:100",
+      session: admin,
+    }));
+  });
+
   it("rejects unauthenticated and non-admin users", async () => {
     const unauthenticated = await handleServiceNowWriteCommandsGet(
       new Request("https://app.test/api/integrations/servicenow/write/commands"),
@@ -77,6 +106,7 @@ describe("ServiceNow write API security", () => {
         body: JSON.stringify({
           commandType: "create_incident",
           sourceType: "manual",
+          manualOperationToken: operationToken,
           payload: { shortDescription: "Short", description: "Description" },
         }),
       },
@@ -89,6 +119,7 @@ describe("ServiceNow write API security", () => {
         body: JSON.stringify({
           commandType: "create_incident",
           sourceType: "manual",
+          manualOperationToken: operationToken,
           payload: { shortDescription: "Short", description: "Description", authorization: "forbidden" },
         }),
       },
@@ -169,7 +200,13 @@ describe("ServiceNow write API security", () => {
       new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/reconcile`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(confirmationBody("mark_succeeded_after_verification")),
+        body: JSON.stringify({
+          ...confirmationBody("mark_succeeded_after_verification"),
+          verifiedTargetSysId: "b".repeat(32),
+          verifiedTargetNumber: "INC0010001",
+          verificationAcknowledged: true,
+          verificationNote: "Verified by exact Incident target.",
+        }),
       }),
       commandId,
       { getSession: async () => admin, repository, reconcile },
@@ -179,6 +216,9 @@ describe("ServiceNow write API security", () => {
     expect(reconcile).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "mark_succeeded_after_verification",
+        verifiedTargetSysId: "b".repeat(32),
+        verifiedTargetNumber: "INC0010001",
+        verificationAcknowledged: true,
         confirmation: expect.objectContaining({ confirmed: true, expectedVersion: 1 }),
       }),
       { repository },

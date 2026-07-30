@@ -82,10 +82,10 @@ AI-1.2 adds a protected administrator [Operations page](./servicenow-operations.
 
 The AI-1.2 layer remains read-only toward ServiceNow. It adds no schedule, customer creation, or raw provider response viewer.
 
-## AI-2.0.1 controlled writes
+## AI-2.0.2 controlled writes
 
-AI-2.0.1 adds a separate administrator-operated [Controlled ServiceNow Write Kernel](./servicenow-write-kernel.md). It does not change the diagnostic, synchronization, or customer-mapping read paths. Live mutation is disabled independently by default.
+AI-2.0.2 adds a separate administrator-operated [Controlled ServiceNow Write Kernel](./servicenow-write-kernel.md). It does not change the diagnostic, synchronization, or customer-mapping read paths. Live mutation is disabled independently by default.
 
 The write adapter supports reviewed Incident create, update, comment, and work-note commands only. Create uses a server-owned `correlation_id` marker and performs an exact marker lookup before POST. Update and journal commands require exactly one `sys_id` or number. After mutation dispatch, ambiguous transport or response failures are recorded as `may_have_committed` and require reconciliation; they are never blindly retried.
 
-Connection testing remains an authenticated, bounded GET and is available while live writes are disabled. Execute, retry, and reconciliation require an expiring one-time server confirmation tied to command version and normalized hash.
+Manual command transport uses a short-lived signed operation identity so a lost HTTP response can be retried without creating a second command or marker. Connection testing remains an authenticated, bounded GET and is available while live writes are disabled. A fresh durable proof matching the non-secret configuration fingerprint is required before execute/retry can consume an attempt. Execute, retry, and reconciliation also require an expiring one-time server confirmation tied to command version and normalized hash. Verified success requires both target identifiers and never replays the mutation.

@@ -14,6 +14,7 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_attempts",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
+      "servicenow_write_readiness_proofs",
     ]) expect(sql).toContain(`create table if not exists public.${table}`);
     for (const index of [
       "servicenow_write_commands_status_idx",
@@ -22,6 +23,7 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_commands_created_at_idx",
       "servicenow_write_attempts_command_idx",
       "servicenow_write_reconciliation_command_idx",
+      "servicenow_write_readiness_expiry_idx",
     ]) expect(sql).toContain(index);
     expect(sql).toContain("normalized_payload_hash");
     expect(sql).toContain("octet_length(normalized_payload::text) <= 65536");
@@ -36,6 +38,7 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_attempts",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
+      "servicenow_write_readiness_proofs",
     ]) {
       expect(sql).toContain(`alter table public.${table} enable row level security`);
       expect(sql).toContain(`revoke all privileges on table public.${table} from public, anon, authenticated`);
@@ -46,6 +49,7 @@ describe("ServiceNow write kernel migration", () => {
       "support_begin_servicenow_write_attempt",
       "support_finish_servicenow_write_attempt",
       "support_reconcile_servicenow_write_command",
+      "support_record_servicenow_write_readiness",
     ]) {
       expect(sql).toContain(`revoke all privileges on function public.${rpc}(jsonb) from public`);
       expect(sql).toContain(`revoke execute on function public.${rpc}(jsonb) from anon, authenticated`);
@@ -79,6 +83,20 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("servicenow_write_reconciliation_immutable");
     expect(sql).toContain("mark_succeeded_after_verification");
     expect(sql).toContain("mark_not_applied_after_verification");
+    expect(sql).toContain("verificationacknowledged");
+    expect(sql).toContain("verificationnote");
+    expect(sql).toContain("servicenow_write_verified_target_conflict");
+  });
+
+  it("enforces fresh readiness and exception-safe payload parsing", () => {
+    expect(sql).toContain("configuration_fingerprint");
+    expect(sql).toContain("servicenow_write_readiness_required");
+    expect(sql).toContain("support_servicenow_write_configuration_fingerprint");
+    expect(sql).toContain("support_servicenow_write_parse_timestamp");
+    expect(sql).toContain("support_servicenow_write_parse_integer");
+    expect(sql).toContain("support_servicenow_write_parse_boolean");
+    expect(sql).toContain("when invalid_datetime_format or datetime_field_overflow or invalid_text_representation");
+    expect(sql).toContain("when invalid_text_representation or numeric_value_out_of_range");
   });
 
   it("records the forward-only migration and uses the portable intake hash helper", () => {

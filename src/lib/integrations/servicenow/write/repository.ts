@@ -9,6 +9,7 @@ import {
   serviceNowWriteCommandRowSchema,
   serviceNowWriteCommandTypeSchema,
   serviceNowWriteReconciliationEventRowSchema,
+  serviceNowWriteReadinessProofRowSchema,
   serviceNowWriteStatusSchema,
 } from "./schemas";
 import type {
@@ -175,6 +176,16 @@ const reconciliationResultSchema = z.object({
   reconciliation_result: z.string().min(1).max(100),
 });
 
+const readinessProofResultSchema = z.object({
+  connection_id: z.string().min(1).max(200),
+  configuration_fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  tested_at: z.string().datetime({ offset: true }),
+  expires_at: z.string().datetime({ offset: true }),
+  test_status: z.enum(["succeeded", "failed"]),
+  safe_http_status: z.number().int().min(100).max(599).nullable().optional(),
+  safe_error_code: z.string().min(1).max(80).nullable().optional(),
+});
+
 const mappingSelect = "id,field_mapping";
 const commandSelect = [
   "id", "version", "command_type", "status", "source_type", "source_entity_reference",
@@ -198,7 +209,12 @@ const reconciliationSelect = [
 ].join(",");
 
 export class ServiceNowWriteRepository {
-  async ensureConnection(id: string, config: ServiceNowEnabledConfig) {
+  async ensureConnection(
+    id: string,
+    config: ServiceNowEnabledConfig,
+    configurationFingerprint: string,
+    credentialVersion: string,
+  ) {
     const db = await client();
     const result = await must("Could not establish ServiceNow write connection", db.rpc(
       "support_upsert_servicenow_write_connection",
@@ -210,6 +226,8 @@ export class ServiceNowWriteRepository {
           authMode: config.authMode,
           instanceUrl: config.instanceUrl,
           incidentTable: config.incidentTable,
+          configVersion: credentialVersion,
+          configurationFingerprint,
           timeoutMs: config.timeoutMs,
           metadata: { source: "server_environment" },
           updatedAt: new Date().toISOString(),
@@ -218,6 +236,24 @@ export class ServiceNowWriteRepository {
     ));
     const row = z.object({ id: z.string().min(1) }).parse(Array.isArray(result.data) ? result.data[0] : result.data);
     return row.id;
+  }
+
+  async getReadinessProof(connectionId: string) {
+    const db = await client();
+    const result = await must("Could not read ServiceNow readiness proof", db.from("servicenow_write_readiness_proofs")
+      .select("connection_id,configuration_fingerprint,tested_at,expires_at,test_status,safe_http_status,tested_by_user_id,safe_error_code,updated_at")
+      .eq("connection_id", connectionId)
+      .maybeSingle());
+    return parsePersisted(serviceNowWriteReadinessProofRowSchema.nullable(), result.data);
+  }
+
+  async recordReadinessProof(payload: Record<string, unknown>) {
+    const db = await client();
+    const result = await must(
+      "Could not persist ServiceNow readiness proof",
+      db.rpc("support_record_servicenow_write_readiness", { p_payload: payload }),
+    );
+    return readinessProofResultSchema.parse(Array.isArray(result.data) ? result.data[0] : result.data);
   }
 
   async getActiveMapping(connectionId: string, commandType: ServiceNowWriteCommandType) {
@@ -320,6 +356,17 @@ export class ServiceNowWriteRepository {
     );
     if (!row) return undefined;
     return row.normalized_payload;
+  }
+
+  async getCommandExecutionContext(commandId: string) {
+    const db = await client();
+    const result = await must("Could not read ServiceNow command execution context", db.from("servicenow_write_commands")
+      .select("connection_id,normalized_payload")
+      .eq("id", commandId).maybeSingle());
+    return parsePersisted(z.object({
+      connection_id: z.string().min(1).max(200),
+      normalized_payload: normalizedServiceNowWriteCommandSchema,
+    }).strict().nullable(), result.data);
   }
 
   async listCommands(filters: {

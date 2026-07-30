@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import type { Session } from "../../../auth";
 import type { Audit } from "../../../types";
 import { correlationIdSchema } from "../../schemas";
 import { serviceNowError } from "../errors";
+import { buildServiceNowWriteConfigurationFingerprint } from "./idempotency";
+import { issueManualOperationIdentity } from "./manual-operation";
 import { serviceNowDefaultWriteMapping } from "./normalization";
 import { serviceNowWriteExecutionError } from "./outcomes";
 import type { ServiceNowWriteRepository } from "./repository";
@@ -43,6 +46,16 @@ const env = {
 };
 const hash = "a".repeat(64);
 const marker = `SUPPER:${"b".repeat(64)}`;
+const configurationFingerprint = buildServiceNowWriteConfigurationFingerprint({
+  instanceHostname: "example.service-now.com",
+  incidentTable: "incident",
+  authMode: "basic",
+  credentialVersion: "unversioned",
+});
+const connectionId = `sn-write-${createHash("sha256")
+  .update("https://example.service-now.com|incident", "utf8")
+  .digest("hex")
+  .slice(0, 40)}`;
 const confirmation = {
   confirmed: true as const,
   expectedVersion: 1,
@@ -124,7 +137,102 @@ function begin(normalizedPayload: NormalizedServiceNowWriteCommand, liveAttemptC
   };
 }
 
+function freshReadiness() {
+  return {
+    getCommandExecutionContext: vi.fn(async () => ({
+      connection_id: connectionId,
+      normalized_payload: normalizedCreate,
+    })),
+    getReadinessProof: vi.fn(async () => ({
+      connection_id: connectionId,
+      configuration_fingerprint: configurationFingerprint,
+      tested_at: "2026-07-23T01:00:00.000Z",
+      expires_at: "2026-07-23T01:10:00.000Z",
+      test_status: "succeeded" as const,
+      safe_http_status: 200,
+      tested_by_user_id: session.userId,
+      safe_error_code: null,
+      updated_at: "2026-07-23T01:00:00.000Z",
+    })),
+  };
+}
+
 describe("ServiceNow write service", () => {
+  it("deduplicates a lost-response manual command replay with one provider marker", async () => {
+    const identity = await issueManualOperationIdentity({
+      session,
+      commandType: "create_incident",
+    }, {
+      env,
+      now: () => new Date("2026-07-23T01:00:00.000Z"),
+      randomHex: () => "c".repeat(64),
+    });
+    let storedPayload: Record<string, unknown> | undefined;
+    const createStored = vi.fn(async (payload: Record<string, unknown>) => {
+      if (!storedPayload) {
+        storedPayload = payload;
+        return {
+          action: "created" as const,
+          command_id: payload.commandId as string,
+          command_status: "validated" as const,
+          command_attempt_count: 0,
+          command_version: 1,
+          normalized_payload_hash: payload.normalizedPayloadHash as string,
+        };
+      }
+      if (storedPayload.normalizedPayloadHash !== payload.normalizedPayloadHash) {
+        throw new Error("SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT");
+      }
+      return {
+        action: "unchanged" as const,
+        command_id: storedPayload.commandId as string,
+        command_status: "validated" as const,
+        command_attempt_count: 0,
+        command_version: 1,
+        normalized_payload_hash: storedPayload.normalizedPayloadHash as string,
+      };
+    });
+    const repository = {
+      ensureConnection: vi.fn(async () => connectionId),
+      getActiveMapping: vi.fn(async () => ({
+        id: "mapping-id-0000000001",
+        fieldMapping: serviceNowDefaultWriteMapping("create_incident"),
+      })),
+      createCommand: createStored,
+      getCommand: vi.fn(async (commandIdValue: string) => commandSummary({
+        id: commandIdValue,
+        operationReference: identity.operationReference,
+        providerCorrelationMarker: storedPayload?.providerCorrelationMarker as string,
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    let sequence = 0;
+    const request = {
+      commandType: "create_incident" as const,
+      sourceType: "manual" as const,
+      manualOperationToken: identity.operationToken,
+      payload: { shortDescription: "Short", description: "Description" },
+      session,
+      requestId: "request-replay-0001",
+      correlationId: "request-replay-0001",
+    };
+    const dependencies = {
+      env,
+      repository,
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:00:30.000Z"),
+      createId: () => `command-replay-${++sequence}`.padEnd(20, "0"),
+    };
+    const first = await createCommand(request, dependencies);
+    const replay = await createCommand(request, dependencies);
+    expect(replay.id).toBe(first.id);
+    expect(createStored).toHaveBeenCalledTimes(2);
+    expect(new Set(createStored.mock.calls.map(([payload]) => payload.providerCorrelationMarker))).toHaveLength(1);
+    await expect(createCommand({
+      ...request,
+      payload: { shortDescription: "Changed", description: "Description" },
+    }, dependencies)).rejects.toMatchObject({ code: "SERVICENOW_WRITE_IDEMPOTENCY_CONFLICT" });
+  });
+
   it("validates and submits raw command material once while SQL owns normalized identity", async () => {
     const createStored = vi.fn(async () => ({
       action: "created" as const,
@@ -224,6 +332,7 @@ describe("ServiceNow write service", () => {
     }));
     const beginAttempt = vi.fn(async () => begin(normalizedCreate, 1));
     const repository = {
+      ...freshReadiness(),
       beginAttempt,
       finishAttempt,
       getCommand: vi.fn(async () => commandSummary({
@@ -279,6 +388,7 @@ describe("ServiceNow write service", () => {
       command_version: 3,
     }));
     const repository = {
+      ...freshReadiness(),
       beginAttempt: vi.fn(async () => begin(normalizedUpdate, 1)),
       finishAttempt,
       getCommand: vi.fn(async () => commandSummary({
@@ -333,6 +443,7 @@ describe("ServiceNow write service", () => {
       command_version: 3,
     }));
     const repository = {
+      ...freshReadiness(),
       beginAttempt: vi.fn(async () => begin(normalizedUpdate, 1)),
       finishAttempt,
       getCommand: vi.fn(async () => commandSummary({
@@ -380,6 +491,70 @@ describe("ServiceNow write service", () => {
     }));
     const uncertainAttempt = finishAttempt.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(uncertainAttempt[0]).not.toHaveProperty("nextRetryAt");
+  });
+
+  it("requires a matching fresh readiness proof before consuming a live attempt", async () => {
+    const beginAttempt = vi.fn();
+    const providerExecute = vi.fn();
+    const repository = {
+      getCommandExecutionContext: vi.fn(async () => ({
+        connection_id: connectionId,
+        normalized_payload: normalizedCreate,
+      })),
+      getReadinessProof: vi.fn(async () => ({
+        connection_id: connectionId,
+        configuration_fingerprint: configurationFingerprint,
+        tested_at: "2026-07-23T01:00:00.000Z",
+        expires_at: "2026-07-23T01:01:00.000Z",
+        test_status: "succeeded",
+        safe_http_status: 200,
+        tested_by_user_id: session.userId,
+        safe_error_code: null,
+        updated_at: "2026-07-23T01:00:00.000Z",
+      })),
+      beginAttempt,
+    } as unknown as ServiceNowWriteRepository;
+    await expect(executeCommand({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-readiness-expired",
+      correlationId: "request-readiness-expired",
+      confirmation,
+    }, {
+      env,
+      repository,
+      adapter: adapter({ execute: providerExecute }),
+      now: () => new Date("2026-07-23T01:02:00.000Z"),
+    })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_READINESS_REQUIRED" });
+    expect(beginAttempt).not.toHaveBeenCalled();
+    expect(providerExecute).not.toHaveBeenCalled();
+  });
+
+  it("requires proof configuration fingerprint parity, not only the live switch", () => {
+    const proof = {
+      connection_id: connectionId,
+      configuration_fingerprint: configurationFingerprint,
+      tested_at: "2026-07-23T01:00:00.000Z",
+      expires_at: "2026-07-23T01:10:00.000Z",
+      test_status: "succeeded" as const,
+      safe_http_status: 200,
+      tested_by_user_id: session.userId,
+      safe_error_code: null,
+      updated_at: "2026-07-23T01:00:00.000Z",
+    };
+    expect(getServiceNowWriteReadiness(env, undefined, new Date("2026-07-23T01:01:00.000Z")))
+      .toMatchObject({ liveWriteEnabled: true, connectionTested: false, liveWriteReady: false });
+    expect(getServiceNowWriteReadiness(env, proof, new Date("2026-07-23T01:01:00.000Z")))
+      .toMatchObject({ connectionTested: true, liveWriteReady: true });
+    expect(getServiceNowWriteReadiness(
+      { ...env, SERVICENOW_CREDENTIAL_VERSION: "rotated" },
+      proof,
+      new Date("2026-07-23T01:01:00.000Z"),
+    )).toMatchObject({
+      connectionTested: false,
+      liveWriteReady: false,
+      safeErrorCode: "SERVICENOW_WRITE_CONNECTION_UNTESTED",
+    });
   });
 
   it("issues a server nonce and records read-back reconciliation without mutation", async () => {
@@ -447,6 +622,135 @@ describe("ServiceNow write service", () => {
     }));
   });
 
+  it("marks an uncertain journal command successful only with a verified target pair and no replay", async () => {
+    const readBack = vi.fn(async () => ({
+      result: "confirmed_succeeded" as const,
+      summary: { method: "exact_target", matchCount: 1 },
+      targetSysId: "b".repeat(32),
+      targetNumber: "INC0010004",
+    }));
+    const providerExecute = vi.fn();
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "succeeded" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_succeeded",
+    }));
+    const result = await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-service-reconcile-journal",
+      correlationId: "request-service-reconcile-journal",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Verified by exact Incident read-back.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => ({
+          schemaVersion: "servicenow-write-normalized-v2",
+          commandType: "add_work_note",
+          targetSysId: "b".repeat(32),
+          fields: { work_notes: "Reviewed note" },
+        })),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({
+          commandType: "add_work_note",
+          status: "succeeded",
+          targetSysId: "b".repeat(32),
+          targetNumber: "INC0010004",
+        })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: { ...adapter({ readBack }), execute: providerExecute },
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:06:00.000Z"),
+    });
+    expect(result.status).toBe("succeeded");
+    expect(readBack).toHaveBeenCalledOnce();
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      targetSysId: "b".repeat(32),
+      targetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      safeReadBackSummary: expect.not.objectContaining({
+        verificationNote: expect.anything(),
+      }),
+    }));
+  });
+
+  it("rejects a manually verified pair that conflicts with provider read-back", async () => {
+    const reconcile = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-service-reconcile-conflict",
+      correlationId: "request-service-reconcile-conflict",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Verified by exact Incident read-back.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: "confirmed_succeeded",
+          summary: { method: "correlation_marker", matchCount: 1 },
+          targetSysId: "c".repeat(32),
+          targetNumber: "INC0010005",
+        })),
+      }),
+    })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT" });
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("maps a defensive repository target conflict to a safe conflict response", async () => {
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-service-reconcile-storage-conflict",
+      correlationId: "request-service-reconcile-storage-conflict",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Verified by exact Incident read-back.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => ({
+          schemaVersion: "servicenow-write-normalized-v2",
+          commandType: "add_work_note",
+          targetSysId: "b".repeat(32),
+          fields: { work_notes: "Reviewed note" },
+        })),
+        reconcile: vi.fn(async () => {
+          throw new Error("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT");
+        }),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: "confirmed_succeeded",
+          summary: { method: "exact_target", matchCount: 1 },
+          targetSysId: "b".repeat(32),
+          targetNumber: "INC0010004",
+        })),
+      }),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT",
+    });
+  });
+
   it("does not turn an authoritative result into failure when secondary audit fails", async () => {
     const repository = {
       beginAttempt: vi.fn(async () => begin(normalizedCreate, 0)),
@@ -486,10 +790,23 @@ describe("ServiceNow write service", () => {
     const testReadiness = vi.fn(async () => ({ connected: true, httpStatus: 200 }));
     const result = await testServiceNowWriteReadiness({
       correlationId: "request-service-0008",
+      session,
     }, {
       env: disabledEnv,
-      repository: {} as ServiceNowWriteRepository,
+      repository: {
+        ensureConnection: vi.fn(async () => "connection"),
+        recordReadinessProof: vi.fn(async (payload) => ({
+          connection_id: "connection",
+          configuration_fingerprint: payload.configurationFingerprint,
+          tested_at: payload.testedAt,
+          expires_at: payload.expiresAt,
+          test_status: payload.testStatus,
+          safe_http_status: payload.safeHttpStatus,
+          safe_error_code: null,
+        })),
+      } as unknown as ServiceNowWriteRepository,
       adapter: adapter({ testReadiness }),
+      now: () => new Date("2026-07-23T01:00:00.000Z"),
     });
     expect(testReadiness).toHaveBeenCalledOnce();
     expect(result).toMatchObject({

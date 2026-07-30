@@ -104,10 +104,17 @@ export type ServiceNowWriteCommandInput = {
     sourceType: ServiceNowWriteSourceType;
     sourceEntityReference?: string;
     operationReference?: string;
+    manualOperationToken?: string;
     maxAttempts?: number;
     payload: ServiceNowWritePayloadByType[Type];
   }
 }[ServiceNowWriteCommandType];
+
+export type ServiceNowManualOperationIdentity = {
+  operationToken: string;
+  operationReference: string;
+  expiresAt: string;
+};
 
 export type NormalizedServiceNowWriteCommand = {
   schemaVersion: "servicenow-write-normalized-v2";
@@ -231,8 +238,14 @@ export type ServiceNowWriteReadiness = {
   relationalStorage: boolean;
   connectionTestable: boolean;
   connectionTested: boolean;
+  connectionTestExpired: boolean;
   liveWriteEnabled: boolean;
   liveWriteReady: boolean;
+  configurationFingerprint?: string;
+  testedAt?: string;
+  proofExpiresAt?: string;
+  testStatus?: "succeeded" | "failed";
+  safeHttpStatus?: number;
   authMode?: "basic" | "oauth_client_credentials";
   hostname?: string;
   incidentTable?: string;

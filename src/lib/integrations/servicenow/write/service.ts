@@ -11,11 +11,16 @@ import { parseServiceNowConfig, summarizeServiceNowConfig, type ServiceNowEnable
 import { ServiceNowWriteAdapter } from "./adapter";
 import { parseServiceNowWriteConfig } from "./config";
 import {
+  buildServiceNowWriteConfigurationFingerprint,
   buildServiceNowNormalizedPayloadHash,
   buildServiceNowProviderCorrelationMarker,
   buildServiceNowWriteIdempotencyKey,
   hashServiceNowWriteConfirmationNonce,
 } from "./idempotency";
+import {
+  issueManualOperationIdentity,
+  resolveManualOperationIdentity,
+} from "./manual-operation";
 import { serviceNowDefaultWriteMapping, validateServiceNowWriteFieldMapping, normalizeCommand } from "./normalization";
 import { isServiceNowWriteExecutionError } from "./outcomes";
 import { ServiceNowWriteRepository } from "./repository";
@@ -27,6 +32,7 @@ import type {
   ServiceNowWriteCommandInput,
   ServiceNowWriteCommandSummary,
   ServiceNowWriteConfirmation,
+  ServiceNowManualOperationIdentity,
   ServiceNowWriteReadiness,
   ServiceNowWriteReconciliationAction,
 } from "./types";
@@ -59,6 +65,30 @@ function runtimeConnectionId(config: ServiceNowEnabledConfig) {
   return `sn-write-${digest(`${config.instanceUrl}|${config.incidentTable}`).slice(0, 40)}`;
 }
 
+function credentialVersion(env: Record<string, string | undefined>) {
+  const value = env.SERVICENOW_CREDENTIAL_VERSION?.trim() || "unversioned";
+  if (!/^[A-Za-z0-9._:-]{1,80}$/.test(value)) {
+    throw new HttpError(
+      503,
+      "SERVICENOW_CONFIGURATION_INVALID",
+      "ServiceNow configuration is invalid",
+    );
+  }
+  return value;
+}
+
+function configurationFingerprint(
+  config: ServiceNowEnabledConfig,
+  env: Record<string, string | undefined>,
+) {
+  return buildServiceNowWriteConfigurationFingerprint({
+    instanceHostname: new URL(config.instanceUrl).host,
+    incidentTable: config.incidentTable,
+    authMode: config.authMode,
+    credentialVersion: credentialVersion(env),
+  });
+}
+
 function defaultMappingId(connectionId: string, commandType: string) {
   return `sn-map-${digest(`${connectionId}|${commandType}|default`).slice(0, 40)}`;
 }
@@ -88,8 +118,11 @@ function operationalError(error: unknown): never {
   if (message.includes("SERVICENOW_WRITE_ATTEMPTS_EXHAUSTED")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPTS_EXHAUSTED", "ServiceNow write retry limit has been reached");
   if (message.includes("SERVICENOW_WRITE_SOURCE_NOT_FOUND")) throw new HttpError(409, "SERVICENOW_WRITE_SOURCE_NOT_FOUND", "The linked SUPPER source record was not found");
   if (message.includes("SERVICENOW_WRITE_CONFIRMATION")) throw new HttpError(409, "SERVICENOW_WRITE_CONFIRMATION_INVALID", "ServiceNow write confirmation is missing, stale, expired, or already used");
+  if (message.includes("SERVICENOW_WRITE_READINESS_REQUIRED")) throw new HttpError(409, "SERVICENOW_WRITE_READINESS_REQUIRED", "A fresh successful ServiceNow readiness test is required");
   if (message.includes("SERVICENOW_WRITE_VERSION_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERSION_CONFLICT", "ServiceNow write command changed; review it again");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED", "ServiceNow write command does not require reconciliation");
+  if (message.includes("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the ServiceNow write command");
+  if (message.includes("SERVICENOW_WRITE_RECONCILIATION_INVALID")) throw new HttpError(400, "SERVICENOW_WRITE_RECONCILIATION_INVALID", "ServiceNow write reconciliation evidence is invalid");
   if (message.includes("SERVICENOW_WRITE_DRY_RUN_NOT_ALLOWED")
     || message.includes("SERVICENOW_WRITE_EXECUTION_NOT_ALLOWED")
     || message.includes("SERVICENOW_WRITE_RETRY_NOT_ALLOWED")) {
@@ -156,18 +189,53 @@ export function validateCommand(input: unknown): ServiceNowWriteCommandInput {
   return createServiceNowWriteCommandRequestSchema.parse(input);
 }
 
+export async function issueManualOperation(
+  input: {
+    commandType: ServiceNowWriteCommandInput["commandType"];
+    sourceType: "manual";
+    sourceEntityReference?: string;
+    session: Session;
+  },
+  dependencies: Dependencies = {},
+): Promise<ServiceNowManualOperationIdentity> {
+  await runtime(dependencies, false);
+  return issueManualOperationIdentity({
+    session: input.session,
+    commandType: input.commandType,
+    sourceEntityReference: input.sourceEntityReference,
+  }, {
+    env: dependencies.env || process.env,
+    now: dependencies.now,
+  });
+}
+
 export async function createCommand(
   input: ServiceNowWriteCommandInput & { session: Session; requestId: string; correlationId: string },
   dependencies: Dependencies = {},
 ) {
   const { session, requestId, correlationId, ...commandInput } = input;
   const validated = validateCommand(commandInput);
-  const { config, writeConfig, repository } = await runtime(dependencies, false);
+  const { env, config, writeConfig, repository } = await runtime(dependencies, false);
   const createId = dependencies.createId || (() => crypto.randomUUID());
   const commandId = createId();
-  const operationReference = validated.operationReference || `manual-op:${commandId}`;
+  const operationReference = validated.sourceType === "manual"
+    ? (await resolveManualOperationIdentity({
+      operationToken: validated.manualOperationToken || "",
+      session,
+      commandType: validated.commandType,
+      sourceEntityReference: validated.sourceEntityReference,
+    }, {
+      env,
+      now: dependencies.now,
+    })).operationReference
+    : validated.operationReference!;
   const connectionId = runtimeConnectionId(config);
-  await repository.ensureConnection(connectionId, config);
+  await repository.ensureConnection(
+    connectionId,
+    config,
+    configurationFingerprint(config, env),
+    credentialVersion(env),
+  );
   let mapping = await repository.getActiveMapping(connectionId, validated.commandType);
   if (!mapping) {
     const fieldMapping = serviceNowDefaultWriteMapping(validated.commandType);
@@ -235,6 +303,28 @@ function retryDelayMilliseconds(attemptCount: number) {
   return Math.min(15 * 60_000, 30_000 * 2 ** Math.max(0, attemptCount - 1));
 }
 
+async function requireFreshReadinessProof(
+  commandId: string,
+  repository: ServiceNowWriteRepository,
+  config: ServiceNowEnabledConfig,
+  env: Record<string, string | undefined>,
+  at: Date,
+) {
+  const context = await repository.getCommandExecutionContext(commandId);
+  if (!context) {
+    throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
+  }
+  const connectionId = runtimeConnectionId(config);
+  if (context.connection_id !== connectionId) {
+    throw new HttpError(409, "SERVICENOW_WRITE_READINESS_REQUIRED", "The command connection no longer matches the active configuration");
+  }
+  const proof = await repository.getReadinessProof(connectionId);
+  const readiness = getServiceNowWriteReadiness(env, proof, at);
+  if (!readiness.liveWriteReady) {
+    throw new HttpError(409, "SERVICENOW_WRITE_READINESS_REQUIRED", "A fresh successful ServiceNow readiness test is required");
+  }
+}
+
 async function execute(
   input: {
     commandId: string;
@@ -248,8 +338,17 @@ async function execute(
   dependencies: Dependencies,
 ) {
   const live = mode !== "dry_run";
-  const { repository, adapter } = await runtime(dependencies, live);
+  const { env, config, repository, adapter } = await runtime(dependencies, live);
   const now = dependencies.now || (() => new Date());
+  if (live) {
+    await requireFreshReadinessProof(
+      input.commandId,
+      repository,
+      config,
+      env,
+      now(),
+    );
+  }
   const createId = dependencies.createId || (() => crypto.randomUUID());
   const startedAt = now();
   const attemptId = createId();
@@ -461,6 +560,10 @@ export async function reconcileCommand(
     requestId: string;
     correlationId: string;
     confirmation: ConfirmedAction;
+    verifiedTargetSysId?: string;
+    verifiedTargetNumber?: string;
+    verificationAcknowledged?: true;
+    verificationNote?: string;
     abortSignal?: AbortSignal;
   },
   dependencies: Dependencies = {},
@@ -477,8 +580,8 @@ export async function reconcileCommand(
   let safeReadBackSummary: Record<string, unknown> = {
     method: input.action === "reconcile_by_read_back" ? "provider_read_back" : "manual_verification",
   };
-  let targetSysId = "";
-  let targetNumber = "";
+  let targetSysId = input.verifiedTargetSysId || "";
+  let targetNumber = input.verifiedTargetNumber || "";
   if (input.action === "reconcile_by_read_back") {
     try {
       const readBack = await adapter.readBack(
@@ -498,6 +601,52 @@ export async function reconcileCommand(
         errorCode: isIntegrationBoundaryError(error) ? error.code : "SERVICENOW_READ_BACK_FAILED",
       };
     }
+  } else if (input.action === "mark_succeeded_after_verification") {
+    if (!input.verificationAcknowledged || !input.verificationNote || !targetSysId || !targetNumber) {
+      throw new HttpError(400, "SERVICENOW_WRITE_VERIFIED_TARGET_REQUIRED", "Verified ServiceNow sys_id and number are required");
+    }
+    if ((normalized.targetSysId && normalized.targetSysId !== targetSysId)
+      || (normalized.targetNumber && normalized.targetNumber !== targetNumber)) {
+      throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the original command target");
+    }
+    let providerVerification = "unavailable";
+    try {
+      const readBack = await adapter.readBack(
+        normalized,
+        correlationIdSchema.parse(input.correlationId),
+        input.abortSignal,
+      );
+      if (readBack.result === "ambiguous") {
+        throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_AMBIGUOUS", "Provider read-back matched multiple Incidents");
+      }
+      if ((readBack.targetSysId && readBack.targetSysId !== targetSysId)
+        || (readBack.targetNumber && readBack.targetNumber !== targetNumber)) {
+        throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with provider read-back");
+      }
+      providerVerification = readBack.targetSysId && readBack.targetNumber
+        ? "matched"
+        : readBack.result;
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      providerVerification = isIntegrationBoundaryError(error) ? "provider_unavailable" : "read_back_unavailable";
+    }
+    safeReadBackSummary = {
+      method: "manual_verified_target",
+      targetSysId,
+      targetNumber,
+      verificationAcknowledged: true,
+      verificationEvidenceProvided: true,
+      providerVerification,
+    };
+  } else {
+    if (!input.verificationAcknowledged || !input.verificationNote) {
+      throw new HttpError(400, "SERVICENOW_WRITE_VERIFICATION_REQUIRED", "Explicit verification evidence is required");
+    }
+    safeReadBackSummary = {
+      method: "manual_verified_not_applied",
+      verificationAcknowledged: true,
+      verificationEvidenceProvided: true,
+    };
   }
   try {
     await repository.reconcile({
@@ -507,6 +656,10 @@ export async function reconcileCommand(
       safeReadBackSummary,
       targetSysId,
       targetNumber,
+      ...(input.action === "reconcile_by_read_back" ? {} : {
+        verificationAcknowledged: input.verificationAcknowledged,
+        verificationNote: input.verificationNote,
+      }),
       actorUserId: input.session.userId,
       requestId: input.requestId,
       checkedAt,
@@ -540,28 +693,51 @@ export async function listCommands(
 
 export function getServiceNowWriteReadiness(
   env: Record<string, string | undefined> = process.env,
+  proof?: Awaited<ReturnType<ServiceNowWriteRepository["getReadinessProof"]>>,
+  at = new Date(),
 ): ServiceNowWriteReadiness {
   const relationalStorage = getDataBackend(env) === "supabase-relational";
   const summary = summarizeServiceNowConfig(env);
   let liveWriteEnabled = false;
   let incidentTable: string | undefined;
   let safeErrorCode: string | undefined;
+  let enabledConfig: ServiceNowEnabledConfig | undefined;
   try {
     liveWriteEnabled = parseServiceNowWriteConfig(env).enabled;
     const config = parseServiceNowConfig(env);
-    if (config.enabled) incidentTable = config.incidentTable;
+    if (config.enabled) {
+      credentialVersion(env);
+      incidentTable = config.incidentTable;
+      enabledConfig = config;
+    }
   } catch {
     safeErrorCode = "SERVICENOW_CONFIGURATION_INVALID";
   }
   const configured = summary.configured && Boolean(incidentTable) && !safeErrorCode;
   const connectionTestable = configured && relationalStorage;
+  const fingerprint = configured && enabledConfig
+    ? configurationFingerprint(enabledConfig, env)
+    : undefined;
+  const proofMatches = Boolean(proof && fingerprint && proof.configuration_fingerprint === fingerprint);
+  const proofFresh = Boolean(proofMatches
+    && proof?.test_status === "succeeded"
+    && new Date(proof.expires_at).getTime() > at.getTime());
+  const connectionTestExpired = Boolean(proofMatches
+    && proof?.test_status === "succeeded"
+    && !proofFresh);
   return {
     configured,
     relationalStorage,
     connectionTestable,
-    connectionTested: false,
+    connectionTested: proofFresh,
+    connectionTestExpired,
     liveWriteEnabled,
-    liveWriteReady: connectionTestable && liveWriteEnabled,
+    liveWriteReady: connectionTestable && liveWriteEnabled && proofFresh,
+    configurationFingerprint: fingerprint,
+    testedAt: proofMatches ? proof?.tested_at : undefined,
+    proofExpiresAt: proofMatches ? proof?.expires_at : undefined,
+    testStatus: proofMatches ? proof?.test_status : undefined,
+    safeHttpStatus: proofMatches ? proof?.safe_http_status || undefined : undefined,
     authMode: summary.authMode,
     hostname: summary.hostname,
     incidentTable,
@@ -570,39 +746,99 @@ export function getServiceNowWriteReadiness(
         ? "SERVICENOW_WRITE_REQUIRES_RELATIONAL"
         : !configured
           ? "SERVICENOW_CONFIGURATION_INVALID"
-          : !liveWriteEnabled
+          : !proofMatches
+            ? "SERVICENOW_WRITE_CONNECTION_UNTESTED"
+            : connectionTestExpired
+              ? "SERVICENOW_WRITE_READINESS_EXPIRED"
+              : proof?.test_status === "failed"
+                ? proof.safe_error_code || "SERVICENOW_WRITE_READINESS_FAILED"
+                : !liveWriteEnabled
             ? "SERVICENOW_WRITE_DISABLED"
             : undefined),
     safeErrorMessage: !relationalStorage
       ? "Relational storage is required"
       : !configured
         ? "ServiceNow configuration needs attention"
-        : !liveWriteEnabled
+        : !proofMatches
+          ? "Connection is configured but has not been tested"
+          : connectionTestExpired
+            ? "The successful connection test has expired"
+            : proof?.test_status === "failed"
+              ? "The latest connection test failed"
+              : !liveWriteEnabled
           ? "Connection testing is available; live mutation remains disabled"
           : undefined,
   };
 }
 
 export async function testServiceNowWriteReadiness(
-  input: { correlationId: string; abortSignal?: AbortSignal },
+  input: { correlationId: string; session: Session; abortSignal?: AbortSignal },
   dependencies: Dependencies = {},
 ) {
-  const { adapter } = await runtime(dependencies, false);
-  await adapter.testReadiness(correlationIdSchema.parse(input.correlationId), input.abortSignal);
-  const readiness = getServiceNowWriteReadiness(dependencies.env || process.env);
-  return {
-    ...readiness,
-    connectionTested: true,
-    liveWriteReady: readiness.connectionTestable && readiness.liveWriteEnabled,
-  };
+  const { env, config, adapter, repository } = await runtime(dependencies, false);
+  const now = dependencies.now || (() => new Date());
+  const testedAt = now();
+  const fingerprint = configurationFingerprint(config, env);
+  const connectionId = runtimeConnectionId(config);
+  await repository.ensureConnection(
+    connectionId,
+    config,
+    fingerprint,
+    credentialVersion(env),
+  );
+  try {
+    const result = await adapter.testReadiness(
+      correlationIdSchema.parse(input.correlationId),
+      input.abortSignal,
+    );
+    const expiresAt = new Date(testedAt.getTime() + 5 * 60_000);
+    const proof = await repository.recordReadinessProof({
+      connectionId,
+      configurationFingerprint: fingerprint,
+      testedAt: testedAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      testStatus: "succeeded",
+      safeHttpStatus: result.httpStatus,
+      testedByUserId: input.session.userId,
+      safeErrorCode: "",
+      updatedAt: testedAt.toISOString(),
+    });
+    return getServiceNowWriteReadiness(env, {
+      ...proof,
+      tested_by_user_id: input.session.userId,
+      updated_at: testedAt.toISOString(),
+    }, testedAt);
+  } catch (error) {
+    const safeErrorCode = isIntegrationBoundaryError(error)
+      ? error.code
+      : "SERVICENOW_WRITE_READINESS_FAILED";
+    await repository.recordReadinessProof({
+      connectionId,
+      configurationFingerprint: fingerprint,
+      testedAt: testedAt.toISOString(),
+      expiresAt: testedAt.toISOString(),
+      testStatus: "failed",
+      safeHttpStatus: null,
+      testedByUserId: input.session.userId,
+      safeErrorCode,
+      updatedAt: testedAt.toISOString(),
+    });
+    throw error;
+  }
 }
 
 export async function getServiceNowWriteOperationsSummary(dependencies: Dependencies = {}) {
   const env = dependencies.env || process.env;
-  const readiness = getServiceNowWriteReadiness(env);
-  if (!readiness.relationalStorage) {
-    return { readiness, countsByStatus: {} };
+  const baseReadiness = getServiceNowWriteReadiness(env);
+  if (!baseReadiness.relationalStorage) {
+    return { readiness: baseReadiness, countsByStatus: {} };
   }
   const repository = dependencies.repository || new ServiceNowWriteRepository();
+  let proof;
+  if (baseReadiness.configured) {
+    const config = requireServiceNowConfig(env);
+    proof = await repository.getReadinessProof(runtimeConnectionId(config));
+  }
+  const readiness = getServiceNowWriteReadiness(env, proof);
   return { readiness, ...await repository.getOperationsSummary() };
 }

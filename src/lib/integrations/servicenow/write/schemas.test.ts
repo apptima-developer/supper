@@ -10,6 +10,7 @@ describe("ServiceNow write schemas", () => {
     const input = {
       commandType: "create_incident",
       sourceType: "manual",
+      manualOperationToken: "a".repeat(120),
       payload: {
         shortDescription: "Cannot open document",
         description: "The document viewer reports a bounded test error.",

@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.1: controlled ServiceNow write kernel.
+-- SUPPER AI-2.0.2: controlled ServiceNow write kernel.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -18,6 +18,10 @@ create table if not exists public.servicenow_write_connections (
     )
   ),
   incident_table text not null check (incident_table ~ '^[a-z][a-z0-9_]{0,79}$'),
+  credential_version text not null default 'unversioned' check (
+    credential_version ~ '^[A-Za-z0-9._:-]{1,80}$'
+  ),
+  configuration_fingerprint text not null check (configuration_fingerprint ~ '^[a-f0-9]{64}$'),
   default_assignment_group text check (
     default_assignment_group is null or default_assignment_group ~ '^[a-f0-9]{32}$'
   ),
@@ -239,6 +243,23 @@ create table if not exists public.servicenow_write_reconciliation_events (
   created_at timestamptz not null
 );
 
+create table if not exists public.servicenow_write_readiness_proofs (
+  connection_id text primary key references public.servicenow_write_connections(id) on delete cascade,
+  configuration_fingerprint text not null check (configuration_fingerprint ~ '^[a-f0-9]{64}$'),
+  tested_at timestamptz not null,
+  expires_at timestamptz not null check (expires_at >= tested_at),
+  test_status text not null check (test_status in ('succeeded', 'failed')),
+  safe_http_status integer check (safe_http_status is null or safe_http_status between 100 and 599),
+  tested_by_user_id text not null check (length(btrim(tested_by_user_id)) between 1 and 200),
+  safe_error_code text check (safe_error_code is null or safe_error_code ~ '^[A-Z0-9_]{1,80}$'),
+  updated_at timestamptz not null,
+  check (
+    (test_status = 'succeeded' and safe_http_status between 200 and 299 and safe_error_code is null)
+    or
+    (test_status = 'failed' and expires_at = tested_at and safe_error_code is not null)
+  )
+);
+
 create unique index if not exists servicenow_write_mappings_one_active_idx
   on public.servicenow_write_mappings(connection_id, command_type) where active;
 create index if not exists servicenow_write_connections_active_idx
@@ -259,6 +280,8 @@ create index if not exists servicenow_write_attempts_command_idx
   on public.servicenow_write_attempts(command_id, attempt_number);
 create index if not exists servicenow_write_reconciliation_command_idx
   on public.servicenow_write_reconciliation_events(command_id, created_at desc);
+create index if not exists servicenow_write_readiness_expiry_idx
+  on public.servicenow_write_readiness_proofs(expires_at);
 create index if not exists servicenow_ticket_links_ticket_idx
   on public.servicenow_ticket_links(supper_ticket_id) where supper_ticket_id is not null;
 create index if not exists servicenow_ticket_links_conversation_idx
@@ -270,6 +293,7 @@ alter table public.servicenow_write_commands enable row level security;
 alter table public.servicenow_write_attempts enable row level security;
 alter table public.servicenow_ticket_links enable row level security;
 alter table public.servicenow_write_reconciliation_events enable row level security;
+alter table public.servicenow_write_readiness_proofs enable row level security;
 
 revoke all privileges on table public.servicenow_write_connections from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_mappings from public, anon, authenticated;
@@ -277,6 +301,7 @@ revoke all privileges on table public.servicenow_write_commands from public, ano
 revoke all privileges on table public.servicenow_write_attempts from public, anon, authenticated;
 revoke all privileges on table public.servicenow_ticket_links from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_reconciliation_events from public, anon, authenticated;
+revoke all privileges on table public.servicenow_write_readiness_proofs from public, anon, authenticated;
 
 -- The server may read configuration and ledgers directly, but all mutation is
 -- constrained to the reviewed SECURITY DEFINER RPCs below.
@@ -286,6 +311,98 @@ grant select on table public.servicenow_write_commands to service_role;
 grant select on table public.servicenow_write_attempts to service_role;
 grant select on table public.servicenow_ticket_links to service_role;
 grant select on table public.servicenow_write_reconciliation_events to service_role;
+grant select on table public.servicenow_write_readiness_proofs to service_role;
+
+create or replace function public.support_servicenow_write_parse_timestamp(
+  p_value jsonb,
+  p_error_code text
+)
+returns timestamptz
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_text text;
+  v_result timestamptz;
+begin
+  if p_error_code !~ '^SERVICENOW_WRITE_[A-Z0-9_]{1,64}$'
+    or p_value is null
+    or jsonb_typeof(p_value) <> 'string' then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_VALUE_INVALID';
+  end if;
+  v_text := p_value #>> '{}';
+  if v_text !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  begin
+    v_result := v_text::timestamptz;
+  exception
+    when invalid_datetime_format or datetime_field_overflow or invalid_text_representation then
+      raise exception using errcode = '22023', message = p_error_code;
+  end;
+  if to_char(v_result at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') <> v_text then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  return v_result;
+end;
+$$;
+
+create or replace function public.support_servicenow_write_parse_integer(
+  p_value jsonb,
+  p_error_code text
+)
+returns integer
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_text text;
+  v_result integer;
+begin
+  if p_error_code !~ '^SERVICENOW_WRITE_[A-Z0-9_]{1,64}$'
+    or p_value is null
+    or jsonb_typeof(p_value) <> 'number' then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_VALUE_INVALID';
+  end if;
+  v_text := p_value #>> '{}';
+  if v_text !~ '^-?[0-9]+$' then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  begin
+    v_result := v_text::integer;
+  exception
+    when invalid_text_representation or numeric_value_out_of_range then
+      raise exception using errcode = '22023', message = p_error_code;
+  end;
+  return v_result;
+end;
+$$;
+
+create or replace function public.support_servicenow_write_parse_boolean(
+  p_value jsonb,
+  p_error_code text
+)
+returns boolean
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_text text;
+begin
+  if p_error_code !~ '^SERVICENOW_WRITE_[A-Z0-9_]{1,64}$'
+    or p_value is null
+    or jsonb_typeof(p_value) <> 'boolean' then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_VALUE_INVALID';
+  end if;
+  v_text := p_value #>> '{}';
+  if v_text = 'true' then return true; end if;
+  if v_text = 'false' then return false; end if;
+  raise exception using errcode = '22023', message = p_error_code;
+end;
+$$;
 
 create or replace function public.support_servicenow_write_segment(p_value text)
 returns text
@@ -294,6 +411,28 @@ immutable
 set search_path = pg_catalog, public, extensions, pg_temp
 as $$
   select octet_length(coalesce(p_value, ''))::text || ':' || coalesce(p_value, '');
+$$;
+
+create or replace function public.support_servicenow_write_configuration_fingerprint(
+  p_instance_url text,
+  p_incident_table text,
+  p_auth_mode text,
+  p_credential_version text
+)
+returns text
+language sql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+  select public.support_intake_sha256_hex(
+    'servicenow-write-configuration-v1'
+    || '|' || public.support_servicenow_write_segment(
+      lower(regexp_replace(p_instance_url, '^https?://', '', 'i'))
+    )
+    || '|' || public.support_servicenow_write_segment(lower(p_incident_table))
+    || '|' || public.support_servicenow_write_segment(lower(p_auth_mode))
+    || '|' || public.support_servicenow_write_segment(p_credential_version)
+  );
 $$;
 
 create or replace function public.support_servicenow_write_validate_mapping(
@@ -422,6 +561,14 @@ begin
       and (
         jsonb_typeof(p_payload->'externalReferences') <> 'object'
         or octet_length((p_payload->'externalReferences')::text) > 8192
+        or (select count(*) from jsonb_object_keys(p_payload->'externalReferences')) > 20
+        or exists (
+          select 1
+          from jsonb_each(p_payload->'externalReferences') reference(key, value)
+          where reference.key !~ '^[A-Za-z][A-Za-z0-9_.-]{0,79}$'
+            or jsonb_typeof(reference.value) <> 'string'
+            or length(btrim(reference.value #>> '{}')) not between 1 and 500
+        )
       )
     ) then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_PAYLOAD_INVALID';
@@ -454,6 +601,16 @@ begin
     or (p_payload ? 'impact' and p_payload->>'impact' not in ('1','2','3'))
     or (p_payload ? 'urgency' and p_payload->>'urgency' not in ('1','2','3'))
     or (p_payload ? 'state' and p_payload->>'state' not in ('1','2','3','6','7','8')) then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_PAYLOAD_INVALID';
+  end if;
+
+  if (p_payload ? 'shortDescription' and length(btrim(p_payload->>'shortDescription')) not between 1 and 160)
+    or (p_payload ? 'description' and length(btrim(p_payload->>'description')) not between 1 and 20000)
+    or (p_payload ? 'category' and length(btrim(p_payload->>'category')) not between 1 and 100)
+    or (p_payload ? 'subcategory' and length(btrim(p_payload->>'subcategory')) not between 1 and 100)
+    or (p_payload ? 'contactChannel' and length(btrim(p_payload->>'contactChannel')) not between 1 and 100)
+    or (p_payload ? 'projectCode' and length(btrim(p_payload->>'projectCode')) not between 1 and 200)
+    or (p_payload ? 'supperTicketNo' and length(btrim(p_payload->>'supperTicketNo')) not between 1 and 100) then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_PAYLOAD_INVALID';
   end if;
 
@@ -539,6 +696,9 @@ as $$
 declare
   v_updated_at timestamptz;
   v_timeout integer;
+  v_active boolean;
+  v_fingerprint text;
+  v_existing public.servicenow_write_connections%rowtype;
 begin
   if p_payload is null
     or jsonb_typeof(p_payload) <> 'object'
@@ -547,40 +707,73 @@ begin
       select 1 from jsonb_object_keys(p_payload) supplied(key)
       where supplied.key not in (
         'id','name','active','authMode','instanceUrl','incidentTable',
-        'timeoutMs','metadata','updatedAt'
+        'configVersion','configurationFingerprint','timeoutMs','metadata','updatedAt'
       )
     )
     or jsonb_typeof(p_payload->'active') <> 'boolean'
     or jsonb_typeof(p_payload->'timeoutMs') <> 'number'
-    or p_payload->>'timeoutMs' !~ '^[0-9]+$'
-    or p_payload->>'updatedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or length(btrim(coalesce(p_payload->>'id',''))) not between 1 and 200
     or length(btrim(coalesce(p_payload->>'name',''))) not between 1 and 200
     or p_payload->>'authMode' not in ('basic','oauth_client_credentials')
     or p_payload->>'incidentTable' !~ '^[a-z][a-z0-9_]{0,79}$'
+    or p_payload->>'configVersion' !~ '^[A-Za-z0-9._:-]{1,80}$'
+    or p_payload->>'configurationFingerprint' !~ '^[a-f0-9]{64}$'
     or jsonb_typeof(coalesce(p_payload->'metadata','{}'::jsonb)) <> 'object' then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_CONNECTION_INVALID';
   end if;
-  v_timeout := (p_payload->>'timeoutMs')::integer;
-  v_updated_at := (p_payload->>'updatedAt')::timestamptz;
+  v_timeout := public.support_servicenow_write_parse_integer(
+    p_payload->'timeoutMs', 'SERVICENOW_WRITE_CONNECTION_INVALID'
+  );
+  v_updated_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'updatedAt', 'SERVICENOW_WRITE_CONNECTION_INVALID'
+  );
+  v_active := public.support_servicenow_write_parse_boolean(
+    p_payload->'active', 'SERVICENOW_WRITE_CONNECTION_INVALID'
+  );
+  v_fingerprint := public.support_servicenow_write_configuration_fingerprint(
+    p_payload->>'instanceUrl',
+    p_payload->>'incidentTable',
+    p_payload->>'authMode',
+    p_payload->>'configVersion'
+  );
   if v_timeout not between 1000 and 60000
+    or p_payload->>'configurationFingerprint' <> v_fingerprint
     or (
       p_payload->>'instanceUrl' !~* '^https://[a-z0-9.-]+(:[0-9]{1,5})?$'
       and p_payload->>'instanceUrl' !~* '^http://(localhost|127[.]0[.]0[.]1|[[]::1[]])(:[0-9]{1,5})?$'
     ) then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_CONNECTION_INVALID';
   end if;
+  select * into v_existing
+  from public.servicenow_write_connections
+  where servicenow_write_connections.id = p_payload->>'id'
+  for update;
   insert into public.servicenow_write_connections (
-    id,name,active,auth_mode,instance_url,incident_table,timeout_ms,metadata,created_at,updated_at
+    id,name,active,auth_mode,instance_url,incident_table,credential_version,
+    configuration_fingerprint,timeout_ms,metadata,created_at,updated_at
   ) values (
-    p_payload->>'id',p_payload->>'name',(p_payload->>'active')::boolean,
+    p_payload->>'id',p_payload->>'name',v_active,
     p_payload->>'authMode',p_payload->>'instanceUrl',p_payload->>'incidentTable',
-    v_timeout,coalesce(p_payload->'metadata','{}'::jsonb),v_updated_at,v_updated_at
+    p_payload->>'configVersion',v_fingerprint,v_timeout,
+    coalesce(p_payload->'metadata','{}'::jsonb),v_updated_at,v_updated_at
   )
   on conflict on constraint servicenow_write_connections_pkey do update set
     name=excluded.name,active=excluded.active,auth_mode=excluded.auth_mode,
     instance_url=excluded.instance_url,incident_table=excluded.incident_table,
+    credential_version=excluded.credential_version,
+    configuration_fingerprint=excluded.configuration_fingerprint,
     timeout_ms=excluded.timeout_ms,metadata=excluded.metadata,updated_at=excluded.updated_at;
+  if v_existing.id is not null and (
+    v_existing.active is distinct from v_active
+    or v_existing.auth_mode is distinct from p_payload->>'authMode'
+    or v_existing.instance_url is distinct from p_payload->>'instanceUrl'
+    or v_existing.incident_table is distinct from p_payload->>'incidentTable'
+    or v_existing.credential_version is distinct from p_payload->>'configVersion'
+    or v_existing.configuration_fingerprint is distinct from v_fingerprint
+  ) then
+    delete from public.servicenow_write_readiness_proofs
+    where connection_id = p_payload->>'id';
+  end if;
   return query select p_payload->>'id';
 end;
 $$;
@@ -593,6 +786,7 @@ set search_path = pg_catalog, public, extensions, pg_temp
 as $$
 declare
   v_updated_at timestamptz;
+  v_active boolean;
 begin
   if p_payload is null
     or jsonb_typeof(p_payload) <> 'object'
@@ -605,7 +799,6 @@ begin
       )
     )
     or jsonb_typeof(p_payload->'active') <> 'boolean'
-    or p_payload->>'updatedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or length(btrim(coalesce(p_payload->>'id',''))) not between 1 and 200
     or length(btrim(coalesce(p_payload->>'connectionId',''))) not between 1 and 200
     or length(btrim(coalesce(p_payload->>'mappingName',''))) not between 1 and 200
@@ -621,8 +814,13 @@ begin
   ) then
     raise exception using errcode = '23503', message = 'SERVICENOW_WRITE_CONNECTION_UNAVAILABLE';
   end if;
-  v_updated_at := (p_payload->>'updatedAt')::timestamptz;
-  if (p_payload->>'active')::boolean then
+  v_updated_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'updatedAt', 'SERVICENOW_WRITE_MAPPING_INVALID'
+  );
+  v_active := public.support_servicenow_write_parse_boolean(
+    p_payload->'active', 'SERVICENOW_WRITE_MAPPING_INVALID'
+  );
+  if v_active then
     update public.servicenow_write_mappings mapping_record set
       active=false,updated_at=v_updated_at
     where mapping_record.connection_id=p_payload->>'connectionId'
@@ -635,14 +833,124 @@ begin
     metadata,created_at,updated_at
   ) values (
     p_payload->>'id',p_payload->>'connectionId',p_payload->>'commandType',
-    p_payload->>'mappingName',(p_payload->>'active')::boolean,p_payload->'fieldMapping',
+    p_payload->>'mappingName',v_active,p_payload->'fieldMapping',
     coalesce(p_payload->'metadata','{}'::jsonb),v_updated_at,v_updated_at
   )
   on conflict on constraint servicenow_write_mappings_pkey do update set
     connection_id=excluded.connection_id,command_type=excluded.command_type,
     mapping_name=excluded.mapping_name,active=excluded.active,
     field_mapping=excluded.field_mapping,metadata=excluded.metadata,updated_at=excluded.updated_at;
+  delete from public.servicenow_write_readiness_proofs
+  where connection_id = p_payload->>'connectionId';
   return query select p_payload->>'id', p_payload->'fieldMapping';
+end;
+$$;
+
+create or replace function public.support_record_servicenow_write_readiness(p_payload jsonb)
+returns table (
+  connection_id text,
+  configuration_fingerprint text,
+  tested_at timestamptz,
+  expires_at timestamptz,
+  test_status text,
+  safe_http_status integer,
+  safe_error_code text
+)
+language plpgsql
+security definer
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_connection public.servicenow_write_connections%rowtype;
+  v_tested_at timestamptz;
+  v_expires_at timestamptz;
+  v_updated_at timestamptz;
+  v_http_status integer;
+begin
+  if p_payload is null
+    or jsonb_typeof(p_payload) <> 'object'
+    or public.support_intake_json_has_unsafe_key(p_payload)
+    or exists (
+      select 1 from jsonb_object_keys(p_payload) supplied(key)
+      where supplied.key not in (
+        'connectionId','configurationFingerprint','testedAt','expiresAt',
+        'testStatus','safeHttpStatus','testedByUserId','safeErrorCode','updatedAt'
+      )
+    )
+    or length(btrim(coalesce(p_payload->>'connectionId',''))) not between 1 and 200
+    or p_payload->>'configurationFingerprint' !~ '^[a-f0-9]{64}$'
+    or p_payload->>'testStatus' not in ('succeeded','failed')
+    or length(btrim(coalesce(p_payload->>'testedByUserId',''))) not between 1 and 200
+    or (
+      nullif(p_payload->>'safeErrorCode','') is not null
+      and p_payload->>'safeErrorCode' !~ '^[A-Z0-9_]{1,80}$'
+    ) then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_READINESS_INVALID';
+  end if;
+  v_tested_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'testedAt', 'SERVICENOW_WRITE_READINESS_INVALID'
+  );
+  v_expires_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'expiresAt', 'SERVICENOW_WRITE_READINESS_INVALID'
+  );
+  v_updated_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'updatedAt', 'SERVICENOW_WRITE_READINESS_INVALID'
+  );
+  if p_payload->'safeHttpStatus' is null or p_payload->'safeHttpStatus' = 'null'::jsonb then
+    v_http_status := null;
+  else
+    v_http_status := public.support_servicenow_write_parse_integer(
+      p_payload->'safeHttpStatus', 'SERVICENOW_WRITE_READINESS_INVALID'
+    );
+  end if;
+  select * into v_connection
+  from public.servicenow_write_connections
+  where servicenow_write_connections.id = p_payload->>'connectionId'
+  for share;
+  if v_connection.id is null
+    or not v_connection.active
+    or v_connection.configuration_fingerprint <> p_payload->>'configurationFingerprint'
+    or v_updated_at < v_tested_at
+    or v_expires_at < v_tested_at
+    or v_expires_at > v_tested_at + interval '15 minutes'
+    or (
+      p_payload->>'testStatus' = 'succeeded'
+      and (
+        v_http_status is null
+        or v_http_status not between 200 and 299
+        or nullif(p_payload->>'safeErrorCode','') is not null
+        or v_expires_at = v_tested_at
+      )
+    )
+    or (
+      p_payload->>'testStatus' = 'failed'
+      and (
+        v_expires_at <> v_tested_at
+        or nullif(p_payload->>'safeErrorCode','') is null
+      )
+    ) then
+    raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_READINESS_INVALID';
+  end if;
+  insert into public.servicenow_write_readiness_proofs (
+    connection_id,configuration_fingerprint,tested_at,expires_at,test_status,
+    safe_http_status,tested_by_user_id,safe_error_code,updated_at
+  ) values (
+    v_connection.id,p_payload->>'configurationFingerprint',v_tested_at,v_expires_at,
+    p_payload->>'testStatus',v_http_status,p_payload->>'testedByUserId',
+    nullif(p_payload->>'safeErrorCode',''),v_updated_at
+  )
+  on conflict on constraint servicenow_write_readiness_proofs_pkey do update set
+    configuration_fingerprint=excluded.configuration_fingerprint,
+    tested_at=excluded.tested_at,expires_at=excluded.expires_at,
+    test_status=excluded.test_status,safe_http_status=excluded.safe_http_status,
+    tested_by_user_id=excluded.tested_by_user_id,
+    safe_error_code=excluded.safe_error_code,updated_at=excluded.updated_at;
+  return query
+  select readiness.connection_id,readiness.configuration_fingerprint,
+    readiness.tested_at,readiness.expires_at,readiness.test_status,
+    readiness.safe_http_status,readiness.safe_error_code
+  from public.servicenow_write_readiness_proofs readiness
+  where readiness.connection_id = v_connection.id;
 end;
 $$;
 
@@ -686,8 +994,6 @@ begin
       )
     )
     or jsonb_typeof(p_payload->'maxAttempts') <> 'number'
-    or p_payload->>'maxAttempts' !~ '^[0-9]+$'
-    or p_payload->>'createdAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or length(btrim(coalesce(p_payload->>'commandId',''))) not between 16 and 200
     or length(btrim(coalesce(p_payload->>'operationReference',''))) not between 1 and 500
     or p_payload->>'operationReference' !~ '^[A-Za-z0-9._:-]+$'
@@ -701,11 +1007,16 @@ begin
     or p_payload->>'commandType' not in ('create_incident','update_incident','add_comment','add_work_note') then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_COMMAND_INVALID';
   end if;
-  v_max_attempts := (p_payload->>'maxAttempts')::integer;
-  v_created_at := (p_payload->>'createdAt')::timestamptz;
+  v_max_attempts := public.support_servicenow_write_parse_integer(
+    p_payload->'maxAttempts', 'SERVICENOW_WRITE_COMMAND_INVALID'
+  );
+  v_created_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'createdAt', 'SERVICENOW_WRITE_COMMAND_INVALID'
+  );
   v_source_entity_reference := nullif(p_payload->>'sourceEntityReference','');
   if v_max_attempts not between 1 and 10
-    or (p_payload->>'sourceType' <> 'manual' and v_source_entity_reference is null) then
+    or (p_payload->>'sourceType' <> 'manual' and v_source_entity_reference is null)
+    or (v_source_entity_reference is not null and length(btrim(v_source_entity_reference)) not between 1 and 500) then
     raise exception using errcode = '22023', message = 'SERVICENOW_WRITE_COMMAND_INVALID';
   end if;
 
@@ -820,9 +1131,6 @@ begin
       )
     )
     or jsonb_typeof(p_payload->'expectedVersion')<>'number'
-    or p_payload->>'expectedVersion' !~ '^[0-9]+$'
-    or p_payload->>'issuedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
-    or p_payload->>'expiresAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or p_payload->>'confirmationNonceHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'expectedNormalizedPayloadHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'action' not in (
@@ -831,10 +1139,18 @@ begin
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
-  v_expected_version := (p_payload->>'expectedVersion')::integer;
-  v_issued_at := (p_payload->>'issuedAt')::timestamptz;
-  v_expires_at := (p_payload->>'expiresAt')::timestamptz;
-  if v_expires_at<=v_issued_at or v_expires_at>v_issued_at+interval '5 minutes' then
+  v_expected_version := public.support_servicenow_write_parse_integer(
+    p_payload->'expectedVersion', 'SERVICENOW_WRITE_CONFIRMATION_INVALID'
+  );
+  v_issued_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'issuedAt', 'SERVICENOW_WRITE_CONFIRMATION_INVALID'
+  );
+  v_expires_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'expiresAt', 'SERVICENOW_WRITE_CONFIRMATION_INVALID'
+  );
+  if v_expected_version < 1
+    or v_expires_at<=v_issued_at
+    or v_expires_at>v_issued_at+interval '5 minutes' then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
   select * into v_command from public.servicenow_write_commands
@@ -888,8 +1204,10 @@ declare
   v_attempt_number integer;
   v_mode text;
   v_retry boolean;
+  v_confirmed boolean;
   v_started_at timestamptz;
   v_expected_version integer;
+  v_readiness public.servicenow_write_readiness_proofs%rowtype;
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
     or public.support_intake_json_has_unsafe_key(p_payload)
@@ -902,25 +1220,40 @@ begin
       )
     )
     or jsonb_typeof(p_payload->'retry')<>'boolean'
-    or p_payload->>'startedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or p_payload->>'executionMode' not in ('dry_run','live','retry')
     or length(coalesce(p_payload->>'attemptId','')) not between 16 and 200 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_INVALID';
   end if;
   v_mode := p_payload->>'executionMode';
-  v_retry := (p_payload->>'retry')::boolean;
-  v_started_at := (p_payload->>'startedAt')::timestamptz;
+  v_retry := public.support_servicenow_write_parse_boolean(
+    p_payload->'retry', 'SERVICENOW_WRITE_ATTEMPT_INVALID'
+  );
+  v_started_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'startedAt', 'SERVICENOW_WRITE_ATTEMPT_INVALID'
+  );
   if v_mode<>'dry_run' and (
-    jsonb_typeof(p_payload->'confirmed')<>'boolean'
-    or p_payload->>'confirmed'<>'true'
+    not (p_payload ? 'confirmed')
+    or not (p_payload ? 'expectedVersion')
+    or not (p_payload ? 'expectedNormalizedPayloadHash')
+    or not (p_payload ? 'confirmationNonceHash')
+    or jsonb_typeof(p_payload->'confirmed')<>'boolean'
     or jsonb_typeof(p_payload->'expectedVersion')<>'number'
-    or p_payload->>'expectedVersion' !~ '^[0-9]+$'
     or p_payload->>'expectedNormalizedPayloadHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'confirmationNonceHash' !~ '^[a-f0-9]{64}$'
   ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
-  if v_mode<>'dry_run' then v_expected_version := (p_payload->>'expectedVersion')::integer; end if;
+  if v_mode<>'dry_run' then
+    v_confirmed := public.support_servicenow_write_parse_boolean(
+      p_payload->'confirmed', 'SERVICENOW_WRITE_CONFIRMATION_INVALID'
+    );
+    v_expected_version := public.support_servicenow_write_parse_integer(
+      p_payload->'expectedVersion', 'SERVICENOW_WRITE_CONFIRMATION_INVALID'
+    );
+    if not v_confirmed or v_expected_version < 1 then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
+    end if;
+  end if;
 
   select * into v_command from public.servicenow_write_commands
   where servicenow_write_commands.id=p_payload->>'commandId' for update;
@@ -929,6 +1262,22 @@ begin
   end if;
   if v_command.status='executing' then
     raise exception using errcode='55P03',message='SERVICENOW_WRITE_COMMAND_BUSY';
+  end if;
+  if v_mode <> 'dry_run' then
+    select * into v_readiness
+    from public.servicenow_write_readiness_proofs
+    where connection_id = v_command.connection_id
+    for share;
+    if v_readiness.connection_id is null
+      or v_readiness.test_status <> 'succeeded'
+      or v_readiness.configuration_fingerprint <> (
+        select configuration_fingerprint
+        from public.servicenow_write_connections
+        where id = v_command.connection_id
+      )
+      or v_readiness.expires_at <= v_started_at then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_READINESS_REQUIRED';
+    end if;
   end if;
   if v_started_at<v_command.created_at then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_CHRONOLOGY_INVALID';
@@ -1020,7 +1369,6 @@ begin
       )
     )
     or jsonb_typeof(p_payload->'retryAllowed')<>'boolean'
-    or p_payload->>'finishedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or p_payload->>'outcome' not in ('dry_run','succeeded','failed','uncertain')
     or p_payload->>'deliveryDisposition' not in (
       'definitely_not_sent','definitely_rejected','safe_to_retry',
@@ -1039,11 +1387,15 @@ begin
     or octet_length(coalesce(p_payload->'responseSummary','{}'::jsonb)::text)>8192 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
   end if;
-  v_finished_at := (p_payload->>'finishedAt')::timestamptz;
+  v_finished_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'finishedAt', 'SERVICENOW_WRITE_RESULT_INVALID'
+  );
   v_outcome := p_payload->>'outcome';
   v_disposition := p_payload->>'deliveryDisposition';
   v_failure_phase := nullif(p_payload->>'failurePhase','');
-  v_retry_allowed := (p_payload->>'retryAllowed')::boolean;
+  v_retry_allowed := public.support_servicenow_write_parse_boolean(
+    p_payload->'retryAllowed', 'SERVICENOW_WRITE_RESULT_INVALID'
+  );
   v_target_sys_id := nullif(p_payload->>'targetSysId','');
   v_target_number := nullif(p_payload->>'targetNumber','');
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
@@ -1060,10 +1412,9 @@ begin
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
   end if;
   if nullif(p_payload->>'nextRetryAt','') is not null then
-    if p_payload->>'nextRetryAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' then
-      raise exception using errcode='22023',message='SERVICENOW_WRITE_RETRY_TIME_INVALID';
-    end if;
-    v_next_retry_at := (p_payload->>'nextRetryAt')::timestamptz;
+    v_next_retry_at := public.support_servicenow_write_parse_timestamp(
+      p_payload->'nextRetryAt', 'SERVICENOW_WRITE_RETRY_TIME_INVALID'
+    );
   end if;
 
   select * into v_command from public.servicenow_write_commands
@@ -1170,6 +1521,8 @@ declare
   v_version_before integer;
   v_target_sys_id text;
   v_target_number text;
+  v_verification_acknowledged boolean;
+  v_verification_note text;
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
     or public.support_intake_json_has_unsafe_key(p_payload)
@@ -1178,14 +1531,12 @@ begin
       where supplied.key not in (
         'commandId','action','result','safeReadBackSummary','targetSysId','targetNumber',
         'actorUserId','requestId','checkedAt','confirmed','expectedVersion',
-        'expectedNormalizedPayloadHash','confirmationNonceHash'
+        'expectedNormalizedPayloadHash','confirmationNonceHash',
+        'verificationAcknowledged','verificationNote'
       )
     )
     or jsonb_typeof(p_payload->'confirmed')<>'boolean'
-    or p_payload->>'confirmed'<>'true'
     or jsonb_typeof(p_payload->'expectedVersion')<>'number'
-    or p_payload->>'expectedVersion' !~ '^[0-9]+$'
-    or p_payload->>'checkedAt' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
     or p_payload->>'expectedNormalizedPayloadHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'confirmationNonceHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'action' not in (
@@ -1199,12 +1550,45 @@ begin
   end if;
   v_action := p_payload->>'action';
   v_result := p_payload->>'result';
-  v_checked_at := (p_payload->>'checkedAt')::timestamptz;
-  v_expected_version := (p_payload->>'expectedVersion')::integer;
+  if not public.support_servicenow_write_parse_boolean(
+    p_payload->'confirmed', 'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+  ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
+  end if;
+  v_checked_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'checkedAt', 'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+  );
+  v_expected_version := public.support_servicenow_write_parse_integer(
+    p_payload->'expectedVersion', 'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+  );
+  if v_expected_version < 1 then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
+  end if;
   v_target_sys_id := nullif(p_payload->>'targetSysId','');
   v_target_number := nullif(p_payload->>'targetNumber','');
+  v_verification_note := nullif(btrim(p_payload->>'verificationNote'),'');
+  if v_action <> 'reconcile_by_read_back' then
+    v_verification_acknowledged := public.support_servicenow_write_parse_boolean(
+      p_payload->'verificationAcknowledged', 'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+    );
+  end if;
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
-    or (v_target_number is not null and v_target_number !~ '^[A-Za-z0-9_-]{1,80}$') then
+    or (v_target_number is not null and v_target_number !~ '^[A-Za-z0-9_-]{1,80}$')
+    or (
+      v_action <> 'reconcile_by_read_back'
+      and (
+        not v_verification_acknowledged
+        or length(coalesce(v_verification_note,'')) not between 1 and 500
+      )
+    )
+    or (
+      v_action = 'mark_succeeded_after_verification'
+      and (v_target_sys_id is null or v_target_number is null)
+    )
+    or (
+      v_action = 'mark_not_applied_after_verification'
+      and (v_target_sys_id is not null or v_target_number is not null)
+    ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_INVALID';
   end if;
   select * into v_command from public.servicenow_write_commands
@@ -1214,6 +1598,12 @@ begin
   end if;
   if v_command.status<>'reconciliation_required' then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED';
+  end if;
+  if (v_command.target_sys_id is not null and v_target_sys_id is not null
+      and v_command.target_sys_id <> v_target_sys_id)
+    or (v_command.target_number is not null and v_target_number is not null
+      and v_command.target_number <> v_target_number) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT';
   end if;
   if v_command.version<>v_expected_version
     or v_command.normalized_payload_hash<>p_payload->>'expectedNormalizedPayloadHash'
@@ -1276,6 +1666,21 @@ begin
     p_payload->>'actorUserId',nullif(p_payload->>'requestId',''),
     v_version_before,v_command.version,v_checked_at
   );
+  if v_status='succeeded' and v_command.source_type in ('supper_ticket','intake_conversation') then
+    insert into public.servicenow_ticket_links (
+      id,supper_ticket_id,intake_conversation_id,servicenow_sys_id,
+      servicenow_number,table_name,last_synced_at,created_at,updated_at
+    ) values (
+      'sn-link-'||public.support_intake_sha256_hex(v_command.target_table||':'||v_command.target_sys_id),
+      case when v_command.source_type='supper_ticket' then v_command.source_entity_reference else null end,
+      case when v_command.source_type='intake_conversation' then v_command.source_entity_reference else null end,
+      v_command.target_sys_id,v_command.target_number,v_command.target_table,
+      v_checked_at,v_checked_at,v_checked_at
+    )
+    on conflict (table_name,servicenow_sys_id) do update set
+      servicenow_number=excluded.servicenow_number,
+      last_synced_at=excluded.last_synced_at,updated_at=excluded.updated_at;
+  end if;
   return query select v_command.id,v_command.status,v_command.version,v_command.reconciliation_result;
 end;
 $$;
@@ -1348,7 +1753,11 @@ create trigger servicenow_write_reconciliation_append_only
 before update or delete on public.servicenow_write_reconciliation_events
 for each row execute function public.support_servicenow_write_block_reconciliation_change();
 
+revoke all privileges on function public.support_servicenow_write_parse_timestamp(jsonb,text) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_parse_integer(jsonb,text) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_parse_boolean(jsonb,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_segment(text) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_configuration_fingerprint(text,text,text,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_validate_mapping(text,jsonb) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_idempotency_hash(text,text,text,text,text,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_normalize(text,jsonb,jsonb,text) from public, anon, authenticated, service_role;
@@ -1364,6 +1773,9 @@ grant execute on function public.support_upsert_servicenow_write_connection(json
 revoke all privileges on function public.support_upsert_servicenow_write_mapping(jsonb) from public;
 revoke execute on function public.support_upsert_servicenow_write_mapping(jsonb) from anon, authenticated;
 grant execute on function public.support_upsert_servicenow_write_mapping(jsonb) to service_role;
+revoke all privileges on function public.support_record_servicenow_write_readiness(jsonb) from public;
+revoke execute on function public.support_record_servicenow_write_readiness(jsonb) from anon, authenticated;
+grant execute on function public.support_record_servicenow_write_readiness(jsonb) to service_role;
 revoke all privileges on function public.support_create_servicenow_write_command(jsonb) from public;
 revoke execute on function public.support_create_servicenow_write_command(jsonb) from anon, authenticated;
 grant execute on function public.support_create_servicenow_write_command(jsonb) to service_role;
@@ -1381,18 +1793,22 @@ revoke execute on function public.support_reconcile_servicenow_write_command(jso
 grant execute on function public.support_reconcile_servicenow_write_command(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.1 authoritative command ledger. Direct service-role mutation is denied.';
+  'AI-2.0.2 authoritative command ledger. Direct service-role mutation is denied.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.1 attempt ledger with explicit delivery disposition and uncertain outcome.';
+  'AI-2.0.2 attempt ledger with explicit delivery disposition and uncertain outcome.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.1 immutable administrator reconciliation history.';
+  'AI-2.0.2 immutable administrator reconciliation history.';
+comment on table public.servicenow_write_readiness_proofs is
+  'AI-2.0.2 short-lived sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.1 validates payload/mapping and recomputes command identity before persistence.';
+  'AI-2.0.2 validates payload/mapping and recomputes replay-stable command identity before persistence.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.1 consumes one-time confirmation and records mutation-free reconciliation.';
+  'AI-2.0.2 consumes one-time confirmation and records verified, mutation-free reconciliation.';
+comment on function public.support_record_servicenow_write_readiness(jsonb) is
+  'AI-2.0.2 persists bounded sanitized GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.1 controlled ServiceNow write kernel',null,current_user)
+values ('202607230001','AI-2.0.2 controlled ServiceNow write kernel',null,current_user)
 on conflict (version) do nothing;
 
 commit;

@@ -208,16 +208,16 @@ order by routine_name, grantee;
 
 Expected: versions `202607220001` through `202607220004`; `attachment_hash_integrity_failures=0`; `legacy_delivery_triggers=0`; only `service_role` can execute the three public acceptance RPC generations; neither private implementation is directly executable. No table is dropped, no intake row or lifecycle state is deleted, and no provider operation is performed.
 
-## Applying AI-2.0.1 ServiceNow write kernel
+## Applying AI-2.0.2 ServiceNow write kernel
 
 Migration `202607230001_servicenow_write_kernel.sql` was amended before first remote application. Evidence from the audited development sequence showed the migration was created locally, remote execution was explicitly deferred, and no remote SQL command applied it. If version `202607230001` is already present on a target, stop and create a reviewed forward-only correction instead of running this amended file.
 
-The migration records version `202607230001`, creates six RLS-protected write-kernel tables, and exposes validated configuration, mapping, command, confirmation, attempt, and reconciliation RPCs. `service_role` can select ledger rows but cannot directly insert, update, or delete them. It contains no credentials, does not alter existing intake or read-side synchronization rows, and performs no ServiceNow request.
+The migration records version `202607230001`, creates seven RLS-protected write-kernel tables including short-lived readiness proofs, and exposes validated configuration, mapping, readiness, command, confirmation, attempt, and reconciliation RPCs. It was amended in place only because explicit delivery history proves this version has never been remotely applied. `service_role` can select ledger rows but cannot directly insert, update, or delete them. It contains no credentials, does not alter existing intake or read-side synchronization rows, and performs no ServiceNow request.
 
 1. Confirm versions `202607220001` through `202607220004` are present, confirm `202607230001` is absent, and take the normal dev recovery checkpoint.
 2. From the exact source revision run the full acceptance suite, including `npm run verify:migrations`, `npm run verify:architecture`, and `npm run verify:servicenow-write-sql`.
 3. In the isolated dev SQL Editor, paste and execute the complete unmodified migration once. Do not concatenate it with another migration, apply it through REST, or target production.
-4. Confirm version `202607230001`, RLS on all six write tables, select-only table grants for `service_role`, and privileged RPC execution only for `service_role`.
+4. Confirm version `202607230001`, RLS on all seven write tables, select-only table grants for `service_role`, and privileged RPC execution only for `service_role`, including `support_record_servicenow_write_readiness(jsonb)`.
 5. Deploy the exact `ai_development` revision with live writes disabled and follow the smoke sequence in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
 
 After application this migration is immutable. Correct future defects with a new forward-only migration; never drop command, attempt, Ticket-link, or reconciliation history as a rollback mechanism. Full verification queries and Preview smoke steps are in [Controlled ServiceNow Write Kernel](servicenow-write-kernel.md).
