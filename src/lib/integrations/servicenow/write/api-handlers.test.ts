@@ -11,6 +11,7 @@ import {
   handleServiceNowWriteManualOperationPost,
   handleServiceNowWriteReadinessPost,
   handleServiceNowWriteReconciliationPost,
+  handleServiceNowWriteAttemptRecoveryPost,
 } from "./api-handlers";
 import type { ServiceNowWriteRepository } from "./repository";
 import type { ServiceNowWriteCommandSummary } from "./types";
@@ -274,6 +275,48 @@ describe("ServiceNow write API security", () => {
       expect.objectContaining({
         action: "mark_not_applied_after_verification",
         mutationCandidateRiskAcknowledged: true,
+      }),
+      { repository },
+    );
+  });
+
+  it("protects and forwards stuck-attempt recovery confirmation", async () => {
+    const recover = vi.fn(async () => summary({
+      version: 2,
+      status: "reconciliation_required",
+    }));
+    const body = {
+      ...confirmationBody(),
+      mutationCandidateEventId: `sn-candidate-${"c".repeat(64)}`,
+    };
+    const forbidden = await handleServiceNowWriteAttemptRecoveryPost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      commandId,
+      { getSession: async () => support, repository, recover },
+    );
+    const recovered = await handleServiceNowWriteAttemptRecoveryPost(
+      new Request(`https://app.test/api/integrations/servicenow/write/commands/${commandId}/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      commandId,
+      { getSession: async () => admin, repository, recover },
+    );
+    expect(forbidden.status).toBe(403);
+    expect(recovered.status).toBe(200);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId,
+        session: admin,
+        confirmation: expect.objectContaining({
+          mutationCandidateEventId: `sn-candidate-${"c".repeat(64)}`,
+        }),
       }),
       { repository },
     );

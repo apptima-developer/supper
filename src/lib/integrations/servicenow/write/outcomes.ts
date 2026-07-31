@@ -3,6 +3,7 @@ import type {
   ServiceNowSafeResponseSummary,
   ServiceNowWriteDeliveryDisposition,
   ServiceNowWriteFailurePhase,
+  ServiceNowWriteMutationCandidateProofStatus,
 } from "./types";
 
 export type ServiceNowWriteExecutionError = IntegrationBoundaryError & {
@@ -13,6 +14,7 @@ export type ServiceNowWriteExecutionError = IntegrationBoundaryError & {
   readonly mutationCandidateSysId?: string;
   readonly mutationCandidateNumber?: string;
   readonly mutationHttpStatus?: number;
+  readonly mutationCandidateProofStatus?: ServiceNowWriteMutationCandidateProofStatus;
   readonly safeResponseSummary?: ServiceNowSafeResponseSummary;
 };
 
@@ -26,6 +28,7 @@ export function serviceNowWriteExecutionError(
     mutationCandidateSysId?: string;
     mutationCandidateNumber?: string;
     mutationHttpStatus?: number;
+    mutationCandidateProofStatus?: ServiceNowWriteMutationCandidateProofStatus;
     safeResponseSummary?: ServiceNowSafeResponseSummary;
   },
 ) {
@@ -37,6 +40,10 @@ export function serviceNowWriteExecutionError(
     mutationCandidateSysId: { value: outcome.mutationCandidateSysId, enumerable: false },
     mutationCandidateNumber: { value: outcome.mutationCandidateNumber, enumerable: false },
     mutationHttpStatus: { value: outcome.mutationHttpStatus, enumerable: false },
+    mutationCandidateProofStatus: {
+      value: outcome.mutationCandidateProofStatus,
+      enumerable: false,
+    },
     safeResponseSummary: { value: outcome.safeResponseSummary, enumerable: false },
   });
   return error as ServiceNowWriteExecutionError;

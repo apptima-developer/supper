@@ -21,6 +21,7 @@ import {
   getServiceNowWriteOperationsSummary,
   listCommands,
   reconcileCommand,
+  recoverStuckAttempt,
   retryCommand,
   testServiceNowWriteReadiness,
 } from "./service";
@@ -85,6 +86,13 @@ const mutationCandidate = {
   httpStatus: 201,
   observedAt: "2026-07-23T01:04:00.000Z",
   source: "mutation_response" as const,
+};
+const ledgerMutationCandidate = {
+  ...mutationCandidate,
+  id: `sn-candidate-${"c".repeat(64)}`,
+  attemptId: "attempt-ledger-event-0001",
+  attemptNumber: 1,
+  proofStatus: "marker_verification_unavailable" as const,
 };
 const auditFixture: Audit = {
   id: "audit-id",
@@ -759,6 +767,70 @@ describe("ServiceNow write service", () => {
       },
       confirmationNonceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+  });
+
+  it("recovers a stuck attempt through the ledger without loading provider runtime", async () => {
+    const recoverAttempt = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "reconciliation_required" as const,
+      command_attempt_count: 1,
+      command_version: 3,
+    }));
+    const getCommand = vi.fn(async () => commandSummary({
+      version: 3,
+      status: "reconciliation_required",
+      attemptCount: 1,
+    }));
+    const result = await recoverStuckAttempt({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-recover-stuck-0001",
+      confirmation: {
+        ...confirmation,
+        mutationCandidateEventId: ledgerMutationCandidate.id,
+      },
+    }, {
+      env,
+      repository: { recoverAttempt, getCommand } as unknown as ServiceNowWriteRepository,
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:06:00.000Z"),
+    });
+    expect(result.status).toBe("reconciliation_required");
+    expect(recoverAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      commandId: "command-id-0000000001",
+      actorUserId: "admin-id",
+      mutationCandidateEventId: ledgerMutationCandidate.id,
+      confirmationNonceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+  });
+
+  it("rejects stale candidate identity before reconciliation reaches the ledger RPC", async () => {
+    const reconcile = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-stale-candidate-0001",
+      correlationId: "request-stale-candidate-0001",
+      confirmation: {
+        ...confirmation,
+        mutationCandidateEventId: `sn-candidate-${"d".repeat(64)}`,
+      },
+      mutationCandidateEventId: `sn-candidate-${"d".repeat(64)}`,
+      verifiedTargetSysId: ledgerMutationCandidate.sysId,
+      verifiedTargetNumber: ledgerMutationCandidate.number,
+      verificationAcknowledged: true,
+      verificationNote: "Independent candidate verification completed.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        getMutationCandidate: vi.fn(async () => ledgerMutationCandidate),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      audit: async () => auditFixture,
+    })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE" });
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("keeps an exact target with inconclusive mutation evidence unresolved", async () => {

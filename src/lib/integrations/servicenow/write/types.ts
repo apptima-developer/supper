@@ -79,6 +79,17 @@ export const serviceNowWriteReconciliationResults = [
 ] as const;
 export type ServiceNowWriteReconciliationResult = (typeof serviceNowWriteReconciliationResults)[number];
 
+export const serviceNowWriteMutationCandidateProofStatuses = [
+  "marker_verified",
+  "marker_not_verified",
+  "marker_not_found",
+  "marker_ambiguous",
+  "marker_target_conflict",
+  "marker_verification_unavailable",
+] as const;
+export type ServiceNowWriteMutationCandidateProofStatus =
+  (typeof serviceNowWriteMutationCandidateProofStatuses)[number];
+
 export type ServiceNowCreateIncidentInput = {
   shortDescription: string;
   description: string;
@@ -163,6 +174,7 @@ export type ServiceNowSafeResponseSummary = {
   number?: string;
   state?: string;
   recoveredByCorrelationMarker?: boolean;
+  providerWritePerformed?: boolean;
   mutationCandidateObserved?: boolean;
   candidateSysId?: string;
   candidateNumber?: string;
@@ -172,11 +184,17 @@ export type ServiceNowSafeResponseSummary = {
 };
 
 export type ServiceNowWriteMutationCandidate = {
+  id: string;
+  attemptId: string;
+  attemptNumber: number;
   sysId: string;
   number: string;
   httpStatus: number;
   observedAt: string;
   source: "mutation_response";
+  proofStatus: ServiceNowWriteMutationCandidateProofStatus;
+  resolutionState: "current_unresolved" | "confirmed_succeeded" | "confirmed_not_applied";
+  reconciliationResult?: ServiceNowWriteReconciliationResult;
 };
 
 export type ServiceNowWriteAdapterResult = {
@@ -184,7 +202,10 @@ export type ServiceNowWriteAdapterResult = {
   responseSummary: ServiceNowSafeResponseSummary;
   targetSysId: string;
   targetNumber: string;
-  mutationCandidate?: Omit<ServiceNowWriteMutationCandidate, "observedAt">;
+  mutationCandidate?: Pick<
+    ServiceNowWriteMutationCandidate,
+    "sysId" | "number" | "httpStatus" | "source" | "proofStatus"
+  >;
 };
 
 export type ServiceNowWriteReadBackResult = {
@@ -222,6 +243,7 @@ export type ServiceNowWriteAttemptSummary = {
 
 export type ServiceNowWriteReconciliationEventSummary = {
   id: string;
+  mutationCandidateEventId?: string;
   action: ServiceNowWriteReconciliationAction;
   result: ServiceNowWriteReconciliationResult;
   evidenceClassification: ServiceNowWriteEvidenceClassification;
@@ -244,6 +266,7 @@ export type ServiceNowWriteCommandSummary = {
   targetSysId?: string;
   targetNumber?: string;
   mutationCandidate?: ServiceNowWriteMutationCandidate;
+  mutationCandidateHistory?: ServiceNowWriteMutationCandidate[];
   commandMaterialHash: string;
   normalizedPayloadHash: string;
   providerCorrelationMarker?: string;
@@ -271,6 +294,7 @@ export type ServiceNowWriteCommandSummary = {
   normalizedPreview?: ServiceNowWritePreview;
   attempts?: ServiceNowWriteAttemptSummary[];
   reconciliationHistory?: ServiceNowWriteReconciliationEventSummary[];
+  recoveryHistory?: ServiceNowWriteAttemptRecoverySummary[];
   auditWarning?: "secondary_audit_write_failed";
 };
 
@@ -305,9 +329,20 @@ export type ServiceNowWriteOperationsSummary = {
 
 export type ServiceNowWriteConfirmation = {
   confirmationNonce: string;
-  action: "execute" | "retry" | ServiceNowWriteReconciliationAction;
+  action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction;
   commandId: string;
   expectedVersion: number;
   expectedNormalizedPayloadHash: string;
+  mutationCandidateEventId?: string;
   expiresAt: string;
+};
+
+export type ServiceNowWriteAttemptRecoverySummary = {
+  id: string;
+  attemptId: string;
+  attemptNumber: number;
+  actorUserId: string;
+  commandVersionBefore: number;
+  commandVersionAfter: number;
+  createdAt: string;
 };

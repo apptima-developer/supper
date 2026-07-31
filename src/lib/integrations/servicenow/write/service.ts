@@ -58,6 +58,7 @@ type ConfirmedAction = {
   expectedVersion: number;
   expectedNormalizedPayloadHash: string;
   confirmationNonce: string;
+  mutationCandidateEventId?: string;
 };
 
 function digest(value: string) {
@@ -126,6 +127,9 @@ function operationalError(error: unknown): never {
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED", "ServiceNow write command does not require reconciliation");
   if (message.includes("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the ServiceNow write command");
   if (message.includes("SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT", "Verified target conflicts with the recorded ServiceNow mutation candidate");
+  if (message.includes("SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE")) throw new HttpError(409, "SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE", "The reviewed ServiceNow mutation candidate is no longer current");
+  if (message.includes("SERVICENOW_WRITE_ATTEMPT_FINISH_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_FINISH_CONFLICT", "The ServiceNow write attempt was already finalized with different terminal material");
+  if (message.includes("SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED", "The ServiceNow write attempt is not eligible for manual recovery");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID", "ServiceNow write reconciliation evidence does not support this decision");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_INVALID")) throw new HttpError(400, "SERVICENOW_WRITE_RECONCILIATION_INVALID", "ServiceNow write reconciliation evidence is invalid");
   if (message.includes("SERVICENOW_WRITE_DRY_RUN_NOT_ALLOWED")
@@ -142,7 +146,7 @@ function operationalError(error: unknown): never {
 async function auditBestEffort(
   command: ServiceNowWriteCommandSummary,
   session: Session,
-  event: "created" | "dry_run" | "executed" | "retried" | "reconciled",
+  event: "created" | "dry_run" | "executed" | "retried" | "reconciled" | "recovered",
   requestId: string,
   audit: AuditWriter,
 ) {
@@ -468,6 +472,7 @@ async function execute(
         mutationCandidateNumber: result.mutationCandidate.number,
         mutationCandidateHttpStatus: result.mutationCandidate.httpStatus,
         mutationCandidateSource: result.mutationCandidate.source,
+        mutationCandidateProofStatus: result.mutationCandidate.proofStatus,
       } : {}),
       errorCode: "",
       errorMessage: "",
@@ -518,6 +523,8 @@ async function execute(
             mutationCandidateNumber: error.mutationCandidateNumber,
             mutationCandidateHttpStatus: error.mutationHttpStatus,
             mutationCandidateSource: "mutation_response",
+            mutationCandidateProofStatus: error.mutationCandidateProofStatus
+              || "marker_verification_unavailable",
           } : {}),
         errorCode: safeErrorCode,
         errorMessage: safeErrorMessage,
@@ -576,6 +583,7 @@ export async function issueCommandConfirmation(
     action: ServiceNowWriteConfirmation["action"];
     expectedVersion: number;
     expectedNormalizedPayloadHash: string;
+    mutationCandidateEventId?: string;
     session: Session;
   },
   dependencies: Dependencies = {},
@@ -592,6 +600,9 @@ export async function issueCommandConfirmation(
       actorUserId: input.session.userId,
       expectedVersion: input.expectedVersion,
       expectedNormalizedPayloadHash: input.expectedNormalizedPayloadHash,
+      ...(input.mutationCandidateEventId
+        ? { mutationCandidateEventId: input.mutationCandidateEventId }
+        : {}),
       confirmationNonceHash: hashServiceNowWriteConfirmationNonce(nonce),
       expiresAt,
       issuedAt: issuedAt.toISOString(),
@@ -602,6 +613,7 @@ export async function issueCommandConfirmation(
       commandId: stored.command_id,
       expectedVersion: stored.command_version,
       expectedNormalizedPayloadHash: stored.normalized_payload_hash,
+      mutationCandidateEventId: stored.mutation_candidate_event_id || undefined,
       expiresAt: stored.confirmation_expires_at,
     };
   } catch (error) {
@@ -622,6 +634,7 @@ export async function reconcileCommand(
     verificationAcknowledged?: true;
     duplicateJournalRiskAcknowledged?: true;
     mutationCandidateRiskAcknowledged?: true;
+    mutationCandidateEventId?: string;
     verificationNote?: string;
     abortSignal?: AbortSignal;
   },
@@ -633,6 +646,14 @@ export async function reconcileCommand(
   const mutationCandidate = typeof repository.getMutationCandidate === "function"
     ? await repository.getMutationCandidate(input.commandId)
     : undefined;
+  if ((mutationCandidate?.id || input.mutationCandidateEventId)
+    && mutationCandidate?.id !== input.mutationCandidateEventId) {
+    throw new HttpError(
+      409,
+      "SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE",
+      "The reviewed ServiceNow mutation candidate is no longer current",
+    );
+  }
   const checkedAt = (dependencies.now || (() => new Date()))().toISOString();
   let reconciliationResult: ServiceNowWriteReconciliationResult = input.action === "mark_succeeded_after_verification"
     ? "confirmed_succeeded"
@@ -915,6 +936,7 @@ export async function reconcileCommand(
         verificationNote: input.verificationNote,
       }),
       actorUserId: input.session.userId,
+      mutationCandidateEventId: mutationCandidate?.id,
       requestId: input.requestId,
       checkedAt,
       confirmed: input.confirmation.confirmed,
@@ -925,6 +947,47 @@ export async function reconcileCommand(
     const command = await repository.getCommand(input.commandId, true);
     if (!command) throw new Error("ServiceNow write command disappeared after reconciliation");
     return auditBestEffort(command, input.session, "reconciled", input.requestId, dependencies.audit || writeAudit);
+  } catch (error) {
+    operationalError(error);
+  }
+}
+
+export async function recoverStuckAttempt(
+  input: {
+    commandId: string;
+    session: Session;
+    requestId: string;
+    confirmation: ConfirmedAction;
+  },
+  dependencies: Dependencies = {},
+) {
+  const { repository } = await ledgerRuntime(dependencies);
+  const recoveredAt = (dependencies.now || (() => new Date()))().toISOString();
+  try {
+    await repository.recoverAttempt({
+      commandId: input.commandId,
+      actorUserId: input.session.userId,
+      requestId: input.requestId,
+      recoveredAt,
+      confirmed: input.confirmation.confirmed,
+      expectedVersion: input.confirmation.expectedVersion,
+      expectedNormalizedPayloadHash: input.confirmation.expectedNormalizedPayloadHash,
+      confirmationNonceHash: hashServiceNowWriteConfirmationNonce(
+        input.confirmation.confirmationNonce,
+      ),
+      ...(input.confirmation.mutationCandidateEventId
+        ? { mutationCandidateEventId: input.confirmation.mutationCandidateEventId }
+        : {}),
+    });
+    const command = await repository.getCommand(input.commandId, true);
+    if (!command) throw new Error("ServiceNow write command disappeared after recovery");
+    return auditBestEffort(
+      command,
+      input.session,
+      "recovered",
+      input.requestId,
+      dependencies.audit || writeAudit,
+    );
   } catch (error) {
     operationalError(error);
   }

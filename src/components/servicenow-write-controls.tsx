@@ -163,7 +163,7 @@ export function ServiceNowWriteControls() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<{
     command: ServiceNowWriteCommandSummary;
-    action: "execute" | "retry" | ServiceNowWriteReconciliationAction;
+    action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction;
   }>();
   const [verifiedTargetSysId, setVerifiedTargetSysId] = useState("");
   const [verifiedTargetNumber, setVerifiedTargetNumber] = useState("");
@@ -268,7 +268,7 @@ export function ServiceNowWriteControls() {
 
   async function confirmedAction(
     command: ServiceNowWriteCommandSummary,
-    action: "execute" | "retry" | ServiceNowWriteReconciliationAction,
+    action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction,
   ) {
     const confirmation = await api<ServiceNowWriteConfirmation>(
       `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}/confirmation`,
@@ -279,12 +279,20 @@ export function ServiceNowWriteControls() {
           action,
           expectedVersion: command.version,
           expectedNormalizedPayloadHash: command.normalizedPayloadHash,
+          ...(command.mutationCandidate
+            ? { mutationCandidateEventId: command.mutationCandidate.id }
+            : {}),
         }),
       },
     );
     const reconciliation = action.startsWith("reconcile_") || action.startsWith("mark_");
+    const endpoint = reconciliation
+      ? "reconcile"
+      : action === "recover_stuck_attempt"
+        ? "recover"
+        : action;
     return api<ServiceNowWriteCommandSummary>(
-      `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}/${reconciliation ? "reconcile" : action}`,
+      `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}/${endpoint}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -293,6 +301,9 @@ export function ServiceNowWriteControls() {
           expectedVersion: confirmation.expectedVersion,
           expectedNormalizedPayloadHash: confirmation.expectedNormalizedPayloadHash,
           confirmationNonce: confirmation.confirmationNonce,
+          ...(confirmation.mutationCandidateEventId
+            ? { mutationCandidateEventId: confirmation.mutationCandidateEventId }
+            : {}),
           ...(reconciliation ? {
             action,
             ...(action === "mark_succeeded_after_verification" ? {
@@ -318,7 +329,7 @@ export function ServiceNowWriteControls() {
 
   async function commandAction(
     command: ServiceNowWriteCommandSummary,
-    action: "dry-run" | "execute" | "retry" | ServiceNowWriteReconciliationAction,
+    action: "dry-run" | "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction,
   ) {
     setBusy(action);
     setPendingAction(undefined);
@@ -376,7 +387,7 @@ export function ServiceNowWriteControls() {
 
   function openConfirmedAction(
     command: ServiceNowWriteCommandSummary,
-    action: "execute" | "retry" | ServiceNowWriteReconciliationAction,
+    action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction,
   ) {
     setVerifiedTargetSysId(command.mutationCandidate?.sysId || command.targetSysId || "");
     setVerifiedTargetNumber(command.mutationCandidate?.number || command.targetNumber || "");
@@ -536,12 +547,14 @@ export function ServiceNowWriteControls() {
               <div><span className="text-slate-500">Read-back</span><p className="mt-1 font-semibold">{selected.reconciliationResult || "Not checked"}</p></div>
             </div>
             {selected.mutationCandidate && <div className="rounded-xl border border-rose-300 bg-rose-50/80 p-3 text-rose-900 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-100">
-              <p className="font-semibold">Mutation candidate, not a confirmed target</p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <p className="font-semibold">Current unresolved candidate, not a confirmed target</p>
+              <p className="mt-1 break-all font-mono text-[10px] opacity-80">{selected.mutationCandidate.id}</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                <div><span className="opacity-70">Attempt</span><p className="mt-1 font-semibold">#{selected.mutationCandidate.attemptNumber}</p></div>
                 <div><span className="opacity-70">Incident</span><p className="mt-1 font-semibold">{selected.mutationCandidate.number}</p></div>
                 <div><span className="opacity-70">sys_id</span><p className="mt-1 break-all font-mono">{selected.mutationCandidate.sysId}</p></div>
                 <div><span className="opacity-70">Mutation HTTP</span><p className="mt-1 font-semibold">{selected.mutationCandidate.httpStatus}</p></div>
-                <div><span className="opacity-70">Post-write proof</span><p className="mt-1 font-semibold">{selected.safeResponseSummary.postWriteMarkerVerified === true ? "Verified" : "Not verified"}</p></div>
+                <div><span className="opacity-70">Proof</span><p className="mt-1 font-semibold">{selected.mutationCandidate.proofStatus}</p></div>
               </div>
               <p className="mt-2 text-[10px] opacity-80">Observed {timestamp(selected.mutationCandidate.observedAt)} from the bounded mutation response.</p>
             </div>}
@@ -561,15 +574,28 @@ export function ServiceNowWriteControls() {
             {attempt.safeErrorCode && <p className="mt-2 text-rose-600">{attempt.safeErrorCode}: {attempt.safeErrorMessage}</p>}
             {(attempt.failurePhase || attempt.deliveryDisposition) && <p className="mt-2 text-slate-500">{attempt.failurePhase || "-"} · {attempt.deliveryDisposition || "-"} · retry {attempt.retryAllowed ? "allowed" : "blocked"}</p>}
           </div>)}{!selected.attempts?.length && <p className="text-slate-400">No attempt recorded yet.</p>}</div></div>
+          <div><p className="mb-2 font-semibold">Candidate history</p><div className="space-y-2">{selected.mutationCandidateHistory?.map((candidate) => <div key={candidate.id} className="rounded-xl border border-sky-100 bg-sky-50/30 p-3 dark:border-slate-700 dark:bg-slate-900/30">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><Badge tone={candidate.resolutionState === "current_unresolved" ? "rose" : candidate.resolutionState === "confirmed_succeeded" ? "emerald" : "blue"}>{candidate.resolutionState.replaceAll("_", " ")}</Badge><span className="ml-2">Attempt #{candidate.attemptNumber} · {candidate.number}</span></div>
+              <span className="text-slate-400">{timestamp(candidate.observedAt)}</span>
+            </div>
+            <p className="mt-2 break-all font-mono text-[10px] text-slate-500">{candidate.id} · {candidate.sysId}</p>
+            <p className="mt-1 text-slate-500">HTTP {candidate.httpStatus} · {candidate.proofStatus}{candidate.reconciliationResult ? ` · ${candidate.reconciliationResult}` : ""}</p>
+          </div>)}{!selected.mutationCandidateHistory?.length && <p className="text-slate-400">No mutation candidate observed.</p>}</div></div>
           <div><p className="mb-2 font-semibold">Reconciliation history</p><div className="space-y-2">{selected.reconciliationHistory?.map((event) => <div key={event.id} className="rounded-xl border border-amber-100 bg-amber-50/40 p-3 dark:border-amber-900 dark:bg-amber-950/10">
             <div className="flex flex-wrap items-center justify-between gap-2"><div><Badge tone={event.result === "confirmed_succeeded" ? "emerald" : event.result === "confirmed_not_applied" ? "blue" : "amber"}>{event.result}</Badge><span className="ml-2">{event.action.replaceAll("_", " ")} · {event.evidenceClassification}</span></div><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
-            <p className="mt-2 text-slate-500">Command version {event.commandVersionBefore} → {event.commandVersionAfter}</p>
+            <p className="mt-2 text-slate-500">Command version {event.commandVersionBefore} → {event.commandVersionAfter}{event.mutationCandidateEventId ? ` · Candidate ${event.mutationCandidateEventId}` : ""}</p>
             {Object.keys(event.safeReadBackSummary).length > 0 && <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-slate-950 p-2 text-[10px] leading-5 text-amber-100">{JSON.stringify(event.safeReadBackSummary, null, 2)}</pre>}
           </div>)}{!selected.reconciliationHistory?.length && <p className="text-slate-400">No reconciliation decision recorded.</p>}</div></div>
+          {Boolean(selected.recoveryHistory?.length) && <div><p className="mb-2 font-semibold">Attempt recovery history</p><div className="space-y-2">{selected.recoveryHistory?.map((event) => <div key={event.id} className="rounded-xl border border-rose-100 bg-rose-50/30 p-3 dark:border-rose-900 dark:bg-rose-950/10">
+            <div className="flex flex-wrap items-center justify-between gap-2"><span>Attempt #{event.attemptNumber} recovered without a provider mutation</span><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
+            <p className="mt-1 text-slate-500">Command version {event.commandVersionBefore} → {event.commandVersionAfter}</p>
+          </div>)}</div></div>}
           <div className="flex flex-wrap justify-end gap-2">
             {["validated", "dry_run_ready"].includes(selected.status) && <Button variant="outline" onClick={() => commandAction(selected, "dry-run")} disabled={!!busy}><ShieldCheck size={14} />Dry run</Button>}
             {["validated", "dry_run_ready"].includes(selected.status) && <Button onClick={() => { setDetailOpen(false); openConfirmedAction(selected, "execute"); }} disabled={!!busy || !summary?.readiness.liveWriteReady}><Play size={14} />Execute live</Button>}
             {selected.status === "retry_scheduled" && selected.retryAllowed && summary?.readiness.liveWriteReady && <Button onClick={() => openConfirmedAction(selected, "retry")} disabled={!!busy || selected.attemptCount >= selected.maxAttempts}><RotateCcw size={14} />Manual retry</Button>}
+            {selected.status === "executing" && <Button variant="outline" onClick={() => openConfirmedAction(selected, "recover_stuck_attempt")} disabled={!!busy}><TriangleAlert size={14} />Recover stuck Attempt</Button>}
           </div>
         </div>}
       </DialogContent>
@@ -586,6 +612,12 @@ export function ServiceNowWriteControls() {
             {(pendingAction.action === "mark_succeeded_after_verification"
               || pendingAction.action === "mark_not_applied_after_verification")
               && <p className="mt-2 font-medium">This records a reviewed outcome and never resends the ServiceNow mutation.</p>}
+            {pendingAction.action === "recover_stuck_attempt" && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">
+              This closes the executing Attempt as uncertain, records immutable recovery history, and performs no ServiceNow request. The command will require reconciliation.
+            </p>}
+            {pendingAction.command.mutationCandidate && <p className="mt-2 break-all font-mono text-[10px]">
+              Current candidate event: {pendingAction.command.mutationCandidate.id}
+            </p>}
             {pendingAction.action === "mark_not_applied_after_verification"
               && ["add_comment", "add_work_note"].includes(pendingAction.command.commandType)
               && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">

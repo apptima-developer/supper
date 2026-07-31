@@ -6,6 +6,7 @@ import { buildServiceNowWritePreview } from "./normalization";
 import {
   normalizedServiceNowWriteCommandSchema,
   serviceNowWriteAttemptRowSchema,
+  serviceNowWriteAttemptRecoveryRowSchema,
   serviceNowWriteCommandRowSchema,
   serviceNowWriteCommandTypeSchema,
   serviceNowWriteMutationCandidateRowSchema,
@@ -16,6 +17,7 @@ import {
 } from "./schemas";
 import type {
   ServiceNowWriteAttemptSummary,
+  ServiceNowWriteAttemptRecoverySummary,
   ServiceNowWriteCommandSummary,
   ServiceNowWriteCommandType,
   ServiceNowWriteMutationCandidate,
@@ -87,7 +89,9 @@ export function safeServiceNowWriteCommand(
     includePreview?: boolean;
     attempts?: ServiceNowWriteAttemptSummary[];
     mutationCandidate?: ServiceNowWriteMutationCandidate;
+    mutationCandidateHistory?: ServiceNowWriteMutationCandidate[];
     reconciliationHistory?: ServiceNowWriteCommandSummary["reconciliationHistory"];
+    recoveryHistory?: ServiceNowWriteAttemptRecoverySummary[];
   } = {},
 ): ServiceNowWriteCommandSummary {
   const row = parsePersisted(serviceNowWriteCommandRowSchema, input);
@@ -107,6 +111,9 @@ export function safeServiceNowWriteCommand(
     targetSysId: row.target_sys_id || undefined,
     targetNumber: row.target_number || undefined,
     ...(options.mutationCandidate ? { mutationCandidate: options.mutationCandidate } : {}),
+    ...(options.mutationCandidateHistory
+      ? { mutationCandidateHistory: options.mutationCandidateHistory }
+      : {}),
     commandMaterialHash: row.command_material_hash,
     normalizedPayloadHash: row.normalized_payload_hash,
     providerCorrelationMarker: row.provider_correlation_marker || undefined,
@@ -134,6 +141,7 @@ export function safeServiceNowWriteCommand(
     ...(normalized ? { normalizedPreview: buildServiceNowWritePreview(normalized) } : {}),
     ...(options.attempts ? { attempts: options.attempts } : {}),
     ...(options.reconciliationHistory ? { reconciliationHistory: options.reconciliationHistory } : {}),
+    ...(options.recoveryHistory ? { recoveryHistory: options.recoveryHistory } : {}),
   };
 }
 
@@ -173,6 +181,7 @@ const confirmationResultSchema = z.object({
   command_id: z.string(),
   command_version: z.number().int().positive(),
   normalized_payload_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  mutation_candidate_event_id: z.string().nullable().optional(),
   confirmation_expires_at: z.string().datetime({ offset: true }),
 });
 
@@ -211,22 +220,42 @@ const attemptSelect = [
   "reconciliation_reason", "safe_error_code", "safe_error_message", "started_at", "finished_at",
 ].join(",");
 const reconciliationSelect = [
-  "id", "action", "result", "evidence_classification", "safe_read_back_summary", "actor_user_id",
+  "id", "mutation_candidate_event_id", "action", "result", "evidence_classification", "safe_read_back_summary", "actor_user_id",
   "command_version_before", "command_version_after", "created_at",
 ].join(",");
-const mutationCandidateSelect = "command_id,attempt_id,sys_id,number,http_status,observed_at,source";
+const mutationCandidateSelect = [
+  "id", "command_id", "attempt_id", "attempt_number", "sys_id", "number",
+  "http_status", "observed_at", "source", "proof_status", "created_at",
+].join(",");
+const recoverySelect = [
+  "id", "attempt_id", "attempt_number", "actor_user_id",
+  "command_version_before", "command_version_after", "created_at",
+].join(",");
 
-function mutationCandidateSummary(input: unknown): ServiceNowWriteMutationCandidate | undefined {
-  const row = parsePersisted(serviceNowWriteMutationCandidateRowSchema.nullable(), input);
-  return row
-    ? {
+function mutationCandidateSummary(
+  input: unknown,
+  resolution?: NonNullable<ServiceNowWriteCommandSummary["reconciliationHistory"]>[number],
+): ServiceNowWriteMutationCandidate {
+  const row = parsePersisted(serviceNowWriteMutationCandidateRowSchema, input);
+  const resolutionState = resolution?.result === "confirmed_succeeded"
+    || row.proof_status === "marker_verified"
+    ? "confirmed_succeeded"
+    : resolution?.result === "confirmed_not_applied"
+      ? "confirmed_not_applied"
+      : "current_unresolved";
+  return {
+      id: row.id,
+      attemptId: row.attempt_id,
+      attemptNumber: row.attempt_number,
       sysId: row.sys_id,
       number: row.number,
       httpStatus: row.http_status,
       observedAt: row.observed_at,
       source: row.source,
-    }
-    : undefined;
+      proofStatus: row.proof_status,
+      resolutionState,
+      ...(resolution ? { reconciliationResult: resolution.result } : {}),
+    };
 }
 
 export class ServiceNowWriteRepository {
@@ -341,19 +370,23 @@ export class ServiceNowWriteRepository {
       .eq("id", commandId).maybeSingle());
     if (!command.data) return undefined;
     if (!includeDetails) return safeServiceNowWriteCommand(command.data);
-    const [attempts, reconciliation, mutationCandidate] = await Promise.all([
+    const [attempts, reconciliation, mutationCandidates, recoveries] = await Promise.all([
       must("Could not read ServiceNow write attempts", db.from("servicenow_write_attempts")
         .select(attemptSelect)
         .eq("command_id", commandId).order("attempt_number", { ascending: false }).limit(100)),
       must("Could not read ServiceNow reconciliation history", db.from("servicenow_write_reconciliation_events")
         .select(reconciliationSelect)
         .eq("command_id", commandId).order("created_at", { ascending: false }).limit(100)),
-      must("Could not read ServiceNow mutation candidate", db.from("servicenow_write_mutation_candidates")
+      must("Could not read ServiceNow mutation candidates", db.from("servicenow_write_mutation_candidate_events")
         .select(mutationCandidateSelect)
-        .eq("command_id", commandId).maybeSingle()),
+        .eq("command_id", commandId).order("attempt_number", { ascending: true }).limit(100)),
+      must("Could not read ServiceNow attempt recovery history", db.from("servicenow_write_attempt_recovery_events")
+        .select(recoverySelect)
+        .eq("command_id", commandId).order("created_at", { ascending: true }).limit(100)),
     ]);
     const history = parsePersisted(z.array(serviceNowWriteReconciliationEventRowSchema), reconciliation.data || []).map((row) => ({
       id: row.id,
+      mutationCandidateEventId: row.mutation_candidate_event_id || undefined,
       action: row.action,
       result: row.result,
       evidenceClassification: row.evidence_classification,
@@ -363,24 +396,76 @@ export class ServiceNowWriteRepository {
       commandVersionAfter: row.command_version_after,
       createdAt: row.created_at,
     }));
+    const resolutionByCandidate = new Map(
+      history
+        .filter((event) => event.mutationCandidateEventId)
+        .map((event) => [event.mutationCandidateEventId!, event]),
+    );
+    const candidateHistory = parsePersisted(
+      z.array(serviceNowWriteMutationCandidateRowSchema),
+      mutationCandidates.data || [],
+    ).map((row) => mutationCandidateSummary(row, resolutionByCandidate.get(row.id)));
+    const currentCandidate = [...candidateHistory].reverse().find(
+      (candidate) => candidate.resolutionState === "current_unresolved",
+    );
+    const recoveryHistory = parsePersisted(
+      z.array(serviceNowWriteAttemptRecoveryRowSchema),
+      recoveries.data || [],
+    ).map((row) => ({
+      id: row.id,
+      attemptId: row.attempt_id,
+      attemptNumber: row.attempt_number,
+      actorUserId: row.actor_user_id,
+      commandVersionBefore: row.command_version_before,
+      commandVersionAfter: row.command_version_after,
+      createdAt: row.created_at,
+    }));
     return safeServiceNowWriteCommand(command.data, {
       includePreview: true,
       attempts: parsePersisted(z.array(serviceNowWriteAttemptRowSchema), attempts.data || []).map(attemptSummary),
-      mutationCandidate: mutationCandidateSummary(mutationCandidate.data),
+      mutationCandidate: currentCandidate,
+      mutationCandidateHistory: candidateHistory,
       reconciliationHistory: history,
+      recoveryHistory,
     });
   }
 
   async getMutationCandidate(commandId: string) {
     const db = await client();
-    const result = await must(
-      "Could not read ServiceNow mutation candidate",
-      db.from("servicenow_write_mutation_candidates")
+    const [candidates, reconciliations] = await Promise.all([
+      must(
+        "Could not read ServiceNow mutation candidates",
+        db.from("servicenow_write_mutation_candidate_events")
         .select(mutationCandidateSelect)
         .eq("command_id", commandId)
-        .maybeSingle(),
+        .order("attempt_number", { ascending: false })
+        .limit(100),
+      ),
+      must(
+        "Could not read ServiceNow reconciliation candidate resolutions",
+        db.from("servicenow_write_reconciliation_events")
+          .select("mutation_candidate_event_id,result")
+          .eq("command_id", commandId)
+          .in("result", ["confirmed_succeeded", "confirmed_not_applied"])
+          .limit(100),
+      ),
+    ]);
+    const resolved = new Set(
+      z.array(z.object({
+        mutation_candidate_event_id: z.string().nullable(),
+        result: serviceNowWriteReconciliationResultSchema,
+      })).parse(reconciliations.data || [])
+        .map((row) => row.mutation_candidate_event_id)
+        .filter((value): value is string => Boolean(value)),
     );
-    return mutationCandidateSummary(result.data);
+    const current = parsePersisted(
+      z.array(serviceNowWriteMutationCandidateRowSchema),
+      candidates.data || [],
+    ).find((candidate) => (
+      candidate.proof_status !== "marker_verified"
+      && !resolved.has(candidate.id)
+    ));
+    return current ? mutationCandidateSummary(current) : undefined;
   }
 
   async getNormalizedCommand(commandId: string) {
@@ -451,6 +536,15 @@ export class ServiceNowWriteRepository {
     const db = await client();
     const result = await must("Could not reconcile ServiceNow write command", db.rpc("support_reconcile_servicenow_write_command", { p_payload: payload }));
     return reconciliationResultSchema.parse(Array.isArray(result.data) ? result.data[0] : result.data);
+  }
+
+  async recoverAttempt(payload: Record<string, unknown>) {
+    const db = await client();
+    const result = await must(
+      "Could not recover ServiceNow write attempt",
+      db.rpc("support_recover_servicenow_write_attempt", { p_payload: payload }),
+    );
+    return finishResultSchema.parse(Array.isArray(result.data) ? result.data[0] : result.data);
   }
 
   async getOperationsSummary(): Promise<Omit<ServiceNowWriteOperationsSummary, "readiness">> {

@@ -12,9 +12,10 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_mappings",
       "servicenow_write_commands",
       "servicenow_write_attempts",
-      "servicenow_write_mutation_candidates",
+      "servicenow_write_mutation_candidate_events",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
+      "servicenow_write_attempt_recovery_events",
       "servicenow_write_readiness_proofs",
     ]) expect(sql).toContain(`create table if not exists public.${table}`);
     for (const index of [
@@ -23,7 +24,9 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_commands_type_idx",
       "servicenow_write_commands_created_at_idx",
       "servicenow_write_attempts_command_idx",
+      "servicenow_write_candidate_events_command_idx",
       "servicenow_write_reconciliation_command_idx",
+      "servicenow_write_recovery_command_idx",
       "servicenow_write_readiness_expiry_idx",
     ]) expect(sql).toContain(index);
     expect(sql).toContain("command_material_hash");
@@ -39,9 +42,10 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_mappings",
       "servicenow_write_commands",
       "servicenow_write_attempts",
-      "servicenow_write_mutation_candidates",
+      "servicenow_write_mutation_candidate_events",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
+      "servicenow_write_attempt_recovery_events",
       "servicenow_write_readiness_proofs",
     ]) {
       expect(sql).toContain(`alter table public.${table} enable row level security`);
@@ -53,6 +57,7 @@ describe("ServiceNow write kernel migration", () => {
       "support_begin_servicenow_write_attempt",
       "support_finish_servicenow_write_attempt",
       "support_reconcile_servicenow_write_command",
+      "support_recover_servicenow_write_attempt",
       "support_record_servicenow_write_readiness",
     ]) {
       expect(sql).toContain(`revoke all privileges on function public.${rpc}(jsonb) from public`);
@@ -83,6 +88,7 @@ describe("ServiceNow write kernel migration", () => {
   it("requires one-time confirmations and append-only reconciliation", () => {
     expect(sql).toContain("confirmation_nonce_hash");
     expect(sql).toContain("confirmation_expires_at");
+    expect(sql).toContain("confirmation_mutation_candidate_event_id");
     expect(sql).toContain("servicenow_write_confirmation_invalid");
     expect(sql).toContain("servicenow_write_reconciliation_append_only");
     expect(sql).toContain("servicenow_write_reconciliation_immutable");
@@ -109,7 +115,12 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("duplicatejournalriskacknowledged");
     expect(sql).toContain("mutationcandidateriskacknowledged");
     expect(sql).toContain("servicenow_write_mutation_candidate_conflict");
-    expect(sql).toContain("servicenow_write_mutation_candidates_append_only");
+    expect(sql).toContain("servicenow_write_mutation_candidate_events_append_only");
+    expect(sql).toContain("servicenow_write_attempt_recovery_events");
+    expect(sql).toContain("servicenow_write_attempt_finish_conflict");
+    expect(sql).toContain("recover_stuck_attempt");
+    expect(sql).toContain("jsonb_typeof(v_response_summary->'postwritemarkerverified')<>'boolean'");
+    expect(sql).toContain("is distinct from 'true'::jsonb");
     expect(sql).toContain("mutation_response");
   });
 

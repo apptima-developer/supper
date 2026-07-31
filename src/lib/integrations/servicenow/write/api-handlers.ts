@@ -18,6 +18,7 @@ import {
   issueServiceNowWriteConfirmationRequestSchema,
   queryObject,
   reconcileServiceNowWriteCommandRequestSchema,
+  recoverServiceNowWriteAttemptRequestSchema,
   serviceNowWriteCommandIdSchema,
   serviceNowWriteCommandsQuerySchema,
 } from "./schemas";
@@ -31,6 +32,7 @@ import {
   issueManualOperation,
   listCommands,
   reconcileCommand,
+  recoverStuckAttempt,
   retryCommand,
   testServiceNowWriteReadiness,
 } from "./service";
@@ -49,6 +51,7 @@ export type ServiceNowWriteApiDependencies = {
   readiness?: typeof testServiceNowWriteReadiness;
   issueConfirmation?: typeof issueCommandConfirmation;
   reconcile?: typeof reconcileCommand;
+  recover?: typeof recoverStuckAttempt;
 };
 
 function authorize(session: Session | null, request: Request, correlationId: string) {
@@ -212,8 +215,30 @@ export function handleServiceNowWriteReconciliationPost(
       mutationCandidateRiskAcknowledged: "mutationCandidateRiskAcknowledged" in body
         ? body.mutationCandidateRiskAcknowledged
         : undefined,
+      mutationCandidateEventId: body.mutationCandidateEventId,
       verificationNote: "verificationNote" in body ? body.verificationNote : undefined,
       abortSignal: request.signal,
+    }, { repository });
+    return jsonResponseWithRequestId(result, request, {}, correlationId);
+  });
+}
+
+export function handleServiceNowWriteAttemptRecoveryPost(
+  request: Request,
+  commandId: string,
+  dependencies: ServiceNowWriteApiDependencies,
+) {
+  return authorized(request, dependencies, async (session, correlationId, repository) => {
+    const confirmation = await readJsonBody(
+      request,
+      recoverServiceNowWriteAttemptRequestSchema,
+      4 * 1024,
+    );
+    const result = await (dependencies.recover || recoverStuckAttempt)({
+      commandId: serviceNowWriteCommandIdSchema.parse(commandId),
+      session,
+      requestId: correlationId,
+      confirmation,
     }, { repository });
     return jsonResponseWithRequestId(result, request, {}, correlationId);
   });

@@ -10,10 +10,18 @@ import type {
   ServiceNowSafeRequestSummary,
   ServiceNowWriteAdapterResult,
   ServiceNowWriteFailurePhase,
+  ServiceNowWriteMutationCandidateProofStatus,
   ServiceNowWriteReadBackResult,
 } from "./types";
 
 const maximumResponseBytes = 64 * 1024;
+
+function failedMarkerProofStatus(code: string): ServiceNowWriteMutationCandidateProofStatus {
+  if (code === "SERVICENOW_WRITE_POST_CREATE_NOT_FOUND") return "marker_not_found";
+  if (code === "SERVICENOW_WRITE_CORRELATION_AMBIGUOUS") return "marker_ambiguous";
+  if (code === "SERVICENOW_WRITE_LOOKUP_MISMATCH") return "marker_target_conflict";
+  return "marker_verification_unavailable";
+}
 
 function operationFor(command: NormalizedServiceNowWriteCommand): IntegrationOperation {
   if (command.commandType === "create_incident") return "ticket.create";
@@ -399,6 +407,7 @@ export class ServiceNowWriteAdapter {
             number: existing.number,
             state: typeof existing.row.state === "string" ? existing.row.state : undefined,
             recoveredByCorrelationMarker: true,
+            providerWritePerformed: false,
           },
           targetSysId: existing.sysId,
           targetNumber: existing.number,
@@ -446,6 +455,7 @@ export class ServiceNowWriteAdapter {
         number: result.number,
         httpStatus: response.status,
         source: "mutation_response" as const,
+        proofStatus: "marker_verified" as const,
       }
       : undefined;
     const mutationCandidateSummary = mutationCandidate
@@ -541,6 +551,7 @@ export class ServiceNowWriteAdapter {
             mutationCandidateSysId: mutationCandidate?.sysId,
             mutationCandidateNumber: mutationCandidate?.number,
             mutationHttpStatus: mutationCandidate?.httpStatus,
+            mutationCandidateProofStatus: failedMarkerProofStatus(cause.code),
             safeResponseSummary: {
               httpStatus: response.status,
               ...mutationCandidateSummary,

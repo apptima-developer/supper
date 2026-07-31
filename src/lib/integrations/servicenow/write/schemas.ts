@@ -6,6 +6,7 @@ import {
   serviceNowWriteDeliveryDispositions,
   serviceNowWriteEvidenceClassifications,
   serviceNowWriteFailurePhases,
+  serviceNowWriteMutationCandidateProofStatuses,
   serviceNowWriteReconciliationActions,
   serviceNowWriteReconciliationResults,
   serviceNowWriteSourceTypes,
@@ -42,6 +43,9 @@ export const serviceNowWriteFailurePhaseSchema = z.enum(serviceNowWriteFailurePh
 export const serviceNowWriteReconciliationActionSchema = z.enum(serviceNowWriteReconciliationActions);
 export const serviceNowWriteEvidenceClassificationSchema = z.enum(serviceNowWriteEvidenceClassifications);
 export const serviceNowWriteReconciliationResultSchema = z.enum(serviceNowWriteReconciliationResults);
+export const serviceNowWriteMutationCandidateProofStatusSchema = z.enum(
+  serviceNowWriteMutationCandidateProofStatuses,
+);
 export const serviceNowWriteCommandIdSchema = z.string().trim().min(16).max(200)
   .regex(/^[A-Za-z0-9._:-]+$/, "Invalid command ID");
 export const serviceNowSysIdWriteSchema = z.string().trim().regex(/^[a-f0-9]{32}$/, "Invalid ServiceNow sys_id");
@@ -50,6 +54,8 @@ export const serviceNowOperationReferenceSchema = z.string().trim().min(1).max(5
   .regex(/^[A-Za-z0-9._:-]+$/, "Invalid operation reference");
 export const serviceNowSourceEntityReferenceSchema = safeText("Source entity reference", 500, true);
 export const serviceNowCorrelationMarkerSchema = z.string().regex(/^SUPPER:[a-f0-9]{64}$/);
+export const serviceNowWriteMutationCandidateEventIdSchema = z.string()
+  .regex(/^sn-candidate-[a-f0-9]{64}$/);
 export const serviceNowManualOperationTokenSchema = z.string().min(100).max(4096)
   .regex(/^[A-Za-z0-9._-]+$/, "Invalid manual operation token");
 
@@ -199,6 +205,7 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   number: serviceNowNumberWriteSchema.optional(),
   state: z.string().max(80).optional(),
   recoveredByCorrelationMarker: z.boolean().optional(),
+  providerWritePerformed: z.boolean().optional(),
   mutationCandidateObserved: z.boolean().optional(),
   candidateSysId: serviceNowSysIdWriteSchema.optional(),
   candidateNumber: serviceNowNumberWriteSchema.optional(),
@@ -228,6 +235,7 @@ export const serviceNowValidationSummarySchema = z.object({
 export const serviceNowWriteConfirmationActionSchema = z.enum([
   "execute",
   "retry",
+  "recover_stuck_attempt",
   ...serviceNowWriteReconciliationActions,
 ]);
 
@@ -235,6 +243,7 @@ export const issueServiceNowWriteConfirmationRequestSchema = z.object({
   action: serviceNowWriteConfirmationActionSchema,
   expectedVersion: z.number().int().positive(),
   expectedNormalizedPayloadHash: hashSchema,
+  mutationCandidateEventId: serviceNowWriteMutationCandidateEventIdSchema.optional(),
 }).strict();
 
 export const confirmedServiceNowWriteActionRequestSchema = z.object({
@@ -242,7 +251,11 @@ export const confirmedServiceNowWriteActionRequestSchema = z.object({
   expectedVersion: z.number().int().positive(),
   expectedNormalizedPayloadHash: hashSchema,
   confirmationNonce: z.string().min(32).max(200).regex(/^[A-Za-z0-9_-]+$/),
+  mutationCandidateEventId: serviceNowWriteMutationCandidateEventIdSchema.optional(),
 }).strict();
+
+export const recoverServiceNowWriteAttemptRequestSchema =
+  confirmedServiceNowWriteActionRequestSchema;
 
 const verificationNoteSchema = safeText("Verification note", 500, true);
 export const reconcileServiceNowWriteCommandRequestSchema = z.discriminatedUnion("action", [
@@ -306,13 +319,17 @@ export const serviceNowWriteAttemptRowSchema = z.object({
 }).strict();
 
 export const serviceNowWriteMutationCandidateRowSchema = z.object({
+  id: serviceNowWriteMutationCandidateEventIdSchema,
   command_id: z.string().min(1).max(200),
   attempt_id: z.string().min(1).max(200),
+  attempt_number: z.number().int().positive(),
   sys_id: serviceNowSysIdWriteSchema,
   number: serviceNowNumberWriteSchema,
   http_status: z.number().int().min(100).max(599),
   observed_at: timestampSchema,
   source: z.literal("mutation_response"),
+  proof_status: serviceNowWriteMutationCandidateProofStatusSchema,
+  created_at: timestampSchema,
 }).strict();
 
 export const serviceNowWriteCommandRowSchema = z.object({
@@ -355,6 +372,7 @@ export const serviceNowWriteCommandRowSchema = z.object({
 
 export const serviceNowWriteReconciliationEventRowSchema = z.object({
   id: z.string().min(1).max(200),
+  mutation_candidate_event_id: serviceNowWriteMutationCandidateEventIdSchema.nullable().optional(),
   action: serviceNowWriteReconciliationActionSchema,
   result: serviceNowWriteReconciliationResultSchema,
   evidence_classification: serviceNowWriteEvidenceClassificationSchema,
@@ -372,6 +390,16 @@ export const serviceNowWriteReconciliationEventRowSchema = z.object({
     });
   }
 });
+
+export const serviceNowWriteAttemptRecoveryRowSchema = z.object({
+  id: z.string().min(1).max(200),
+  attempt_id: z.string().min(1).max(200),
+  attempt_number: z.number().int().positive(),
+  actor_user_id: z.string().min(1).max(200),
+  command_version_before: z.number().int().positive(),
+  command_version_after: z.number().int().positive(),
+  created_at: timestampSchema,
+}).strict();
 
 export function queryObject(request: Request) {
   return Object.fromEntries(new URL(request.url).searchParams.entries());

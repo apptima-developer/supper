@@ -81,6 +81,7 @@ describe("ServiceNow write adapter", () => {
       number: "INC0010001",
       httpStatus: 201,
       source: "mutation_response",
+      proofStatus: "marker_verified",
     });
     expect(String(fetchMock.mock.calls[2][0])).toContain(`sysparm_query=correlation_id%3D${encodeURIComponent(marker)}`);
     expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);

@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.5: mutation candidate continuity and reconciliation proof.
+-- SUPPER AI-2.0.6: per-Attempt candidate events and database proof closure.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -137,12 +137,17 @@ create table if not exists public.servicenow_write_commands (
   confirmation_nonce_hash text check (confirmation_nonce_hash is null or confirmation_nonce_hash ~ '^[a-f0-9]{64}$'),
   confirmation_action text check (confirmation_action is null or confirmation_action in (
     'execute', 'retry', 'reconcile_by_read_back',
-    'mark_succeeded_after_verification', 'mark_not_applied_after_verification'
+    'mark_succeeded_after_verification', 'mark_not_applied_after_verification',
+    'recover_stuck_attempt'
   )),
   confirmation_user_id text check (
     confirmation_user_id is null or length(btrim(confirmation_user_id)) between 1 and 200
   ),
   confirmation_expires_at timestamptz,
+  confirmation_mutation_candidate_event_id text check (
+    confirmation_mutation_candidate_event_id is null
+    or confirmation_mutation_candidate_event_id ~ '^sn-candidate-[a-f0-9]{64}$'
+  ),
   created_by text not null check (length(btrim(created_by)) between 1 and 200),
   request_id text check (request_id is null or length(request_id) between 8 and 100),
   correlation_id text not null check (length(correlation_id) between 8 and 100),
@@ -167,7 +172,7 @@ create table if not exists public.servicenow_write_commands (
     or status <> 'reconciliation_required'
   ),
   check (
-    (confirmation_nonce_hash is null and confirmation_action is null and confirmation_user_id is null and confirmation_expires_at is null)
+    (confirmation_nonce_hash is null and confirmation_action is null and confirmation_user_id is null and confirmation_expires_at is null and confirmation_mutation_candidate_event_id is null)
     or
     (confirmation_nonce_hash is not null and confirmation_action is not null and confirmation_user_id is not null and confirmation_expires_at is not null)
   )
@@ -205,19 +210,31 @@ create table if not exists public.servicenow_write_attempts (
   request_id text check (request_id is null or length(request_id) between 8 and 100),
   started_at timestamptz not null,
   finished_at timestamptz,
+  terminal_material_hash text check (
+    terminal_material_hash is null or terminal_material_hash ~ '^[a-f0-9]{64}$'
+  ),
   unique (command_id, attempt_number),
   check ((outcome = 'executing' and finished_at is null) or (outcome <> 'executing' and finished_at is not null)),
   check ((outcome = 'uncertain' and delivery_disposition = 'may_have_committed' and not retry_allowed) or outcome <> 'uncertain')
 );
 
-create table if not exists public.servicenow_write_mutation_candidates (
-  command_id text primary key references public.servicenow_write_commands(id) on delete restrict,
+create table if not exists public.servicenow_write_mutation_candidate_events (
+  id text primary key check (id ~ '^sn-candidate-[a-f0-9]{64}$'),
+  command_id text not null references public.servicenow_write_commands(id) on delete restrict,
   attempt_id text not null unique references public.servicenow_write_attempts(id) on delete restrict,
+  attempt_number integer not null check (attempt_number between 1 and 100),
   sys_id text not null check (sys_id ~ '^[a-f0-9]{32}$'),
   number text not null check (number ~ '^[A-Za-z0-9_-]{1,80}$'),
   http_status integer not null check (http_status between 100 and 599),
   observed_at timestamptz not null,
-  source text not null check (source = 'mutation_response')
+  source text not null check (source = 'mutation_response'),
+  proof_status text not null check (proof_status in (
+    'marker_verified', 'marker_not_verified', 'marker_not_found',
+    'marker_ambiguous', 'marker_target_conflict',
+    'marker_verification_unavailable'
+  )),
+  created_at timestamptz not null,
+  unique (command_id, attempt_number)
 );
 
 create table if not exists public.servicenow_ticket_links (
@@ -238,6 +255,7 @@ create table if not exists public.servicenow_ticket_links (
 create table if not exists public.servicenow_write_reconciliation_events (
   id text primary key,
   command_id text not null references public.servicenow_write_commands(id) on delete restrict,
+  mutation_candidate_event_id text references public.servicenow_write_mutation_candidate_events(id) on delete restrict,
   action text not null check (action in (
     'reconcile_by_read_back', 'mark_succeeded_after_verification',
     'mark_not_applied_after_verification'
@@ -259,6 +277,18 @@ create table if not exists public.servicenow_write_reconciliation_events (
     and not public.support_intake_json_has_unsafe_key(safe_read_back_summary)
     and coalesce(safe_read_back_summary->>'evidenceClassification','') = evidence_classification
   ),
+  actor_user_id text not null check (length(btrim(actor_user_id)) between 1 and 200),
+  request_id text check (request_id is null or length(request_id) between 8 and 100),
+  command_version_before integer not null check (command_version_before >= 1),
+  command_version_after integer not null check (command_version_after > command_version_before),
+  created_at timestamptz not null
+);
+
+create table if not exists public.servicenow_write_attempt_recovery_events (
+  id text primary key,
+  command_id text not null references public.servicenow_write_commands(id) on delete restrict,
+  attempt_id text not null unique references public.servicenow_write_attempts(id) on delete restrict,
+  attempt_number integer not null check (attempt_number between 1 and 100),
   actor_user_id text not null check (length(btrim(actor_user_id)) between 1 and 200),
   request_id text check (request_id is null or length(request_id) between 8 and 100),
   command_version_before integer not null check (command_version_before >= 1),
@@ -301,8 +331,12 @@ create index if not exists servicenow_write_commands_retry_idx
   on public.servicenow_write_commands(next_retry_at) where status = 'retry_scheduled';
 create index if not exists servicenow_write_attempts_command_idx
   on public.servicenow_write_attempts(command_id, attempt_number);
+create index if not exists servicenow_write_candidate_events_command_idx
+  on public.servicenow_write_mutation_candidate_events(command_id, attempt_number);
 create index if not exists servicenow_write_reconciliation_command_idx
   on public.servicenow_write_reconciliation_events(command_id, created_at desc);
+create index if not exists servicenow_write_recovery_command_idx
+  on public.servicenow_write_attempt_recovery_events(command_id, created_at desc);
 create index if not exists servicenow_write_readiness_expiry_idx
   on public.servicenow_write_readiness_proofs(expires_at);
 create index if not exists servicenow_ticket_links_ticket_idx
@@ -314,18 +348,20 @@ alter table public.servicenow_write_connections enable row level security;
 alter table public.servicenow_write_mappings enable row level security;
 alter table public.servicenow_write_commands enable row level security;
 alter table public.servicenow_write_attempts enable row level security;
-alter table public.servicenow_write_mutation_candidates enable row level security;
+alter table public.servicenow_write_mutation_candidate_events enable row level security;
 alter table public.servicenow_ticket_links enable row level security;
 alter table public.servicenow_write_reconciliation_events enable row level security;
+alter table public.servicenow_write_attempt_recovery_events enable row level security;
 alter table public.servicenow_write_readiness_proofs enable row level security;
 
 revoke all privileges on table public.servicenow_write_connections from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_mappings from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_commands from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_attempts from public, anon, authenticated;
-revoke all privileges on table public.servicenow_write_mutation_candidates from public, anon, authenticated;
+revoke all privileges on table public.servicenow_write_mutation_candidate_events from public, anon, authenticated;
 revoke all privileges on table public.servicenow_ticket_links from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_reconciliation_events from public, anon, authenticated;
+revoke all privileges on table public.servicenow_write_attempt_recovery_events from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_readiness_proofs from public, anon, authenticated;
 
 -- The server may read configuration and ledgers directly, but all mutation is
@@ -334,9 +370,10 @@ grant select on table public.servicenow_write_connections to service_role;
 grant select on table public.servicenow_write_mappings to service_role;
 grant select on table public.servicenow_write_commands to service_role;
 grant select on table public.servicenow_write_attempts to service_role;
-grant select on table public.servicenow_write_mutation_candidates to service_role;
+grant select on table public.servicenow_write_mutation_candidate_events to service_role;
 grant select on table public.servicenow_ticket_links to service_role;
 grant select on table public.servicenow_write_reconciliation_events to service_role;
+grant select on table public.servicenow_write_attempt_recovery_events to service_role;
 grant select on table public.servicenow_write_readiness_proofs to service_role;
 
 create or replace function public.support_servicenow_write_parse_timestamp(
@@ -1248,6 +1285,7 @@ returns table (
   command_id text,
   command_version integer,
   normalized_payload_hash text,
+  mutation_candidate_event_id text,
   confirmation_expires_at timestamptz
 )
 language plpgsql
@@ -1260,6 +1298,7 @@ declare
   v_db_now timestamptz := statement_timestamp();
   v_issued_at timestamptz;
   v_expires_at timestamptz;
+  v_current_candidate_event_id text;
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
     or public.support_intake_json_has_unsafe_key(p_payload)
@@ -1267,7 +1306,8 @@ begin
       select 1 from jsonb_object_keys(p_payload) supplied(key)
       where supplied.key not in (
         'commandId','action','actorUserId','expectedVersion',
-        'expectedNormalizedPayloadHash','confirmationNonceHash','expiresAt','issuedAt'
+        'expectedNormalizedPayloadHash','confirmationNonceHash','expiresAt','issuedAt',
+        'mutationCandidateEventId'
       )
     )
     or jsonb_typeof(p_payload->'expectedVersion')<>'number'
@@ -1275,7 +1315,8 @@ begin
     or p_payload->>'expectedNormalizedPayloadHash' !~ '^[a-f0-9]{64}$'
     or p_payload->>'action' not in (
       'execute','retry','reconcile_by_read_back',
-      'mark_succeeded_after_verification','mark_not_applied_after_verification'
+      'mark_succeeded_after_verification','mark_not_applied_after_verification',
+      'recover_stuck_attempt'
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
@@ -1306,13 +1347,33 @@ begin
     or v_command.normalized_payload_hash<>p_payload->>'expectedNormalizedPayloadHash' then
     raise exception using errcode='40001',message='SERVICENOW_WRITE_VERSION_CONFLICT';
   end if;
+  select candidate.id into v_current_candidate_event_id
+  from public.servicenow_write_mutation_candidate_events candidate
+  where candidate.command_id=v_command.id
+    and not exists (
+      select 1
+      from public.servicenow_write_reconciliation_events resolution
+      where resolution.mutation_candidate_event_id=candidate.id
+        and resolution.result in ('confirmed_succeeded','confirmed_not_applied')
+    )
+  order by candidate.attempt_number desc
+  limit 1;
   if (p_payload->>'action'='execute' and v_command.status not in ('validated','dry_run_ready'))
     or (p_payload->>'action'='retry' and (
       v_command.status<>'retry_scheduled' or not v_command.retry_allowed
       or v_command.attempt_count>=v_command.max_attempts
     ))
     or (p_payload->>'action' like 'reconcile%' and v_command.status<>'reconciliation_required')
-    or (p_payload->>'action' like 'mark_%' and v_command.status<>'reconciliation_required') then
+    or (p_payload->>'action' like 'mark_%' and v_command.status<>'reconciliation_required')
+    or (p_payload->>'action'='recover_stuck_attempt' and v_command.status<>'executing')
+    or (
+      p_payload->>'action' in (
+        'reconcile_by_read_back','mark_succeeded_after_verification',
+        'mark_not_applied_after_verification','recover_stuck_attempt'
+      )
+      and nullif(p_payload->>'mutationCandidateEventId','')
+        is distinct from v_current_candidate_event_id
+    ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
   end if;
   update public.servicenow_write_commands command_record set
@@ -1320,10 +1381,12 @@ begin
     confirmation_action=p_payload->>'action',
     confirmation_user_id=p_payload->>'actorUserId',
     confirmation_expires_at=v_expires_at,
+    confirmation_mutation_candidate_event_id=v_current_candidate_event_id,
     updated_at=v_issued_at
   where command_record.id=v_command.id
   returning * into v_command;
-  return query select v_command.id,v_command.version,v_command.normalized_payload_hash,v_command.confirmation_expires_at;
+  return query select v_command.id,v_command.version,v_command.normalized_payload_hash,
+    v_command.confirmation_mutation_candidate_event_id,v_command.confirmation_expires_at;
 end;
 $$;
 
@@ -1472,7 +1535,8 @@ begin
     last_attempt_at=v_started_at,next_retry_at=null,retry_allowed=false,retry_reason=null,
     error_code=null,error_message=null,
     confirmation_nonce_hash=null,confirmation_action=null,confirmation_user_id=null,
-    confirmation_expires_at=null,updated_at=v_started_at
+    confirmation_expires_at=null,confirmation_mutation_candidate_event_id=null,
+    updated_at=v_started_at
   where command_record.id=v_command.id returning * into v_command;
   return query select v_attempt_number,v_command.command_type,v_command.normalized_payload,
     v_command.target_table,v_command.target_sys_id,v_command.target_number,
@@ -1506,12 +1570,16 @@ declare
   v_retry_allowed boolean;
   v_target_sys_id text;
   v_target_number text;
-  v_candidate public.servicenow_write_mutation_candidates%rowtype;
   v_candidate_sys_id text;
   v_candidate_number text;
   v_candidate_http_status integer;
   v_candidate_source text;
+  v_candidate_proof_status text;
   v_candidate_present boolean;
+  v_candidate_event_id text;
+  v_terminal_material_hash text;
+  v_response_summary jsonb;
+  v_request_summary jsonb;
   v_db_now timestamptz := statement_timestamp();
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
@@ -1524,7 +1592,7 @@ begin
         'responseSummary','targetSysId','targetNumber','errorCode','errorMessage',
         'nextRetryAt','finishedAt','mutationCandidateSysId',
         'mutationCandidateNumber','mutationCandidateHttpStatus',
-        'mutationCandidateSource'
+        'mutationCandidateSource','mutationCandidateProofStatus'
       )
     )
     or jsonb_typeof(p_payload->'retryAllowed')<>'boolean'
@@ -1546,14 +1614,12 @@ begin
     or octet_length(coalesce(p_payload->'responseSummary','{}'::jsonb)::text)>8192 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
   end if;
+  v_terminal_material_hash := public.support_intake_sha256_hex(
+    (p_payload - 'finishedAt')::text
+  );
   v_finished_at := public.support_servicenow_write_parse_timestamp(
     p_payload->'finishedAt', 'SERVICENOW_WRITE_RESULT_INVALID'
   );
-  if v_finished_at not between v_db_now - interval '2 minutes'
-    and v_db_now + interval '2 minutes' then
-    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_NOT_EXECUTING';
-  end if;
-  v_finished_at := v_db_now;
   v_outcome := p_payload->>'outcome';
   v_disposition := p_payload->>'deliveryDisposition';
   v_failure_phase := nullif(p_payload->>'failurePhase','');
@@ -1565,10 +1631,14 @@ begin
   v_candidate_sys_id := nullif(p_payload->>'mutationCandidateSysId','');
   v_candidate_number := nullif(p_payload->>'mutationCandidateNumber','');
   v_candidate_source := nullif(p_payload->>'mutationCandidateSource','');
+  v_candidate_proof_status := nullif(p_payload->>'mutationCandidateProofStatus','');
+  v_request_summary := coalesce(p_payload->'requestSummary','{}'::jsonb);
+  v_response_summary := coalesce(p_payload->'responseSummary','{}'::jsonb);
   v_candidate_present := v_candidate_sys_id is not null
     or v_candidate_number is not null
     or p_payload ? 'mutationCandidateHttpStatus'
-    or v_candidate_source is not null;
+    or v_candidate_source is not null
+    or v_candidate_proof_status is not null;
   if v_candidate_present then
     v_candidate_http_status := public.support_servicenow_write_parse_integer(
       p_payload->'mutationCandidateHttpStatus', 'SERVICENOW_WRITE_RESULT_INVALID'
@@ -1586,6 +1656,12 @@ begin
         or v_candidate_http_status not between 100 and 599
         or v_candidate_source is null
         or v_candidate_source <> 'mutation_response'
+        or v_candidate_proof_status is null
+        or v_candidate_proof_status not in (
+          'marker_verified','marker_not_verified','marker_not_found',
+          'marker_ambiguous','marker_target_conflict',
+          'marker_verification_unavailable'
+        )
       )
     )
     or (nullif(p_payload->>'errorCode','') is not null and p_payload->>'errorCode' !~ '^[A-Z0-9_]{1,80}$')
@@ -1613,47 +1689,91 @@ begin
   select * into v_attempt from public.servicenow_write_attempts
   where servicenow_write_attempts.id=p_payload->>'attemptId'
     and servicenow_write_attempts.command_id=v_command.id for update;
-  if v_attempt.id is null or v_attempt.outcome<>'executing' or v_command.status<>'executing'
-    or v_finished_at<v_attempt.started_at then
+  if v_attempt.id is null then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_NOT_EXECUTING';
   end if;
+  if v_attempt.outcome<>'executing' then
+    if v_attempt.terminal_material_hash is not distinct from v_terminal_material_hash then
+      return query select v_command.id,v_command.status,v_command.attempt_count,
+        v_command.next_retry_at,v_command.target_sys_id,v_command.target_number,v_command.version;
+      return;
+    end if;
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_FINISH_CONFLICT';
+  end if;
+  if v_command.status<>'executing'
+    or v_finished_at not between v_db_now - interval '2 minutes' and v_db_now + interval '2 minutes'
+    or v_db_now<v_attempt.started_at then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_NOT_EXECUTING';
+  end if;
+  v_finished_at := v_db_now;
   if v_candidate_present and (
       v_command.command_type <> 'create_incident'
       or v_attempt.execution_mode = 'dry_run'
       or v_outcome not in ('succeeded','uncertain')
-      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'mutationCandidateObserved')
-      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'candidateSysId')
-      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'candidateNumber')
-      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'mutationHttpStatus')
-      or p_payload->'responseSummary'->'mutationCandidateObserved' <> 'true'::jsonb
-      or p_payload->'responseSummary'->>'candidateSysId' <> v_candidate_sys_id
-      or p_payload->'responseSummary'->>'candidateNumber' <> v_candidate_number
+      or v_candidate_http_status not between 200 and 299
+      or v_request_summary->>'method'<>'POST'
+      or not (v_response_summary ? 'mutationCandidateObserved')
+      or jsonb_typeof(v_response_summary->'mutationCandidateObserved')<>'boolean'
+      or v_response_summary->'mutationCandidateObserved'
+        is distinct from 'true'::jsonb
+      or not (v_response_summary ? 'candidateSysId')
+      or not (v_response_summary ? 'candidateNumber')
+      or not (v_response_summary ? 'mutationHttpStatus')
+      or v_response_summary->>'candidateSysId' <> v_candidate_sys_id
+      or v_response_summary->>'candidateNumber' <> v_candidate_number
       or public.support_servicenow_write_parse_integer(
-        p_payload->'responseSummary'->'mutationHttpStatus',
+        v_response_summary->'mutationHttpStatus',
         'SERVICENOW_WRITE_RESULT_INVALID'
       ) <> v_candidate_http_status
       or (
         v_outcome = 'succeeded'
         and (
-          p_payload->'responseSummary'->'postWriteMarkerVerified' <> 'true'::jsonb
+          v_candidate_proof_status <> 'marker_verified'
+          or not (v_response_summary ? 'postWriteMarkerVerified')
+          or jsonb_typeof(v_response_summary->'postWriteMarkerVerified')<>'boolean'
+          or v_response_summary->'postWriteMarkerVerified'
+            is distinct from 'true'::jsonb
           or v_target_sys_id <> v_candidate_sys_id
           or v_target_number <> v_candidate_number
         )
       )
       or (
         v_outcome = 'uncertain'
-        and p_payload->'responseSummary'->'postWriteMarkerVerified' <> 'false'::jsonb
+        and (
+          v_candidate_proof_status='marker_verified'
+          or not (v_response_summary ? 'postWriteMarkerVerified')
+          or jsonb_typeof(v_response_summary->'postWriteMarkerVerified')<>'boolean'
+          or v_response_summary->'postWriteMarkerVerified'
+            is distinct from 'false'::jsonb
+        )
       )
+      or v_response_summary ? 'recoveredByCorrelationMarker'
+      or v_response_summary ? 'providerWritePerformed'
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
   end if;
   if not v_candidate_present and (
-      p_payload->'responseSummary' ? 'mutationCandidateObserved'
-      or p_payload->'responseSummary' ? 'candidateSysId'
-      or p_payload->'responseSummary' ? 'candidateNumber'
-      or p_payload->'responseSummary' ? 'mutationHttpStatus'
+      v_response_summary ? 'mutationCandidateObserved'
+      or v_response_summary ? 'candidateSysId'
+      or v_response_summary ? 'candidateNumber'
+      or v_response_summary ? 'mutationHttpStatus'
+      or v_response_summary ? 'postWriteMarkerVerified'
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
+  end if;
+  if v_candidate_present and exists (
+    select 1
+    from public.servicenow_write_mutation_candidate_events previous
+    where previous.command_id=v_command.id
+      and previous.attempt_id<>v_attempt.id
+      and not exists (
+        select 1
+        from public.servicenow_write_reconciliation_events resolution
+        where resolution.mutation_candidate_event_id=previous.id
+          and resolution.result in ('confirmed_succeeded','confirmed_not_applied')
+      )
+  ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE';
   end if;
 
   if v_outcome='dry_run' then
@@ -1664,6 +1784,31 @@ begin
   elsif v_outcome='succeeded' then
     if v_attempt.execution_mode='dry_run' or v_target_sys_id is null or v_target_number is null then
       raise exception using errcode='22023',message='SERVICENOW_WRITE_SUCCESS_TARGET_REQUIRED';
+    end if;
+    if v_command.command_type='create_incident' and not v_candidate_present then
+      if not (v_response_summary ? 'recoveredByCorrelationMarker')
+        or jsonb_typeof(v_response_summary->'recoveredByCorrelationMarker')<>'boolean'
+        or v_response_summary->'recoveredByCorrelationMarker'
+          is distinct from 'true'::jsonb
+        or not (v_response_summary ? 'providerWritePerformed')
+        or jsonb_typeof(v_response_summary->'providerWritePerformed')<>'boolean'
+        or v_response_summary->'providerWritePerformed'
+          is distinct from 'false'::jsonb
+        or v_request_summary->>'method'<>'GET'
+        or exists (
+          select 1 from public.servicenow_write_attempts evidence_attempt
+          where evidence_attempt.command_id=v_command.id
+            and evidence_attempt.id<>v_attempt.id
+            and evidence_attempt.request_summary->>'method' in ('POST','PATCH')
+        )
+        or exists (
+          select 1 from public.servicenow_write_mutation_candidate_events existing_candidate
+          where existing_candidate.command_id=v_command.id
+        ) then
+        raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
+      end if;
+    elsif v_command.command_type<>'create_incident' and v_candidate_present then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
     end if;
     v_status := 'succeeded';
   elsif v_outcome='uncertain' then
@@ -1684,40 +1829,33 @@ begin
   end if;
 
   if v_candidate_present then
-    select * into v_candidate
-    from public.servicenow_write_mutation_candidates candidate
-    where candidate.command_id = v_command.id
-    for update;
-    if v_candidate.command_id is null then
-      insert into public.servicenow_write_mutation_candidates (
-        command_id,attempt_id,sys_id,number,http_status,observed_at,source
-      ) values (
-        v_command.id,v_attempt.id,v_candidate_sys_id,v_candidate_number,
-        v_candidate_http_status,v_finished_at,v_candidate_source
-      );
-    elsif v_candidate.sys_id <> v_candidate_sys_id
-      or v_candidate.number <> v_candidate_number
-      or v_candidate.http_status <> v_candidate_http_status
-      or v_candidate.source <> v_candidate_source then
-      raise exception using
-        errcode='22023',
-        message='SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT';
-    end if;
+    v_candidate_event_id := 'sn-candidate-'||public.support_intake_sha256_hex(
+      v_attempt.id||':'||v_candidate_sys_id||':'||v_candidate_number
+    );
+    insert into public.servicenow_write_mutation_candidate_events (
+      id,command_id,attempt_id,attempt_number,sys_id,number,http_status,
+      observed_at,source,proof_status,created_at
+    ) values (
+      v_candidate_event_id,v_command.id,v_attempt.id,v_attempt.attempt_number,
+      v_candidate_sys_id,v_candidate_number,v_candidate_http_status,
+      v_finished_at,v_candidate_source,v_candidate_proof_status,v_finished_at
+    );
   end if;
 
   update public.servicenow_write_attempts attempt_record set
-    request_summary=coalesce(p_payload->'requestSummary','{}'::jsonb),
-    response_summary=coalesce(p_payload->'responseSummary','{}'::jsonb),
+    request_summary=v_request_summary,
+    response_summary=v_response_summary,
     outcome=v_outcome,delivery_disposition=v_disposition,failure_phase=v_failure_phase,
     retry_allowed=v_retry_allowed,retry_reason=nullif(p_payload->>'retryReason',''),
     reconciliation_reason=nullif(p_payload->>'reconciliationReason',''),
     safe_error_code=nullif(p_payload->>'errorCode',''),
-    safe_error_message=nullif(p_payload->>'errorMessage',''),finished_at=v_finished_at
+    safe_error_message=nullif(p_payload->>'errorMessage',''),finished_at=v_finished_at,
+    terminal_material_hash=v_terminal_material_hash
   where attempt_record.id=v_attempt.id;
   update public.servicenow_write_commands command_record set
     version=command_record.version+1,status=v_status,
-    safe_request_summary=coalesce(p_payload->'requestSummary','{}'::jsonb),
-    safe_response_summary=coalesce(p_payload->'responseSummary','{}'::jsonb),
+    safe_request_summary=v_request_summary,
+    safe_response_summary=v_response_summary,
     target_sys_id=coalesce(v_target_sys_id,command_record.target_sys_id),
     target_number=coalesce(v_target_number,command_record.target_number),
     delivery_disposition=v_disposition,failure_phase=v_failure_phase,
@@ -1912,7 +2050,7 @@ set search_path = pg_catalog, public, extensions, pg_temp
 as $$
 declare
   v_command public.servicenow_write_commands%rowtype;
-  v_candidate public.servicenow_write_mutation_candidates%rowtype;
+  v_candidate public.servicenow_write_mutation_candidate_events%rowtype;
   v_action text;
   v_result text;
   v_checked_at timestamptz;
@@ -1939,7 +2077,8 @@ begin
         'actorUserId','requestId','checkedAt','confirmed','expectedVersion',
         'expectedNormalizedPayloadHash','confirmationNonceHash',
         'verificationAcknowledged','duplicateJournalRiskAcknowledged',
-        'mutationCandidateRiskAcknowledged','verificationNote'
+        'mutationCandidateRiskAcknowledged','verificationNote',
+        'mutationCandidateEventId'
       )
     )
     or jsonb_typeof(p_payload->'confirmed')<>'boolean'
@@ -2025,9 +2164,21 @@ begin
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED';
   end if;
   select * into v_candidate
-  from public.servicenow_write_mutation_candidates candidate
-  where candidate.command_id = v_command.id;
-  v_candidate_present := v_candidate.command_id is not null;
+  from public.servicenow_write_mutation_candidate_events candidate
+  where candidate.command_id = v_command.id
+    and not exists (
+      select 1
+      from public.servicenow_write_reconciliation_events resolution
+      where resolution.mutation_candidate_event_id=candidate.id
+        and resolution.result in ('confirmed_succeeded','confirmed_not_applied')
+    )
+  order by candidate.attempt_number desc
+  limit 1;
+  v_candidate_present := v_candidate.id is not null;
+  if nullif(p_payload->>'mutationCandidateEventId','')
+      is distinct from v_candidate.id then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE';
+  end if;
   v_candidate_matches := not v_candidate_present
     or (
       v_target_sys_id = v_candidate.sys_id
@@ -2052,6 +2203,7 @@ begin
     or v_command.confirmation_nonce_hash<>p_payload->>'confirmationNonceHash'
     or v_command.confirmation_action<>v_action
     or v_command.confirmation_user_id<>p_payload->>'actorUserId'
+    or v_command.confirmation_mutation_candidate_event_id is distinct from v_candidate.id
     or v_command.confirmation_expires_at<v_db_now
     or (v_command.last_attempt_at is not null and v_checked_at<v_command.last_attempt_at) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_CONFIRMATION_INVALID';
@@ -2109,17 +2261,18 @@ begin
     reconciliation_result=v_result,
     completed_at=case when v_result='confirmed_succeeded' then v_checked_at else null end,
     confirmation_nonce_hash=null,confirmation_action=null,confirmation_user_id=null,
-    confirmation_expires_at=null,updated_at=v_checked_at
+    confirmation_expires_at=null,confirmation_mutation_candidate_event_id=null,
+    updated_at=v_checked_at
   where command_record.id=v_command.id returning * into v_command;
   insert into public.servicenow_write_reconciliation_events (
-    id,command_id,action,result,evidence_classification,
+    id,command_id,mutation_candidate_event_id,action,result,evidence_classification,
     safe_read_back_summary,actor_user_id,request_id,
     command_version_before,command_version_after,created_at
   ) values (
     'sn-reconcile-'||public.support_intake_sha256_hex(
       v_command.id||':'||v_command.version::text||':'||v_action||':'||v_checked_at::text
     ),
-    v_command.id,v_action,v_result,v_evidence_classification,
+    v_command.id,v_candidate.id,v_action,v_result,v_evidence_classification,
     coalesce(p_payload->'safeReadBackSummary','{}'::jsonb),
     p_payload->>'actorUserId',nullif(p_payload->>'requestId',''),
     v_version_before,v_command.version,v_checked_at
@@ -2140,6 +2293,143 @@ begin
       last_synced_at=excluded.last_synced_at,updated_at=excluded.updated_at;
   end if;
   return query select v_command.id,v_command.status,v_command.version,v_command.reconciliation_result;
+end;
+$$;
+
+create or replace function public.support_recover_servicenow_write_attempt(p_payload jsonb)
+returns table (
+  command_id text,
+  command_status text,
+  command_attempt_count integer,
+  command_next_retry_at timestamptz,
+  command_target_sys_id text,
+  command_target_number text,
+  command_version integer
+)
+language plpgsql
+security definer
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_command public.servicenow_write_commands%rowtype;
+  v_attempt public.servicenow_write_attempts%rowtype;
+  v_current_candidate_event_id text;
+  v_expected_version integer;
+  v_recovered_at timestamptz;
+  v_version_before integer;
+  v_db_now timestamptz := statement_timestamp();
+begin
+  if p_payload is null or jsonb_typeof(p_payload)<>'object'
+    or public.support_intake_json_has_unsafe_key(p_payload)
+    or exists (
+      select 1 from jsonb_object_keys(p_payload) supplied(key)
+      where supplied.key not in (
+        'commandId','actorUserId','requestId','recoveredAt','confirmed',
+        'expectedVersion','expectedNormalizedPayloadHash',
+        'confirmationNonceHash','mutationCandidateEventId'
+      )
+    )
+    or jsonb_typeof(p_payload->'confirmed')<>'boolean'
+    or jsonb_typeof(p_payload->'expectedVersion')<>'number'
+    or p_payload->>'expectedNormalizedPayloadHash' !~ '^[a-f0-9]{64}$'
+    or p_payload->>'confirmationNonceHash' !~ '^[a-f0-9]{64}$'
+    or not public.support_servicenow_write_parse_boolean(
+      p_payload->'confirmed','SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID'
+    ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID';
+  end if;
+  v_expected_version := public.support_servicenow_write_parse_integer(
+    p_payload->'expectedVersion','SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID'
+  );
+  v_recovered_at := public.support_servicenow_write_parse_timestamp(
+    p_payload->'recoveredAt','SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID'
+  );
+  if v_expected_version<1
+    or v_recovered_at not between v_db_now-interval '2 minutes' and v_db_now+interval '2 minutes' then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID';
+  end if;
+  v_recovered_at := v_db_now;
+  select * into v_command
+  from public.servicenow_write_commands
+  where servicenow_write_commands.id=p_payload->>'commandId'
+  for update;
+  if v_command.id is null then
+    raise exception using errcode='P0002',message='SERVICENOW_WRITE_COMMAND_NOT_FOUND';
+  end if;
+  select * into v_attempt
+  from public.servicenow_write_attempts attempt_record
+  where attempt_record.command_id=v_command.id
+    and attempt_record.outcome='executing'
+  order by attempt_record.attempt_number desc
+  limit 1
+  for update;
+  select candidate.id into v_current_candidate_event_id
+  from public.servicenow_write_mutation_candidate_events candidate
+  where candidate.command_id=v_command.id
+    and not exists (
+      select 1 from public.servicenow_write_reconciliation_events resolution
+      where resolution.mutation_candidate_event_id=candidate.id
+        and resolution.result in ('confirmed_succeeded','confirmed_not_applied')
+    )
+  order by candidate.attempt_number desc
+  limit 1;
+  if v_command.status<>'executing' or v_attempt.id is null
+    or v_command.version<>v_expected_version
+    or v_command.normalized_payload_hash<>p_payload->>'expectedNormalizedPayloadHash'
+    or v_command.confirmation_nonce_hash<>p_payload->>'confirmationNonceHash'
+    or v_command.confirmation_action<>'recover_stuck_attempt'
+    or v_command.confirmation_user_id<>p_payload->>'actorUserId'
+    or v_command.confirmation_expires_at<v_db_now
+    or v_command.confirmation_mutation_candidate_event_id
+      is distinct from v_current_candidate_event_id
+    or nullif(p_payload->>'mutationCandidateEventId','')
+      is distinct from v_current_candidate_event_id then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED';
+  end if;
+  v_version_before := v_command.version;
+  update public.servicenow_write_attempts attempt_record set
+    response_summary=jsonb_build_object(
+      'recoveredByAdministrator',true,
+      'providerWritePerformed',false
+    ),
+    outcome='uncertain',delivery_disposition='may_have_committed',
+    failure_phase='mutation_dispatch',retry_allowed=false,retry_reason=null,
+    reconciliation_reason='Administrator recovered a stuck executing Attempt',
+    safe_error_code='SERVICENOW_WRITE_ATTEMPT_RECOVERED',
+    safe_error_message='Attempt state requires reconciliation after administrative recovery',
+    finished_at=v_recovered_at,
+    terminal_material_hash=public.support_intake_sha256_hex(
+      'recovery:'||v_command.id||':'||v_attempt.id||':'||v_version_before::text
+    )
+  where attempt_record.id=v_attempt.id;
+  update public.servicenow_write_commands command_record set
+    version=command_record.version+1,status='reconciliation_required',
+    safe_response_summary=jsonb_build_object(
+      'recoveredByAdministrator',true,
+      'providerWritePerformed',false
+    ),
+    delivery_disposition='may_have_committed',failure_phase='mutation_dispatch',
+    retry_allowed=false,retry_reason=null,next_retry_at=null,
+    reconciliation_reason='Administrator recovered a stuck executing Attempt',
+    error_code='SERVICENOW_WRITE_ATTEMPT_RECOVERED',
+    error_message='Attempt state requires reconciliation after administrative recovery',
+    confirmation_nonce_hash=null,confirmation_action=null,confirmation_user_id=null,
+    confirmation_expires_at=null,confirmation_mutation_candidate_event_id=null,
+    updated_at=v_recovered_at
+  where command_record.id=v_command.id
+  returning * into v_command;
+  insert into public.servicenow_write_attempt_recovery_events (
+    id,command_id,attempt_id,attempt_number,actor_user_id,request_id,
+    command_version_before,command_version_after,created_at
+  ) values (
+    'sn-recovery-'||public.support_intake_sha256_hex(
+      v_command.id||':'||v_attempt.id||':'||v_version_before::text
+    ),
+    v_command.id,v_attempt.id,v_attempt.attempt_number,p_payload->>'actorUserId',
+    nullif(p_payload->>'requestId',''),v_version_before,v_command.version,v_recovered_at
+  );
+  return query select v_command.id,v_command.status,v_command.attempt_count,
+    v_command.next_retry_at,v_command.target_sys_id,v_command.target_number,v_command.version;
 end;
 $$;
 
@@ -2209,10 +2499,10 @@ begin
 end;
 $$;
 
-drop trigger if exists servicenow_write_mutation_candidates_append_only
-  on public.servicenow_write_mutation_candidates;
-create trigger servicenow_write_mutation_candidates_append_only
-before update or delete on public.servicenow_write_mutation_candidates
+drop trigger if exists servicenow_write_mutation_candidate_events_append_only
+  on public.servicenow_write_mutation_candidate_events;
+create trigger servicenow_write_mutation_candidate_events_append_only
+before update or delete on public.servicenow_write_mutation_candidate_events
 for each row execute function public.support_servicenow_write_block_candidate_change();
 
 create or replace function public.support_servicenow_write_block_reconciliation_change()
@@ -2228,6 +2518,12 @@ $$;
 drop trigger if exists servicenow_write_reconciliation_append_only on public.servicenow_write_reconciliation_events;
 create trigger servicenow_write_reconciliation_append_only
 before update or delete on public.servicenow_write_reconciliation_events
+for each row execute function public.support_servicenow_write_block_reconciliation_change();
+
+drop trigger if exists servicenow_write_recovery_append_only
+  on public.servicenow_write_attempt_recovery_events;
+create trigger servicenow_write_recovery_append_only
+before update or delete on public.servicenow_write_attempt_recovery_events
 for each row execute function public.support_servicenow_write_block_reconciliation_change();
 
 revoke all privileges on function public.support_servicenow_write_parse_timestamp(jsonb,text) from public, anon, authenticated, service_role;
@@ -2272,28 +2568,33 @@ grant execute on function public.support_finish_servicenow_write_attempt(jsonb) 
 revoke all privileges on function public.support_reconcile_servicenow_write_command(jsonb) from public;
 revoke execute on function public.support_reconcile_servicenow_write_command(jsonb) from anon, authenticated;
 grant execute on function public.support_reconcile_servicenow_write_command(jsonb) to service_role;
+revoke all privileges on function public.support_recover_servicenow_write_attempt(jsonb) from public;
+revoke execute on function public.support_recover_servicenow_write_attempt(jsonb) from anon, authenticated;
+grant execute on function public.support_recover_servicenow_write_attempt(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.5 authoritative command ledger with separate semantic command and normalized provider hashes. Direct service-role mutation is denied.';
+  'AI-2.0.6 authoritative command ledger with candidate-scoped confirmation and separate semantic command and normalized provider hashes.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.5 attempt ledger with explicit delivery disposition and uncertain outcome.';
-comment on table public.servicenow_write_mutation_candidates is
-  'AI-2.0.5 append-only bounded Incident identity returned by one create mutation response; it is evidence, not a confirmed target.';
+  'AI-2.0.6 attempt ledger with idempotent terminal material, explicit delivery disposition, and uncertain outcome.';
+comment on table public.servicenow_write_mutation_candidate_events is
+  'AI-2.0.6 append-only per-Attempt Incident candidate evidence; historical candidates are never overwritten by Retry.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.5 immutable candidate-aware reconciliation history with an explicit evidence classification constrained by the action matrix.';
+  'AI-2.0.6 immutable reconciliation history scoped to the current candidate event when one exists.';
+comment on table public.servicenow_write_attempt_recovery_events is
+  'AI-2.0.6 immutable administrator recovery ledger for stuck executing Attempts; recovery performs no provider mutation.';
 comment on table public.servicenow_write_readiness_proofs is
-  'AI-2.0.5 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
+  'AI-2.0.6 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.5 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+  'AI-2.0.6 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
 comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean,boolean,boolean,boolean) is
-  'AI-2.0.5 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
+  'AI-2.0.6 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.5 consumes one-time confirmation, enforces candidate continuity and the evidence matrix, and records mutation-free reconciliation using database time.';
+  'AI-2.0.6 consumes candidate-scoped one-time confirmation, enforces candidate continuity and the evidence matrix, and records mutation-free reconciliation using database time.';
 comment on function public.support_record_servicenow_write_readiness(jsonb) is
-  'AI-2.0.5 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
+  'AI-2.0.6 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.5 ServiceNow mutation candidate continuity and reconciliation proof',null,current_user)
+values ('202607230001','AI-2.0.6 ServiceNow candidate event lifecycle and database proof closure',null,current_user)
 on conflict (version) do nothing;
 
 commit;
