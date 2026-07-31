@@ -69,8 +69,18 @@ describe("ServiceNow write adapter", () => {
       sysId: "a".repeat(32),
       number: "INC0010001",
       state: "1",
+      mutationCandidateObserved: true,
+      candidateSysId: "a".repeat(32),
+      candidateNumber: "INC0010001",
+      mutationHttpStatus: 201,
       postWriteMarkerVerified: true,
       postWriteLookupHttpStatus: 200,
+    });
+    expect(result.mutationCandidate).toEqual({
+      sysId: "a".repeat(32),
+      number: "INC0010001",
+      httpStatus: 201,
+      source: "mutation_response",
     });
     expect(String(fetchMock.mock.calls[2][0])).toContain(`sysparm_query=correlation_id%3D${encodeURIComponent(marker)}`);
     expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
@@ -159,6 +169,17 @@ describe("ServiceNow write adapter", () => {
       deliveryDisposition: "may_have_committed",
       failurePhase: "read_back",
       retryAllowed: false,
+      mutationCandidateSysId: "a".repeat(32),
+      mutationCandidateNumber: "INC0010001",
+      mutationHttpStatus: 201,
+      safeResponseSummary: {
+        httpStatus: 201,
+        mutationCandidateObserved: true,
+        candidateSysId: "a".repeat(32),
+        candidateNumber: "INC0010001",
+        mutationHttpStatus: 201,
+        postWriteMarkerVerified: false,
+      },
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
@@ -186,6 +207,9 @@ describe("ServiceNow write adapter", () => {
         deliveryDisposition: "may_have_committed",
         failurePhase: "read_back",
         retryAllowed: false,
+        mutationCandidateSysId: "a".repeat(32),
+        mutationCandidateNumber: "INC0010001",
+        mutationHttpStatus: 201,
       });
       await vi.advanceTimersByTimeAsync(11);
       await rejection;
@@ -217,6 +241,9 @@ describe("ServiceNow write adapter", () => {
       deliveryDisposition: "may_have_committed",
       failurePhase: "read_back",
       retryAllowed: false,
+      mutationCandidateSysId: "a".repeat(32),
+      mutationCandidateNumber: "INC0010001",
+      mutationHttpStatus: 201,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);

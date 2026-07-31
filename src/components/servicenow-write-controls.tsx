@@ -170,6 +170,7 @@ export function ServiceNowWriteControls() {
   const [verificationNote, setVerificationNote] = useState("");
   const [verificationAcknowledged, setVerificationAcknowledged] = useState(false);
   const [duplicateJournalRiskAcknowledged, setDuplicateJournalRiskAcknowledged] = useState(false);
+  const [mutationCandidateRiskAcknowledged, setMutationCandidateRiskAcknowledged] = useState(false);
 
   const loadSummary = useCallback(async () => {
     setSummary(await api<ServiceNowWriteOperationsSummary>("/api/integrations/servicenow/write/operations"));
@@ -305,7 +306,9 @@ export function ServiceNowWriteControls() {
               verificationNote,
               ...(["add_comment", "add_work_note"].includes(command.commandType)
                 ? { duplicateJournalRiskAcknowledged }
-                : {}),
+                : command.commandType === "create_incident" && command.mutationCandidate
+                  ? { mutationCandidateRiskAcknowledged }
+                  : {}),
             } : {}),
           } : {}),
         }),
@@ -329,6 +332,7 @@ export function ServiceNowWriteControls() {
       setSelected(updated);
       setVerificationAcknowledged(false);
       setDuplicateJournalRiskAcknowledged(false);
+      setMutationCandidateRiskAcknowledged(false);
       setVerificationNote("");
       if (updated.status === "succeeded") toast.success("ServiceNow write succeeded");
       else if (updated.status === "dry_run_ready") toast.success("Dry run validated without a provider write");
@@ -374,11 +378,12 @@ export function ServiceNowWriteControls() {
     command: ServiceNowWriteCommandSummary,
     action: "execute" | "retry" | ServiceNowWriteReconciliationAction,
   ) {
-    setVerifiedTargetSysId(command.targetSysId || "");
-    setVerifiedTargetNumber(command.targetNumber || "");
+    setVerifiedTargetSysId(command.mutationCandidate?.sysId || command.targetSysId || "");
+    setVerifiedTargetNumber(command.mutationCandidate?.number || command.targetNumber || "");
     setVerificationNote("");
     setVerificationAcknowledged(false);
     setDuplicateJournalRiskAcknowledged(false);
+    setMutationCandidateRiskAcknowledged(false);
     setPendingAction({ command, action });
   }
 
@@ -527,9 +532,19 @@ export function ServiceNowWriteControls() {
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <div><span className="text-slate-500">Failure phase</span><p className="mt-1 font-semibold">{selected.failurePhase || "-"}</p></div>
               <div><span className="text-slate-500">Delivery</span><p className="mt-1 font-semibold">{selected.deliveryDisposition || "-"}</p></div>
-              <div><span className="text-slate-500">Known target</span><p className="mt-1 font-semibold">{selected.targetNumber || selected.targetSysId || "Unknown"}</p></div>
+              <div><span className="text-slate-500">Confirmed target</span><p className="mt-1 font-semibold">{selected.targetNumber || selected.targetSysId || "Not confirmed"}</p></div>
               <div><span className="text-slate-500">Read-back</span><p className="mt-1 font-semibold">{selected.reconciliationResult || "Not checked"}</p></div>
             </div>
+            {selected.mutationCandidate && <div className="rounded-xl border border-rose-300 bg-rose-50/80 p-3 text-rose-900 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-100">
+              <p className="font-semibold">Mutation candidate, not a confirmed target</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div><span className="opacity-70">Incident</span><p className="mt-1 font-semibold">{selected.mutationCandidate.number}</p></div>
+                <div><span className="opacity-70">sys_id</span><p className="mt-1 break-all font-mono">{selected.mutationCandidate.sysId}</p></div>
+                <div><span className="opacity-70">Mutation HTTP</span><p className="mt-1 font-semibold">{selected.mutationCandidate.httpStatus}</p></div>
+                <div><span className="opacity-70">Post-write proof</span><p className="mt-1 font-semibold">{selected.safeResponseSummary.postWriteMarkerVerified === true ? "Verified" : "Not verified"}</p></div>
+              </div>
+              <p className="mt-2 text-[10px] opacity-80">Observed {timestamp(selected.mutationCandidate.observedAt)} from the bounded mutation response.</p>
+            </div>}
             <p>{selected.reconciliationReason || "The provider mutation may have committed and cannot be retried safely."}</p>
             <div className="flex flex-wrap justify-end gap-2">
               <Button variant="outline" onClick={() => openConfirmedAction(selected, "reconcile_by_read_back")}>Read back safely</Button>
@@ -576,10 +591,16 @@ export function ServiceNowWriteControls() {
               && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">
                 ServiceNow cannot prove that a journal entry is absent. An incorrect decision can create a duplicate comment or work note later. This action never replays the journal automatically and requires explicit independent verification.
               </p>}
+            {pendingAction.action === "mark_not_applied_after_verification"
+              && pendingAction.command.commandType === "create_incident"
+              && pendingAction.command.mutationCandidate
+              && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">
+                ServiceNow already returned candidate {pendingAction.command.mutationCandidate.number} ({pendingAction.command.mutationCandidate.sysId}). Marking it not applied can permit a later retry that creates a duplicate Incident.
+              </p>}
           </div>
           {pendingAction.action === "mark_succeeded_after_verification" && <div className="grid gap-3 sm:grid-cols-2">
-            <div><Label required>Verified ServiceNow sys_id</Label><Input value={verifiedTargetSysId} onChange={(event) => setVerifiedTargetSysId(event.target.value)} placeholder="Lowercase 32-character sys_id" /></div>
-            <div><Label required>Verified Incident number</Label><Input value={verifiedTargetNumber} onChange={(event) => setVerifiedTargetNumber(event.target.value)} placeholder="INC..." /></div>
+            <div><Label required>Verified ServiceNow sys_id</Label><Input value={verifiedTargetSysId} readOnly={Boolean(pendingAction.command.mutationCandidate)} onChange={(event) => setVerifiedTargetSysId(event.target.value)} placeholder="Lowercase 32-character sys_id" /></div>
+            <div><Label required>Verified Incident number</Label><Input value={verifiedTargetNumber} readOnly={Boolean(pendingAction.command.mutationCandidate)} onChange={(event) => setVerifiedTargetNumber(event.target.value)} placeholder="INC..." /></div>
           </div>}
           {(pendingAction.action === "mark_succeeded_after_verification"
             || pendingAction.action === "mark_not_applied_after_verification") && <>
@@ -595,7 +616,14 @@ export function ServiceNowWriteControls() {
               <input type="checkbox" className="mt-0.5" checked={duplicateJournalRiskAcknowledged} onChange={(event) => setDuplicateJournalRiskAcknowledged(event.target.checked)} />
               <span>I accept that ServiceNow cannot prove journal absence and a later manual retry may duplicate this comment or work note.</span>
             </label>}
-          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingAction(undefined)}>Cancel</Button><Button onClick={() => commandAction(pendingAction.command, pendingAction.action)} disabled={(pendingAction.action === "mark_succeeded_after_verification" && (!verifiedTargetSysId || !verifiedTargetNumber || !verificationNote || !verificationAcknowledged)) || (pendingAction.action === "mark_not_applied_after_verification" && (!verificationNote || !verificationAcknowledged || (["add_comment", "add_work_note"].includes(pendingAction.command.commandType) && !duplicateJournalRiskAcknowledged)))}><Play size={14} />Confirm action</Button></div>
+          {pendingAction.action === "mark_not_applied_after_verification"
+            && pendingAction.command.commandType === "create_incident"
+            && pendingAction.command.mutationCandidate
+            && <label className="flex items-start gap-2 rounded-xl border border-rose-300 bg-rose-50 p-3 font-semibold text-rose-900 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-100">
+              <input type="checkbox" className="mt-0.5" checked={mutationCandidateRiskAcknowledged} onChange={(event) => setMutationCandidateRiskAcknowledged(event.target.checked)} />
+              <span>I acknowledge that ServiceNow returned this Incident candidate and that a later retry may create a duplicate.</span>
+            </label>}
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPendingAction(undefined)}>Cancel</Button><Button onClick={() => commandAction(pendingAction.command, pendingAction.action)} disabled={(pendingAction.action === "mark_succeeded_after_verification" && (!verifiedTargetSysId || !verifiedTargetNumber || !verificationNote || !verificationAcknowledged)) || (pendingAction.action === "mark_not_applied_after_verification" && (!verificationNote || !verificationAcknowledged || (["add_comment", "add_work_note"].includes(pendingAction.command.commandType) && !duplicateJournalRiskAcknowledged) || (pendingAction.command.commandType === "create_incident" && Boolean(pendingAction.command.mutationCandidate) && !mutationCandidateRiskAcknowledged)))}><Play size={14} />Confirm action</Button></div>
         </div>}
       </DialogContent>
     </Dialog>

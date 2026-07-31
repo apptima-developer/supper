@@ -8,6 +8,7 @@ import {
   serviceNowWriteAttemptRowSchema,
   serviceNowWriteCommandRowSchema,
   serviceNowWriteCommandTypeSchema,
+  serviceNowWriteMutationCandidateRowSchema,
   serviceNowWriteReconciliationEventRowSchema,
   serviceNowWriteReconciliationResultSchema,
   serviceNowWriteReadinessProofRowSchema,
@@ -17,6 +18,7 @@ import type {
   ServiceNowWriteAttemptSummary,
   ServiceNowWriteCommandSummary,
   ServiceNowWriteCommandType,
+  ServiceNowWriteMutationCandidate,
   ServiceNowWriteOperationsSummary,
   ServiceNowWriteStatus,
 } from "./types";
@@ -84,6 +86,7 @@ export function safeServiceNowWriteCommand(
   options: {
     includePreview?: boolean;
     attempts?: ServiceNowWriteAttemptSummary[];
+    mutationCandidate?: ServiceNowWriteMutationCandidate;
     reconciliationHistory?: ServiceNowWriteCommandSummary["reconciliationHistory"];
   } = {},
 ): ServiceNowWriteCommandSummary {
@@ -103,6 +106,7 @@ export function safeServiceNowWriteCommand(
     targetTable: row.target_table,
     targetSysId: row.target_sys_id || undefined,
     targetNumber: row.target_number || undefined,
+    ...(options.mutationCandidate ? { mutationCandidate: options.mutationCandidate } : {}),
     commandMaterialHash: row.command_material_hash,
     normalizedPayloadHash: row.normalized_payload_hash,
     providerCorrelationMarker: row.provider_correlation_marker || undefined,
@@ -210,6 +214,20 @@ const reconciliationSelect = [
   "id", "action", "result", "evidence_classification", "safe_read_back_summary", "actor_user_id",
   "command_version_before", "command_version_after", "created_at",
 ].join(",");
+const mutationCandidateSelect = "command_id,attempt_id,sys_id,number,http_status,observed_at,source";
+
+function mutationCandidateSummary(input: unknown): ServiceNowWriteMutationCandidate | undefined {
+  const row = parsePersisted(serviceNowWriteMutationCandidateRowSchema.nullable(), input);
+  return row
+    ? {
+      sysId: row.sys_id,
+      number: row.number,
+      httpStatus: row.http_status,
+      observedAt: row.observed_at,
+      source: row.source,
+    }
+    : undefined;
+}
 
 export class ServiceNowWriteRepository {
   async ensureConnection(
@@ -323,13 +341,16 @@ export class ServiceNowWriteRepository {
       .eq("id", commandId).maybeSingle());
     if (!command.data) return undefined;
     if (!includeDetails) return safeServiceNowWriteCommand(command.data);
-    const [attempts, reconciliation] = await Promise.all([
+    const [attempts, reconciliation, mutationCandidate] = await Promise.all([
       must("Could not read ServiceNow write attempts", db.from("servicenow_write_attempts")
         .select(attemptSelect)
         .eq("command_id", commandId).order("attempt_number", { ascending: false }).limit(100)),
       must("Could not read ServiceNow reconciliation history", db.from("servicenow_write_reconciliation_events")
         .select(reconciliationSelect)
         .eq("command_id", commandId).order("created_at", { ascending: false }).limit(100)),
+      must("Could not read ServiceNow mutation candidate", db.from("servicenow_write_mutation_candidates")
+        .select(mutationCandidateSelect)
+        .eq("command_id", commandId).maybeSingle()),
     ]);
     const history = parsePersisted(z.array(serviceNowWriteReconciliationEventRowSchema), reconciliation.data || []).map((row) => ({
       id: row.id,
@@ -345,8 +366,21 @@ export class ServiceNowWriteRepository {
     return safeServiceNowWriteCommand(command.data, {
       includePreview: true,
       attempts: parsePersisted(z.array(serviceNowWriteAttemptRowSchema), attempts.data || []).map(attemptSummary),
+      mutationCandidate: mutationCandidateSummary(mutationCandidate.data),
       reconciliationHistory: history,
     });
+  }
+
+  async getMutationCandidate(commandId: string) {
+    const db = await client();
+    const result = await must(
+      "Could not read ServiceNow mutation candidate",
+      db.from("servicenow_write_mutation_candidates")
+        .select(mutationCandidateSelect)
+        .eq("command_id", commandId)
+        .maybeSingle(),
+    );
+    return mutationCandidateSummary(result.data);
   }
 
   async getNormalizedCommand(commandId: string) {

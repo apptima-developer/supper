@@ -125,6 +125,7 @@ function operationalError(error: unknown): never {
   if (message.includes("SERVICENOW_WRITE_VERSION_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERSION_CONFLICT", "ServiceNow write command changed; review it again");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED", "ServiceNow write command does not require reconciliation");
   if (message.includes("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the ServiceNow write command");
+  if (message.includes("SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT", "Verified target conflicts with the recorded ServiceNow mutation candidate");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID", "ServiceNow write reconciliation evidence does not support this decision");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_INVALID")) throw new HttpError(400, "SERVICENOW_WRITE_RECONCILIATION_INVALID", "ServiceNow write reconciliation evidence is invalid");
   if (message.includes("SERVICENOW_WRITE_DRY_RUN_NOT_ALLOWED")
@@ -462,6 +463,12 @@ async function execute(
       responseSummary: result.responseSummary,
       targetSysId: result.targetSysId,
       targetNumber: result.targetNumber,
+      ...(result.mutationCandidate ? {
+        mutationCandidateSysId: result.mutationCandidate.sysId,
+        mutationCandidateNumber: result.mutationCandidate.number,
+        mutationCandidateHttpStatus: result.mutationCandidate.httpStatus,
+        mutationCandidateSource: result.mutationCandidate.source,
+      } : {}),
       errorCode: "",
       errorMessage: "",
       finishedAt: now().toISOString(),
@@ -500,9 +507,18 @@ async function execute(
         retryReason: retryAllowed ? "Provider definitively allowed a bounded retry" : "",
         reconciliationReason,
         requestSummary,
-        responseSummary: {},
+        responseSummary: classified ? error.safeResponseSummary || {} : {},
         targetSysId: normalized.targetSysId || "",
         targetNumber: normalized.targetNumber || "",
+        ...(classified
+          && error.mutationCandidateSysId
+          && error.mutationCandidateNumber
+          && error.mutationHttpStatus !== undefined ? {
+            mutationCandidateSysId: error.mutationCandidateSysId,
+            mutationCandidateNumber: error.mutationCandidateNumber,
+            mutationCandidateHttpStatus: error.mutationHttpStatus,
+            mutationCandidateSource: "mutation_response",
+          } : {}),
         errorCode: safeErrorCode,
         errorMessage: safeErrorMessage,
         ...(retryAllowed ? {
@@ -605,6 +621,7 @@ export async function reconcileCommand(
     verifiedTargetNumber?: string;
     verificationAcknowledged?: true;
     duplicateJournalRiskAcknowledged?: true;
+    mutationCandidateRiskAcknowledged?: true;
     verificationNote?: string;
     abortSignal?: AbortSignal;
   },
@@ -613,6 +630,9 @@ export async function reconcileCommand(
   const { repository } = await ledgerRuntime(dependencies);
   const normalized = await repository.getNormalizedCommand(input.commandId);
   if (!normalized) throw new HttpError(404, "SERVICENOW_WRITE_COMMAND_NOT_FOUND", "ServiceNow write command was not found");
+  const mutationCandidate = typeof repository.getMutationCandidate === "function"
+    ? await repository.getMutationCandidate(input.commandId)
+    : undefined;
   const checkedAt = (dependencies.now || (() => new Date()))().toISOString();
   let reconciliationResult: ServiceNowWriteReconciliationResult = input.action === "mark_succeeded_after_verification"
     ? "confirmed_succeeded"
@@ -651,8 +671,13 @@ export async function reconcileCommand(
             : readBack.result === "ambiguous"
               ? "provider_ambiguous"
               : "provider_inconclusive";
-        if ((readBack.result === "confirmed_succeeded" || readBack.result === "inconclusive")
-          && (!readBack.targetSysId || !readBack.targetNumber)) {
+        const resultHasTarget = readBack.result === "confirmed_succeeded"
+          || readBack.result === "inconclusive";
+        const candidateConflict = resultHasTarget
+          && mutationCandidate
+          && (readBack.targetSysId !== mutationCandidate.sysId
+            || readBack.targetNumber !== mutationCandidate.number);
+        if (resultHasTarget && (!readBack.targetSysId || !readBack.targetNumber)) {
           reconciliationResult = "read_back_failed";
           evidenceClassification = "provider_target_conflict";
           safeReadBackSummary = {
@@ -660,6 +685,16 @@ export async function reconcileCommand(
             result: "failed",
             evidenceClassification,
             errorCode: "SERVICENOW_WRITE_PROVIDER_PROOF_REQUIRED",
+          };
+        } else if (candidateConflict) {
+          reconciliationResult = "read_back_failed";
+          evidenceClassification = "provider_target_conflict";
+          safeReadBackSummary = {
+            method: "provider_read_back",
+            result: "failed",
+            evidenceClassification,
+            errorCode: "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+            mutationCandidateMatched: false,
           };
         } else {
           safeReadBackSummary = {
@@ -669,6 +704,7 @@ export async function reconcileCommand(
               ? {
                 targetSysId: readBack.targetSysId,
                 targetNumber: readBack.targetNumber,
+                ...(mutationCandidate ? { mutationCandidateMatched: true } : {}),
               }
               : {}),
           };
@@ -700,6 +736,14 @@ export async function reconcileCommand(
       || (normalized.targetNumber && normalized.targetNumber !== targetNumber)) {
       throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the original command target");
     }
+    if (mutationCandidate
+      && (mutationCandidate.sysId !== targetSysId || mutationCandidate.number !== targetNumber)) {
+      throw new HttpError(
+        409,
+        "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+        "Verified target conflicts with the recorded ServiceNow mutation candidate",
+      );
+    }
     evidenceClassification = "provider_unavailable_manual_verification";
     let providerResult = "provider_configuration_unavailable";
     const provider = await optionalProviderRuntime(dependencies);
@@ -721,7 +765,15 @@ export async function reconcileCommand(
           throw new HttpError(409, "SERVICENOW_WRITE_PROVIDER_PROOF_REQUIRED", "Provider read-back did not return one exact Incident identity");
         }
         if (readBack.targetSysId !== targetSysId || readBack.targetNumber !== targetNumber) {
-          throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with provider read-back");
+          throw new HttpError(
+            409,
+            mutationCandidate
+              ? "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT"
+              : "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT",
+            mutationCandidate
+              ? "Provider read-back conflicts with the recorded ServiceNow mutation candidate"
+              : "Verified target conflicts with provider read-back",
+          );
         }
         evidenceClassification = readBack.result === "confirmed_succeeded"
           ? "provider_matched"
@@ -730,7 +782,15 @@ export async function reconcileCommand(
         if (error instanceof HttpError) throw error;
         if (isIntegrationBoundaryError(error)
           && error.code === "SERVICENOW_WRITE_LOOKUP_MISMATCH") {
-          throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Provider read-back returned a conflicting Incident identity");
+          throw new HttpError(
+            409,
+            mutationCandidate
+              ? "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT"
+              : "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT",
+            mutationCandidate
+              ? "Provider read-back conflicts with the recorded ServiceNow mutation candidate"
+              : "Provider read-back returned a conflicting Incident identity",
+          );
         }
         if (!isIntegrationBoundaryError(error)
           || !["unavailable", "timeout"].includes(error.category)) {
@@ -741,6 +801,13 @@ export async function reconcileCommand(
     } else {
       providerResult = provider.providerErrorCode;
     }
+    if (evidenceClassification === "provider_unavailable_manual_verification" && !mutationCandidate) {
+      throw new HttpError(
+        409,
+        "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+        "Provider-unavailable manual success requires a recorded ServiceNow mutation candidate",
+      );
+    }
     safeReadBackSummary = {
       method: "manual_verified_target",
       targetSysId,
@@ -749,6 +816,7 @@ export async function reconcileCommand(
       verificationEvidenceProvided: true,
       evidenceClassification,
       providerResult,
+      ...(mutationCandidate ? { mutationCandidateMatched: true } : {}),
     };
   } else {
     if (!input.verificationAcknowledged || !input.verificationNote) {
@@ -766,6 +834,15 @@ export async function reconcileCommand(
       evidenceClassification = "journal_manual_verification";
       providerResult = "journal_presence_not_safely_provable";
     } else {
+      if (normalized.commandType === "create_incident"
+        && mutationCandidate
+        && !input.mutationCandidateRiskAcknowledged) {
+        throw new HttpError(
+          400,
+          "SERVICENOW_WRITE_MUTATION_CANDIDATE_RISK_ACK_REQUIRED",
+          "Explicit mutation-candidate duplicate-risk acknowledgment is required",
+        );
+      }
       evidenceClassification = "provider_unavailable_manual_verification";
       const provider = await optionalProviderRuntime(dependencies);
       if (provider.available) {
@@ -814,7 +891,9 @@ export async function reconcileCommand(
       providerResult,
       ...(normalized.commandType === "add_comment" || normalized.commandType === "add_work_note"
         ? { duplicateJournalRiskAcknowledged: input.duplicateJournalRiskAcknowledged }
-        : {}),
+        : mutationCandidate
+          ? { mutationCandidateRiskAcknowledged: input.mutationCandidateRiskAcknowledged }
+          : {}),
     };
   }
   try {
@@ -829,6 +908,9 @@ export async function reconcileCommand(
         verificationAcknowledged: input.verificationAcknowledged,
         ...(input.duplicateJournalRiskAcknowledged
           ? { duplicateJournalRiskAcknowledged: input.duplicateJournalRiskAcknowledged }
+          : {}),
+        ...(input.mutationCandidateRiskAcknowledged
+          ? { mutationCandidateRiskAcknowledged: input.mutationCandidateRiskAcknowledged }
           : {}),
         verificationNote: input.verificationNote,
       }),

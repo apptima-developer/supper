@@ -79,6 +79,13 @@ const normalizedUpdate: NormalizedServiceNowWriteCommand = {
   targetSysId: "b".repeat(32),
   fields: { state: "2" },
 };
+const mutationCandidate = {
+  sysId: "b".repeat(32),
+  number: "INC0010004",
+  httpStatus: 201,
+  observedAt: "2026-07-23T01:04:00.000Z",
+  source: "mutation_response" as const,
+};
 const auditFixture: Audit = {
   id: "audit-id",
   action: "create",
@@ -396,6 +403,12 @@ describe("ServiceNow write service", () => {
           responseSummary: { httpStatus: 201, sysId: "a".repeat(32), number: "INC0010001" },
           targetSysId: "a".repeat(32),
           targetNumber: "INC0010001",
+          mutationCandidate: {
+            sysId: "a".repeat(32),
+            number: "INC0010001",
+            httpStatus: 201,
+            source: "mutation_response" as const,
+          },
         })),
       }),
       audit: async () => auditFixture,
@@ -413,6 +426,10 @@ describe("ServiceNow write service", () => {
       outcome: "succeeded",
       deliveryDisposition: "confirmed_succeeded",
       targetSysId: "a".repeat(32),
+      mutationCandidateSysId: "a".repeat(32),
+      mutationCandidateNumber: "INC0010001",
+      mutationCandidateHttpStatus: 201,
+      mutationCandidateSource: "mutation_response",
     }));
   });
 
@@ -530,6 +547,82 @@ describe("ServiceNow write service", () => {
     expect(uncertainAttempt[0]).not.toHaveProperty("nextRetryAt");
   });
 
+  it("persists only bounded create mutation-candidate evidence after post-write proof fails", async () => {
+    const finishAttempt = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "reconciliation_required" as const,
+      command_attempt_count: 1,
+      command_version: 3,
+    }));
+    const repository = {
+      ...freshReadiness(),
+      beginAttempt: vi.fn(async () => begin(normalizedCreate, 1)),
+      finishAttempt,
+      getCommand: vi.fn(async () => commandSummary({
+        status: "reconciliation_required",
+        retryAllowed: false,
+        attemptCount: 1,
+        deliveryDisposition: "may_have_committed",
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    const boundary = serviceNowError({
+      category: "timeout",
+      code: "SERVICENOW_WRITE_TIMEOUT",
+      safeMessage: "ServiceNow post-write verification timed out",
+      retryable: false,
+      operation: "ticket.create",
+      correlationId: correlationIdSchema.parse("request-candidate-persistence"),
+    });
+    const uncertain = serviceNowWriteExecutionError(boundary, {
+      deliveryDisposition: "may_have_committed",
+      failurePhase: "read_back",
+      retryAllowed: false,
+      reconciliationReason: "Post-create correlation-marker verification was not exact",
+      mutationCandidateSysId: mutationCandidate.sysId,
+      mutationCandidateNumber: mutationCandidate.number,
+      mutationHttpStatus: mutationCandidate.httpStatus,
+      safeResponseSummary: {
+        httpStatus: 201,
+        mutationCandidateObserved: true,
+        candidateSysId: mutationCandidate.sysId,
+        candidateNumber: mutationCandidate.number,
+        mutationHttpStatus: 201,
+        postWriteMarkerVerified: false,
+      },
+    });
+    await executeCommand({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-candidate-persistence",
+      correlationId: "request-candidate-persistence",
+      confirmation,
+    }, {
+      env,
+      repository,
+      adapter: adapter({ execute: vi.fn(async () => { throw uncertain; }) }),
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:04:00.000Z"),
+      createId: () => "attempt-candidate-persistence",
+    });
+    expect(finishAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "uncertain",
+      responseSummary: {
+        httpStatus: 201,
+        mutationCandidateObserved: true,
+        candidateSysId: mutationCandidate.sysId,
+        candidateNumber: mutationCandidate.number,
+        mutationHttpStatus: 201,
+        postWriteMarkerVerified: false,
+      },
+      mutationCandidateSysId: mutationCandidate.sysId,
+      mutationCandidateNumber: mutationCandidate.number,
+      mutationCandidateHttpStatus: 201,
+      mutationCandidateSource: "mutation_response",
+    }));
+    expect(JSON.stringify(finishAttempt.mock.calls[0])).not.toContain("raw provider value");
+    expect(JSON.stringify(finishAttempt.mock.calls[0])).not.toContain("authorization");
+  });
+
   it("requires a matching fresh readiness proof before consuming a live attempt", async () => {
     const beginAttempt = vi.fn();
     const providerExecute = vi.fn();
@@ -625,12 +718,15 @@ describe("ServiceNow write service", () => {
       targetSysId: "c".repeat(32),
       targetNumber: "INC0010003",
     }));
-    const reconcile = vi.fn(async () => ({
-      command_id: "command-id-0000000001",
-      command_status: "succeeded" as const,
-      command_version: 2,
-      reconciliation_result: "confirmed_succeeded",
-    }));
+    const reconcile = vi.fn(async (payload: Record<string, unknown>) => {
+      void payload;
+      return {
+        command_id: "command-id-0000000001",
+        command_status: "succeeded" as const,
+        command_version: 2,
+        reconciliation_result: "confirmed_succeeded",
+      };
+    });
     const command = await reconcileCommand({
       commandId: "command-id-0000000001",
       action: "reconcile_by_read_back",
@@ -709,6 +805,154 @@ describe("ServiceNow write service", () => {
         evidenceClassification: "provider_inconclusive",
       }),
     }));
+  });
+
+  it("completes candidate-aware read-back only when the provider pair matches the POST candidate", async () => {
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "succeeded" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_succeeded",
+    }));
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "reconcile_by_read_back",
+      session,
+      requestId: "request-candidate-match",
+      correlationId: "request-candidate-match",
+      confirmation,
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        getMutationCandidate: vi.fn(async () => mutationCandidate),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({ status: "succeeded", version: 2 })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: "confirmed_succeeded" as const,
+          summary: { method: "correlation_marker", matchCount: 1 },
+          targetSysId: mutationCandidate.sysId,
+          targetNumber: mutationCandidate.number,
+        })),
+      }),
+      audit: async () => auditFixture,
+    });
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      result: "confirmed_succeeded",
+      targetSysId: mutationCandidate.sysId,
+      targetNumber: mutationCandidate.number,
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_matched",
+        mutationCandidateMatched: true,
+      }),
+    }));
+  });
+
+  it.each([
+    ["sys_id mismatch", "c".repeat(32), mutationCandidate.number],
+    ["number mismatch", mutationCandidate.sysId, "INC0099999"],
+  ])("keeps candidate-aware read-back unresolved after %s", async (_label, targetSysId, targetNumber) => {
+    const reconcile = vi.fn(async (payload: Record<string, unknown>) => {
+      void payload;
+      return {
+        command_id: "command-id-0000000001",
+        command_status: "reconciliation_required" as const,
+        command_version: 2,
+        reconciliation_result: "read_back_failed",
+      };
+    });
+    const dependencies = {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        getMutationCandidate: vi.fn(async () => mutationCandidate),
+        reconcile,
+        getCommand: vi.fn(async () => commandSummary({
+          status: "reconciliation_required",
+          version: 2,
+        })),
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({
+        readBack: vi.fn(async () => ({
+          result: "confirmed_succeeded" as const,
+          summary: { method: "correlation_marker", matchCount: 1 },
+          targetSysId,
+          targetNumber,
+        })),
+      }),
+      audit: async () => auditFixture,
+    };
+    await reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "reconcile_by_read_back",
+      session,
+      requestId: `request-candidate-conflict-${_label.replaceAll(" ", "-")}`,
+      correlationId: `request-candidate-conflict-${_label.replaceAll(" ", "-")}`,
+      confirmation,
+    }, dependencies);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      result: "read_back_failed",
+      targetSysId: "",
+      targetNumber: "",
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_target_conflict",
+        errorCode: "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+      }),
+    }));
+  });
+
+  it("does not let a later single marker row bypass the persisted candidate", async () => {
+    const reconcile = vi.fn(async (payload: Record<string, unknown>) => {
+      void payload;
+      return {
+        command_id: "command-id-0000000001",
+        command_status: "reconciliation_required" as const,
+        command_version: 2,
+        reconciliation_result: "read_back_failed",
+      };
+    });
+    const readBack = vi.fn()
+      .mockResolvedValueOnce({ result: "ambiguous", summary: { method: "correlation_marker", matchCount: 2 } })
+      .mockResolvedValueOnce({
+        result: "confirmed_succeeded",
+        summary: { method: "correlation_marker", matchCount: 1 },
+        targetSysId: "c".repeat(32),
+        targetNumber: "INC0099999",
+      });
+    const repository = {
+      getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      getMutationCandidate: vi.fn(async () => mutationCandidate),
+      reconcile,
+      getCommand: vi.fn(async () => commandSummary({
+        status: "reconciliation_required",
+        version: 2,
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    for (const suffix of ["ambiguous", "later-conflict"]) {
+      await reconcileCommand({
+        commandId: "command-id-0000000001",
+        action: "reconcile_by_read_back",
+        session,
+        requestId: `request-candidate-${suffix}`,
+        correlationId: `request-candidate-${suffix}`,
+        confirmation,
+      }, {
+        env,
+        repository,
+        adapter: adapter({ readBack }),
+        audit: async () => auditFixture,
+      });
+    }
+    expect(reconcile.mock.calls[0][0]).toMatchObject({
+      result: "ambiguous",
+      safeReadBackSummary: expect.objectContaining({ evidenceClassification: "provider_ambiguous" }),
+    });
+    expect(reconcile.mock.calls[1][0]).toMatchObject({
+      result: "read_back_failed",
+      safeReadBackSummary: expect.objectContaining({ evidenceClassification: "provider_target_conflict" }),
+    });
   });
 
   it("marks an uncertain journal command successful only with a verified target pair and no replay", async () => {
@@ -841,6 +1085,127 @@ describe("ServiceNow write service", () => {
         })),
       }),
     })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT" });
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("rejects manual success when the verified pair conflicts with the persisted mutation candidate", async () => {
+    const reconcile = vi.fn();
+    const readBack = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-manual-candidate-conflict",
+      correlationId: "request-manual-candidate-conflict",
+      confirmation,
+      verifiedTargetSysId: "c".repeat(32),
+      verifiedTargetNumber: mutationCandidate.number,
+      verificationAcknowledged: true,
+      verificationNote: "Independent administrator verification completed.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        getMutationCandidate: vi.fn(async () => mutationCandidate),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({ readBack }),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+    });
+    expect(readBack).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit duplicate-risk acknowledgment before marking a create candidate not applied", async () => {
+    const reconcile = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "retry_scheduled" as const,
+      command_version: 2,
+      reconciliation_result: "confirmed_not_applied",
+    }));
+    const readBack = vi.fn(async () => ({
+      result: "not_found" as const,
+      summary: { method: "correlation_marker", matchCount: 0 },
+    }));
+    const repository = {
+      getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      getMutationCandidate: vi.fn(async () => mutationCandidate),
+      reconcile,
+      getCommand: vi.fn(async () => commandSummary({
+        status: "retry_scheduled",
+        version: 2,
+      })),
+    } as unknown as ServiceNowWriteRepository;
+    const input = {
+      commandId: "command-id-0000000001",
+      action: "mark_not_applied_after_verification" as const,
+      session,
+      requestId: "request-create-candidate-not-applied",
+      correlationId: "request-create-candidate-not-applied",
+      confirmation,
+      verificationAcknowledged: true as const,
+      verificationNote: "Exact marker review found no current ServiceNow row.",
+    };
+    await expect(reconcileCommand(input, {
+      env,
+      repository,
+      adapter: adapter({ readBack }),
+    })).rejects.toMatchObject({
+      code: "SERVICENOW_WRITE_MUTATION_CANDIDATE_RISK_ACK_REQUIRED",
+    });
+    expect(readBack).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+
+    await reconcileCommand({
+      ...input,
+      mutationCandidateRiskAcknowledged: true,
+    }, {
+      env,
+      repository,
+      adapter: adapter({ readBack }),
+      audit: async () => auditFixture,
+    });
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      result: "confirmed_not_applied",
+      mutationCandidateRiskAcknowledged: true,
+      safeReadBackSummary: expect.objectContaining({
+        evidenceClassification: "provider_not_found",
+        mutationCandidateRiskAcknowledged: true,
+      }),
+    }));
+  });
+
+  it("rejects provider-unavailable manual success when no mutation candidate was recorded", async () => {
+    const reconcile = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-manual-unavailable-no-candidate",
+      correlationId: "request-manual-unavailable-no-candidate",
+      confirmation,
+      verifiedTargetSysId: "b".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Independent administrator verification completed.",
+    }, {
+      env: {
+        DATA_BACKEND: "supabase-relational",
+        SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+        SERVICENOW_ENABLED: "true",
+        SERVICENOW_AUTH_MODE: "basic",
+      },
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedCreate),
+        getMutationCandidate: vi.fn(async () => undefined),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT",
+    });
     expect(reconcile).not.toHaveBeenCalled();
   });
 
@@ -1148,6 +1513,7 @@ describe("ServiceNow write service", () => {
     }));
     const repository = {
       getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      getMutationCandidate: vi.fn(async () => mutationCandidate),
       reconcile,
       getCommand: vi.fn(async () => commandSummary({
         status: "reconciliation_required",
@@ -1237,6 +1603,7 @@ describe("ServiceNow write service", () => {
     }));
     const repository = {
       getNormalizedCommand: vi.fn(async () => normalizedCreate),
+      getMutationCandidate: vi.fn(async () => mutationCandidate),
       reconcile,
       getCommand: vi.fn(async () => commandSummary({ status: "succeeded", version: 2 })),
     } as unknown as ServiceNowWriteRepository;

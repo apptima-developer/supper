@@ -440,6 +440,22 @@ export class ServiceNowWriteAdapter {
         reconciliationReason: "Provider returned an invalid Incident identity after mutation",
       });
     }
+    const mutationCandidate = command.commandType === "create_incident"
+      ? {
+        sysId: result.sysId,
+        number: result.number,
+        httpStatus: response.status,
+        source: "mutation_response" as const,
+      }
+      : undefined;
+    const mutationCandidateSummary = mutationCandidate
+      ? {
+        mutationCandidateObserved: true as const,
+        candidateSysId: mutationCandidate.sysId,
+        candidateNumber: mutationCandidate.number,
+        mutationHttpStatus: mutationCandidate.httpStatus,
+      }
+      : {};
     if ((targetSysId && result.sysId !== targetSysId)
       || (command.targetNumber && result.number !== command.targetNumber)) {
       throw serviceNowWriteExecutionError(
@@ -522,6 +538,14 @@ export class ServiceNowWriteAdapter {
             failurePhase: "read_back",
             retryAllowed: false,
             reconciliationReason: "Post-create correlation-marker verification was not exact",
+            mutationCandidateSysId: mutationCandidate?.sysId,
+            mutationCandidateNumber: mutationCandidate?.number,
+            mutationHttpStatus: mutationCandidate?.httpStatus,
+            safeResponseSummary: {
+              httpStatus: response.status,
+              ...mutationCandidateSummary,
+              postWriteMarkerVerified: false,
+            },
           },
         );
       }
@@ -541,12 +565,14 @@ export class ServiceNowWriteAdapter {
         number: result.number,
         state: result.state,
         ...(command.commandType === "create_incident" ? {
+          ...mutationCandidateSummary,
           postWriteMarkerVerified: true,
           postWriteLookupHttpStatus,
         } : {}),
       },
       targetSysId: result.sysId,
       targetNumber: result.number,
+      ...(mutationCandidate ? { mutationCandidate } : {}),
     };
   }
 

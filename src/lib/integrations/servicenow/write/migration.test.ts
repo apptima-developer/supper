@@ -12,6 +12,7 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_mappings",
       "servicenow_write_commands",
       "servicenow_write_attempts",
+      "servicenow_write_mutation_candidates",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
       "servicenow_write_readiness_proofs",
@@ -38,6 +39,7 @@ describe("ServiceNow write kernel migration", () => {
       "servicenow_write_mappings",
       "servicenow_write_commands",
       "servicenow_write_attempts",
+      "servicenow_write_mutation_candidates",
       "servicenow_ticket_links",
       "servicenow_write_reconciliation_events",
       "servicenow_write_readiness_proofs",
@@ -105,6 +107,10 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("evidence_classification text not null");
     expect(sql).toContain("coalesce(safe_read_back_summary->>'evidenceclassification','') = evidence_classification");
     expect(sql).toContain("duplicatejournalriskacknowledged");
+    expect(sql).toContain("mutationcandidateriskacknowledged");
+    expect(sql).toContain("servicenow_write_mutation_candidate_conflict");
+    expect(sql).toContain("servicenow_write_mutation_candidates_append_only");
+    expect(sql).toContain("mutation_response");
   });
 
   it("enforces fresh readiness and exception-safe payload parsing", () => {

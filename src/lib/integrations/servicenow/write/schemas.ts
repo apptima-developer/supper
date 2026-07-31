@@ -199,9 +199,24 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   number: serviceNowNumberWriteSchema.optional(),
   state: z.string().max(80).optional(),
   recoveredByCorrelationMarker: z.boolean().optional(),
+  mutationCandidateObserved: z.boolean().optional(),
+  candidateSysId: serviceNowSysIdWriteSchema.optional(),
+  candidateNumber: serviceNowNumberWriteSchema.optional(),
+  mutationHttpStatus: z.number().int().min(100).max(599).optional(),
   postWriteMarkerVerified: z.boolean().optional(),
   postWriteLookupHttpStatus: z.number().int().min(100).max(599).optional(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const hasCandidate = value.candidateSysId !== undefined || value.candidateNumber !== undefined
+    || value.mutationHttpStatus !== undefined || value.mutationCandidateObserved !== undefined;
+  if (hasCandidate && (
+    value.mutationCandidateObserved !== true
+    || !value.candidateSysId
+    || !value.candidateNumber
+    || value.mutationHttpStatus === undefined
+  )) {
+    context.addIssue({ code: "custom", message: "Mutation candidate summary is incomplete" });
+  }
+});
 
 export const serviceNowValidationSummarySchema = z.object({
   valid: z.literal(true),
@@ -238,6 +253,7 @@ export const reconcileServiceNowWriteCommandRequestSchema = z.discriminatedUnion
     action: z.literal("mark_not_applied_after_verification"),
     verificationAcknowledged: z.literal(true),
     duplicateJournalRiskAcknowledged: z.literal(true).optional(),
+    mutationCandidateRiskAcknowledged: z.literal(true).optional(),
     verificationNote: verificationNoteSchema,
   }).strict(),
   confirmedServiceNowWriteActionRequestSchema.extend({
@@ -287,6 +303,16 @@ export const serviceNowWriteAttemptRowSchema = z.object({
   safe_error_message: nullableText(240),
   started_at: timestampSchema,
   finished_at: nullableTimestamp,
+}).strict();
+
+export const serviceNowWriteMutationCandidateRowSchema = z.object({
+  command_id: z.string().min(1).max(200),
+  attempt_id: z.string().min(1).max(200),
+  sys_id: serviceNowSysIdWriteSchema,
+  number: serviceNowNumberWriteSchema,
+  http_status: z.number().int().min(100).max(599),
+  observed_at: timestampSchema,
+  source: z.literal("mutation_response"),
 }).strict();
 
 export const serviceNowWriteCommandRowSchema = z.object({

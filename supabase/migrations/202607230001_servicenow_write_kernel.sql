@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.4: reconciliation truth and exact create proof.
+-- SUPPER AI-2.0.5: mutation candidate continuity and reconciliation proof.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -210,6 +210,16 @@ create table if not exists public.servicenow_write_attempts (
   check ((outcome = 'uncertain' and delivery_disposition = 'may_have_committed' and not retry_allowed) or outcome <> 'uncertain')
 );
 
+create table if not exists public.servicenow_write_mutation_candidates (
+  command_id text primary key references public.servicenow_write_commands(id) on delete restrict,
+  attempt_id text not null unique references public.servicenow_write_attempts(id) on delete restrict,
+  sys_id text not null check (sys_id ~ '^[a-f0-9]{32}$'),
+  number text not null check (number ~ '^[A-Za-z0-9_-]{1,80}$'),
+  http_status integer not null check (http_status between 100 and 599),
+  observed_at timestamptz not null,
+  source text not null check (source = 'mutation_response')
+);
+
 create table if not exists public.servicenow_ticket_links (
   id text primary key,
   supper_ticket_id text references public.support_tickets(id) on delete restrict,
@@ -304,6 +314,7 @@ alter table public.servicenow_write_connections enable row level security;
 alter table public.servicenow_write_mappings enable row level security;
 alter table public.servicenow_write_commands enable row level security;
 alter table public.servicenow_write_attempts enable row level security;
+alter table public.servicenow_write_mutation_candidates enable row level security;
 alter table public.servicenow_ticket_links enable row level security;
 alter table public.servicenow_write_reconciliation_events enable row level security;
 alter table public.servicenow_write_readiness_proofs enable row level security;
@@ -312,6 +323,7 @@ revoke all privileges on table public.servicenow_write_connections from public, 
 revoke all privileges on table public.servicenow_write_mappings from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_commands from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_attempts from public, anon, authenticated;
+revoke all privileges on table public.servicenow_write_mutation_candidates from public, anon, authenticated;
 revoke all privileges on table public.servicenow_ticket_links from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_reconciliation_events from public, anon, authenticated;
 revoke all privileges on table public.servicenow_write_readiness_proofs from public, anon, authenticated;
@@ -322,6 +334,7 @@ grant select on table public.servicenow_write_connections to service_role;
 grant select on table public.servicenow_write_mappings to service_role;
 grant select on table public.servicenow_write_commands to service_role;
 grant select on table public.servicenow_write_attempts to service_role;
+grant select on table public.servicenow_write_mutation_candidates to service_role;
 grant select on table public.servicenow_ticket_links to service_role;
 grant select on table public.servicenow_write_reconciliation_events to service_role;
 grant select on table public.servicenow_write_readiness_proofs to service_role;
@@ -1493,6 +1506,12 @@ declare
   v_retry_allowed boolean;
   v_target_sys_id text;
   v_target_number text;
+  v_candidate public.servicenow_write_mutation_candidates%rowtype;
+  v_candidate_sys_id text;
+  v_candidate_number text;
+  v_candidate_http_status integer;
+  v_candidate_source text;
+  v_candidate_present boolean;
   v_db_now timestamptz := statement_timestamp();
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
@@ -1503,7 +1522,9 @@ begin
         'commandId','attemptId','outcome','deliveryDisposition','failurePhase',
         'retryAllowed','retryReason','reconciliationReason','requestSummary',
         'responseSummary','targetSysId','targetNumber','errorCode','errorMessage',
-        'nextRetryAt','finishedAt'
+        'nextRetryAt','finishedAt','mutationCandidateSysId',
+        'mutationCandidateNumber','mutationCandidateHttpStatus',
+        'mutationCandidateSource'
       )
     )
     or jsonb_typeof(p_payload->'retryAllowed')<>'boolean'
@@ -1541,8 +1562,32 @@ begin
   );
   v_target_sys_id := nullif(p_payload->>'targetSysId','');
   v_target_number := nullif(p_payload->>'targetNumber','');
+  v_candidate_sys_id := nullif(p_payload->>'mutationCandidateSysId','');
+  v_candidate_number := nullif(p_payload->>'mutationCandidateNumber','');
+  v_candidate_source := nullif(p_payload->>'mutationCandidateSource','');
+  v_candidate_present := v_candidate_sys_id is not null
+    or v_candidate_number is not null
+    or p_payload ? 'mutationCandidateHttpStatus'
+    or v_candidate_source is not null;
+  if v_candidate_present then
+    v_candidate_http_status := public.support_servicenow_write_parse_integer(
+      p_payload->'mutationCandidateHttpStatus', 'SERVICENOW_WRITE_RESULT_INVALID'
+    );
+  end if;
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
     or (v_target_number is not null and v_target_number !~ '^[A-Za-z0-9_-]{1,80}$')
+    or (
+      v_candidate_present
+      and (
+        v_candidate_sys_id is null
+        or v_candidate_sys_id !~ '^[a-f0-9]{32}$'
+        or v_candidate_number is null
+        or v_candidate_number !~ '^[A-Za-z0-9_-]{1,80}$'
+        or v_candidate_http_status not between 100 and 599
+        or v_candidate_source is null
+        or v_candidate_source <> 'mutation_response'
+      )
+    )
     or (nullif(p_payload->>'errorCode','') is not null and p_payload->>'errorCode' !~ '^[A-Z0-9_]{1,80}$')
     or length(coalesce(p_payload->>'errorMessage',''))>240 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
@@ -1572,6 +1617,44 @@ begin
     or v_finished_at<v_attempt.started_at then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_NOT_EXECUTING';
   end if;
+  if v_candidate_present and (
+      v_command.command_type <> 'create_incident'
+      or v_attempt.execution_mode = 'dry_run'
+      or v_outcome not in ('succeeded','uncertain')
+      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'mutationCandidateObserved')
+      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'candidateSysId')
+      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'candidateNumber')
+      or not (coalesce(p_payload->'responseSummary','{}'::jsonb) ? 'mutationHttpStatus')
+      or p_payload->'responseSummary'->'mutationCandidateObserved' <> 'true'::jsonb
+      or p_payload->'responseSummary'->>'candidateSysId' <> v_candidate_sys_id
+      or p_payload->'responseSummary'->>'candidateNumber' <> v_candidate_number
+      or public.support_servicenow_write_parse_integer(
+        p_payload->'responseSummary'->'mutationHttpStatus',
+        'SERVICENOW_WRITE_RESULT_INVALID'
+      ) <> v_candidate_http_status
+      or (
+        v_outcome = 'succeeded'
+        and (
+          p_payload->'responseSummary'->'postWriteMarkerVerified' <> 'true'::jsonb
+          or v_target_sys_id <> v_candidate_sys_id
+          or v_target_number <> v_candidate_number
+        )
+      )
+      or (
+        v_outcome = 'uncertain'
+        and p_payload->'responseSummary'->'postWriteMarkerVerified' <> 'false'::jsonb
+      )
+    ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
+  end if;
+  if not v_candidate_present and (
+      p_payload->'responseSummary' ? 'mutationCandidateObserved'
+      or p_payload->'responseSummary' ? 'candidateSysId'
+      or p_payload->'responseSummary' ? 'candidateNumber'
+      or p_payload->'responseSummary' ? 'mutationHttpStatus'
+    ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
+  end if;
 
   if v_outcome='dry_run' then
     if v_attempt.execution_mode<>'dry_run' then
@@ -1598,6 +1681,28 @@ begin
     v_status := 'failed';
     v_next_retry_at := null;
     v_retry_allowed := false;
+  end if;
+
+  if v_candidate_present then
+    select * into v_candidate
+    from public.servicenow_write_mutation_candidates candidate
+    where candidate.command_id = v_command.id
+    for update;
+    if v_candidate.command_id is null then
+      insert into public.servicenow_write_mutation_candidates (
+        command_id,attempt_id,sys_id,number,http_status,observed_at,source
+      ) values (
+        v_command.id,v_attempt.id,v_candidate_sys_id,v_candidate_number,
+        v_candidate_http_status,v_finished_at,v_candidate_source
+      );
+    elsif v_candidate.sys_id <> v_candidate_sys_id
+      or v_candidate.number <> v_candidate_number
+      or v_candidate.http_status <> v_candidate_http_status
+      or v_candidate.source <> v_candidate_source then
+      raise exception using
+        errcode='22023',
+        message='SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT';
+    end if;
   end if;
 
   update public.servicenow_write_attempts attempt_record set
@@ -1653,7 +1758,10 @@ create or replace function public.support_validate_servicenow_reconciliation_evi
   p_target_sys_id text,
   p_target_number text,
   p_verification_acknowledged boolean,
-  p_duplicate_journal_risk_acknowledged boolean
+  p_duplicate_journal_risk_acknowledged boolean,
+  p_mutation_candidate_present boolean,
+  p_mutation_candidate_matches boolean,
+  p_mutation_candidate_risk_acknowledged boolean
 )
 returns void
 language plpgsql
@@ -1696,10 +1804,15 @@ begin
     v_valid :=
       not coalesce(p_verification_acknowledged, false)
       and not coalesce(p_duplicate_journal_risk_acknowledged, false)
+      and not coalesce(p_mutation_candidate_risk_acknowledged, false)
       and (
         (p_result = 'confirmed_succeeded'
           and p_evidence_classification = 'provider_matched'
-          and v_has_target_pair)
+          and v_has_target_pair
+          and (
+            not coalesce(p_mutation_candidate_present, false)
+            or p_mutation_candidate_matches is true
+          ))
         or
         (p_result = 'not_found'
           and p_evidence_classification = 'provider_not_found'
@@ -1729,7 +1842,19 @@ begin
       )
       and v_has_target_pair
       and p_verification_acknowledged is true
-      and not coalesce(p_duplicate_journal_risk_acknowledged, false);
+      and not coalesce(p_duplicate_journal_risk_acknowledged, false)
+      and not coalesce(p_mutation_candidate_risk_acknowledged, false)
+      and (
+        not coalesce(p_mutation_candidate_present, false)
+        or p_mutation_candidate_matches is true
+      )
+      and (
+        p_evidence_classification <> 'provider_unavailable_manual_verification'
+        or (
+          p_mutation_candidate_present is true
+          and p_mutation_candidate_matches is true
+        )
+      );
   elsif p_action = 'mark_not_applied_after_verification' then
     v_valid :=
       p_result = 'confirmed_not_applied'
@@ -1743,12 +1868,25 @@ begin
             'provider_unavailable_manual_verification'
           )
           and not coalesce(p_duplicate_journal_risk_acknowledged, false)
+          and (
+            (
+              not coalesce(p_mutation_candidate_present, false)
+              and not coalesce(p_mutation_candidate_risk_acknowledged, false)
+            )
+            or (
+              p_command_type = 'create_incident'
+              and p_mutation_candidate_present is true
+              and p_mutation_candidate_risk_acknowledged is true
+            )
+          )
         )
         or
         (
           p_command_type in ('add_comment', 'add_work_note')
           and p_evidence_classification = 'journal_manual_verification'
           and p_duplicate_journal_risk_acknowledged is true
+          and not coalesce(p_mutation_candidate_present, false)
+          and not coalesce(p_mutation_candidate_risk_acknowledged, false)
         )
       );
   end if;
@@ -1774,6 +1912,7 @@ set search_path = pg_catalog, public, extensions, pg_temp
 as $$
 declare
   v_command public.servicenow_write_commands%rowtype;
+  v_candidate public.servicenow_write_mutation_candidates%rowtype;
   v_action text;
   v_result text;
   v_checked_at timestamptz;
@@ -1784,6 +1923,9 @@ declare
   v_target_number text;
   v_verification_acknowledged boolean;
   v_duplicate_journal_risk_acknowledged boolean;
+  v_mutation_candidate_risk_acknowledged boolean;
+  v_candidate_present boolean := false;
+  v_candidate_matches boolean := false;
   v_verification_note text;
   v_evidence_classification text;
   v_db_now timestamptz := statement_timestamp();
@@ -1797,7 +1939,7 @@ begin
         'actorUserId','requestId','checkedAt','confirmed','expectedVersion',
         'expectedNormalizedPayloadHash','confirmationNonceHash',
         'verificationAcknowledged','duplicateJournalRiskAcknowledged',
-        'verificationNote'
+        'mutationCandidateRiskAcknowledged','verificationNote'
       )
     )
     or jsonb_typeof(p_payload->'confirmed')<>'boolean'
@@ -1856,6 +1998,13 @@ begin
         'SERVICENOW_WRITE_RECONCILIATION_INVALID'
       );
   end if;
+  if p_payload ? 'mutationCandidateRiskAcknowledged' then
+    v_mutation_candidate_risk_acknowledged :=
+      public.support_servicenow_write_parse_boolean(
+        p_payload->'mutationCandidateRiskAcknowledged',
+        'SERVICENOW_WRITE_RECONCILIATION_INVALID'
+      );
+  end if;
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
     or (v_target_number is not null and v_target_number !~ '^[A-Za-z0-9_-]{1,80}$')
     or (
@@ -1874,6 +2023,23 @@ begin
   end if;
   if v_command.status<>'reconciliation_required' then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RECONCILIATION_NOT_ALLOWED';
+  end if;
+  select * into v_candidate
+  from public.servicenow_write_mutation_candidates candidate
+  where candidate.command_id = v_command.id;
+  v_candidate_present := v_candidate.command_id is not null;
+  v_candidate_matches := not v_candidate_present
+    or (
+      v_target_sys_id = v_candidate.sys_id
+      and v_target_number = v_candidate.number
+    );
+  if v_candidate_present
+    and v_target_sys_id is not null
+    and v_target_number is not null
+    and not v_candidate_matches then
+    raise exception using
+      errcode='22023',
+      message='SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT';
   end if;
   if (v_command.target_sys_id is not null and v_target_sys_id is not null
       and v_command.target_sys_id <> v_target_sys_id)
@@ -1898,7 +2064,10 @@ begin
     v_target_sys_id,
     v_target_number,
     v_verification_acknowledged,
-    v_duplicate_journal_risk_acknowledged
+    v_duplicate_journal_risk_acknowledged,
+    v_candidate_present,
+    v_candidate_matches,
+    v_mutation_candidate_risk_acknowledged
   );
   if v_result='confirmed_succeeded' then
     v_status := 'succeeded';
@@ -2028,6 +2197,24 @@ create trigger servicenow_write_attempts_identity_guard
 before update on public.servicenow_write_attempts
 for each row execute function public.support_servicenow_write_protect_attempt_identity();
 
+create or replace function public.support_servicenow_write_block_candidate_change()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+begin
+  raise exception using
+    errcode='22023',
+    message='SERVICENOW_WRITE_MUTATION_CANDIDATE_IMMUTABLE';
+end;
+$$;
+
+drop trigger if exists servicenow_write_mutation_candidates_append_only
+  on public.servicenow_write_mutation_candidates;
+create trigger servicenow_write_mutation_candidates_append_only
+before update or delete on public.servicenow_write_mutation_candidates
+for each row execute function public.support_servicenow_write_block_candidate_change();
+
 create or replace function public.support_servicenow_write_block_reconciliation_change()
 returns trigger
 language plpgsql
@@ -2055,9 +2242,10 @@ revoke all privileges on function public.support_servicenow_write_command_materi
 revoke all privileges on function public.support_servicenow_write_normalize(text,jsonb,jsonb,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_normalized_hash(jsonb) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_confirmation_hash(text) from public, anon, authenticated, service_role;
-revoke all privileges on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean,boolean,boolean,boolean) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_protect_command_identity() from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_protect_attempt_identity() from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_block_candidate_change() from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_block_reconciliation_change() from public, anon, authenticated, service_role;
 
 revoke all privileges on function public.support_upsert_servicenow_write_connection(jsonb) from public;
@@ -2086,24 +2274,26 @@ revoke execute on function public.support_reconcile_servicenow_write_command(jso
 grant execute on function public.support_reconcile_servicenow_write_command(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.4 authoritative command ledger with separate semantic command and normalized provider hashes. Direct service-role mutation is denied.';
+  'AI-2.0.5 authoritative command ledger with separate semantic command and normalized provider hashes. Direct service-role mutation is denied.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.4 attempt ledger with explicit delivery disposition and uncertain outcome.';
+  'AI-2.0.5 attempt ledger with explicit delivery disposition and uncertain outcome.';
+comment on table public.servicenow_write_mutation_candidates is
+  'AI-2.0.5 append-only bounded Incident identity returned by one create mutation response; it is evidence, not a confirmed target.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.4 immutable reconciliation history with an explicit evidence classification constrained by the action matrix.';
+  'AI-2.0.5 immutable candidate-aware reconciliation history with an explicit evidence classification constrained by the action matrix.';
 comment on table public.servicenow_write_readiness_proofs is
-  'AI-2.0.4 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
+  'AI-2.0.5 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.4 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
-comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean) is
-  'AI-2.0.4 rejects contradictory reconciliation action, result, evidence, command type, target pair, and acknowledgment combinations.';
+  'AI-2.0.5 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean,boolean,boolean,boolean) is
+  'AI-2.0.5 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.4 consumes one-time confirmation, enforces the evidence matrix, and records mutation-free reconciliation using database time.';
+  'AI-2.0.5 consumes one-time confirmation, enforces candidate continuity and the evidence matrix, and records mutation-free reconciliation using database time.';
 comment on function public.support_record_servicenow_write_readiness(jsonb) is
-  'AI-2.0.4 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
+  'AI-2.0.5 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.4 ServiceNow reconciliation truth and exact create proof',null,current_user)
+values ('202607230001','AI-2.0.5 ServiceNow mutation candidate continuity and reconciliation proof',null,current_user)
 on conflict (version) do nothing;
 
 commit;

@@ -209,6 +209,9 @@ export function handleServiceNowWriteReconciliationPost(
       duplicateJournalRiskAcknowledged: "duplicateJournalRiskAcknowledged" in body
         ? body.duplicateJournalRiskAcknowledged
         : undefined,
+      mutationCandidateRiskAcknowledged: "mutationCandidateRiskAcknowledged" in body
+        ? body.mutationCandidateRiskAcknowledged
+        : undefined,
       verificationNote: "verificationNote" in body ? body.verificationNote : undefined,
       abortSignal: request.signal,
     }, { repository });

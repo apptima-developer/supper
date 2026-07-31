@@ -53,6 +53,7 @@ if (writeServiceSource.includes("`manual-op:${commandId}`")) {
 if (!writeUiSource.includes("setManualOperation(operation)")
   || !writeUiSource.includes("manualOperationToken: operation.operationToken")
   || !writeUiSource.includes("duplicateJournalRiskAcknowledged")
+  || !writeUiSource.includes("mutationCandidateRiskAcknowledged")
   || !writeUiSource.includes("event.evidenceClassification")) {
   throw new Error("ServiceNow write controls are missing operation replay or reconciliation evidence safeguards");
 }
@@ -83,6 +84,7 @@ for (const classification of [
 }
 for (const required of [
   "SERVICENOW_WRITE_LOOKUP_MISMATCH",
+  "mutationCandidate",
   "SERVICENOW_WRITE_POST_CREATE_NOT_FOUND",
   "correlation_id",
   "expected.number",
@@ -431,7 +433,7 @@ begin
       {"suffix":"inconclusive","commandType":"update_incident","action":"reconcile_by_read_back","result":"inconclusive","evidence":"provider_inconclusive","targetSysId":"dddddddddddddddddddddddddddddddd","targetNumber":"INC0011004","expectedStatus":"reconciliation_required"},
       {"suffix":"target-conflict","commandType":"create_incident","action":"reconcile_by_read_back","result":"read_back_failed","evidence":"provider_target_conflict","expectedStatus":"reconciliation_required"},
       {"suffix":"unavailable","commandType":"create_incident","action":"reconcile_by_read_back","result":"read_back_failed","evidence":"provider_unavailable","expectedStatus":"reconciliation_required"},
-      {"suffix":"unavailable-manual","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_unavailable_manual_verification","targetSysId":"77777777777777777777777777777777","targetNumber":"INC0011007","expectedStatus":"succeeded"},
+      {"suffix":"target-manual-create","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_target_matched_manual_verification","targetSysId":"77777777777777777777777777777777","targetNumber":"INC0011007","expectedStatus":"succeeded"},
       {"suffix":"target-manual","commandType":"update_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_target_matched_manual_verification","targetSysId":"dddddddddddddddddddddddddddddddd","targetNumber":"INC0011008","expectedStatus":"succeeded"},
       {"suffix":"journal-manual","commandType":"add_comment","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"journal_manual_verification","duplicateRisk":true,"expectedStatus":"retry_scheduled"}
     ]'::jsonb) as x(
@@ -544,6 +546,7 @@ begin
       {"suffix":"journal-provider-match","commandType":"add_comment","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"provider_matched","duplicateRisk":true},
       {"suffix":"success-not-found","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_not_found","targetSysId":"22222222222222222222222222222222","targetNumber":"INC0020004"},
       {"suffix":"success-target-conflict","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_target_conflict","targetSysId":"33333333333333333333333333333333","targetNumber":"INC0020005"},
+      {"suffix":"manual-unavailable-without-candidate","commandType":"create_incident","action":"mark_succeeded_after_verification","result":"confirmed_succeeded","evidence":"provider_unavailable_manual_verification","targetSysId":"44444444444444444444444444444444","targetNumber":"INC0020006"},
       {"suffix":"journal-no-risk-ack","commandType":"add_work_note","action":"mark_not_applied_after_verification","result":"confirmed_not_applied","evidence":"journal_manual_verification"}
     ]'::jsonb) as x(
       suffix text,
@@ -1132,11 +1135,54 @@ begin
     'outcome','uncertain','deliveryDisposition','may_have_committed',
     'failurePhase','mutation_response','retryAllowed',false,
     'retryReason','','reconciliationReason','Provider response was lost',
-    'requestSummary',jsonb_build_object('method','POST'),'responseSummary','{}'::jsonb,
+    'requestSummary',jsonb_build_object('method','POST'),
+    'responseSummary',jsonb_build_object(
+      'mutationCandidateObserved',true,
+      'candidateSysId',repeat('7',32),
+      'candidateNumber','INC0017777',
+      'mutationHttpStatus',201,
+      'postWriteMarkerVerified',false
+    ),
+    'mutationCandidateSysId',repeat('7',32),
+    'mutationCandidateNumber','INC0017777',
+    'mutationCandidateHttpStatus',201,
+    'mutationCandidateSource','mutation_response',
     'targetSysId','','targetNumber','','errorCode','SERVICENOW_WRITE_RESPONSE_LOST',
     'errorMessage','ServiceNow response was not definitive',
     'finishedAt','2026-07-23T01:04:11.000Z'
   ));
+  if not exists (
+    select 1 from public.servicenow_write_mutation_candidates
+    where command_id='command-verified-00000001'
+      and attempt_id='attempt-verified-00000001'
+      and sys_id=repeat('7',32)
+      and number='INC0017777'
+      and http_status=201
+      and source='mutation_response'
+  ) then
+    raise exception 'Attempt finish did not persist the mutation candidate';
+  end if;
+  if not exists (
+    select 1 from public.servicenow_write_attempts
+    where id='attempt-verified-00000001'
+      and response_summary=jsonb_build_object(
+        'mutationCandidateObserved',true,
+        'candidateSysId',repeat('7',32),
+        'candidateNumber','INC0017777',
+        'mutationHttpStatus',201,
+        'postWriteMarkerVerified',false
+      )
+  ) then
+    raise exception 'Attempt did not retain the bounded candidate summary';
+  end if;
+  begin
+    update public.servicenow_write_mutation_candidates
+    set number='INC0099999'
+    where command_id='command-verified-00000001';
+    raise exception 'Mutation candidate was mutable';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_MUTATION_CANDIDATE_IMMUTABLE' then raise; end if;
+  end;
   select version,normalized_payload_hash into v_version,v_hash
   from public.servicenow_write_commands where id='command-verified-00000001';
   perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
@@ -1145,6 +1191,29 @@ begin
     'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('8',64),
     'issuedAt','2026-07-23T01:04:20.000Z','expiresAt','2026-07-23T01:06:00.000Z'
   ));
+  begin
+    perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+      'commandId','command-verified-00000001','action','mark_succeeded_after_verification',
+      'result','confirmed_succeeded','safeReadBackSummary',jsonb_build_object(
+        'method','manual_verified_target',
+        'evidenceClassification','provider_target_matched_manual_verification'
+      ),
+      'targetSysId',repeat('6',32),'targetNumber','INC0016666','actorUserId','admin-user',
+      'verificationAcknowledged',true,'verificationNote','Conflicting target must fail.',
+      'requestId','request-write-sql-candidate-conflict','checkedAt','2026-07-23T01:04:22.000Z',
+      'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('8',64)
+    ));
+    raise exception 'A conflicting target bypassed the mutation candidate';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT' then raise; end if;
+  end;
+  if exists (
+    select 1 from public.servicenow_ticket_links
+    where servicenow_sys_id=repeat('6',32) or servicenow_number='INC0016666'
+  ) then
+    raise exception 'Conflicting mutation candidate created a Ticket link';
+  end if;
   begin
     perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
       'commandId','command-verified-00000001','action','mark_succeeded_after_verification',
@@ -1205,6 +1274,135 @@ begin
       and safe_read_back_summary::text ilike '%verified exact target independently%'
   ) then
     raise exception 'Raw verification note entered reconciliation history';
+  end if;
+
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload(
+      'command-candidate-rewrite-01','manual-op:candidate-rewrite',
+      'Candidate rewrite verifier'
+    )
+  );
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-candidate-rewrite-01';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01','action','execute','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('5',64),
+    'issuedAt','2026-07-23T01:04:32.000Z','expiresAt','2026-07-23T01:06:00.000Z'
+  ));
+  perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01','attemptId','attempt-candidate-rewrite-1',
+    'executionMode','live','retry',false,'requestId','request-candidate-rewrite-1',
+    'startedAt','2026-07-23T01:04:33.000Z','actorUserId','admin-user',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('5',64)
+  ));
+  perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01','attemptId','attempt-candidate-rewrite-1',
+    'outcome','uncertain','deliveryDisposition','may_have_committed',
+    'failurePhase','read_back','retryAllowed',false,
+    'retryReason','','reconciliationReason','Post-write proof unavailable',
+    'requestSummary',jsonb_build_object('method','POST'),
+    'responseSummary',jsonb_build_object(
+      'mutationCandidateObserved',true,'candidateSysId',repeat('5',32),
+      'candidateNumber','INC0015555','mutationHttpStatus',201,
+      'postWriteMarkerVerified',false
+    ),
+    'mutationCandidateSysId',repeat('5',32),
+    'mutationCandidateNumber','INC0015555',
+    'mutationCandidateHttpStatus',201,
+    'mutationCandidateSource','mutation_response',
+    'targetSysId','','targetNumber','','errorCode','SERVICENOW_WRITE_READ_BACK_FAILED',
+    'errorMessage','Post-write proof was unavailable',
+    'finishedAt','2026-07-23T01:04:34.000Z'
+  ));
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-candidate-rewrite-01';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01',
+    'action','mark_not_applied_after_verification','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('4',64),
+    'issuedAt','2026-07-23T01:04:35.000Z','expiresAt','2026-07-23T01:06:00.000Z'
+  ));
+  begin
+    perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+      'commandId','command-candidate-rewrite-01',
+      'action','mark_not_applied_after_verification','result','confirmed_not_applied',
+      'safeReadBackSummary',jsonb_build_object(
+        'method','manual_verification',
+        'evidenceClassification','provider_unavailable_manual_verification'
+      ),
+      'targetSysId','','targetNumber','','actorUserId','admin-user',
+      'verificationAcknowledged',true,
+      'verificationNote','Provider was unavailable after independent review.',
+      'requestId','request-candidate-no-risk-ack','checkedAt','2026-07-23T01:04:36.000Z',
+      'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('4',64)
+    ));
+    raise exception 'Candidate not-applied was accepted without duplicate-risk acknowledgment';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
+  end;
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01',
+    'action','mark_not_applied_after_verification','result','confirmed_not_applied',
+    'safeReadBackSummary',jsonb_build_object(
+      'method','manual_verification',
+      'evidenceClassification','provider_unavailable_manual_verification'
+    ),
+    'targetSysId','','targetNumber','','actorUserId','admin-user',
+    'verificationAcknowledged',true,'mutationCandidateRiskAcknowledged',true,
+    'verificationNote','Duplicate risk accepted after independent review.',
+    'requestId','request-candidate-with-risk-ack','checkedAt','2026-07-23T01:04:37.000Z',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('4',64)
+  ));
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='command-candidate-rewrite-01';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01','action','retry','actorUserId','admin-user',
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('3',64),
+    'issuedAt','2026-07-23T01:04:38.000Z','expiresAt','2026-07-23T01:06:00.000Z'
+  ));
+  perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+    'commandId','command-candidate-rewrite-01','attemptId','attempt-candidate-rewrite-2',
+    'executionMode','retry','retry',true,'requestId','request-candidate-rewrite-2',
+    'startedAt','2026-07-23T01:04:39.000Z','actorUserId','admin-user',
+    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'confirmationNonceHash',repeat('3',64)
+  ));
+  begin
+    perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-candidate-rewrite-01','attemptId','attempt-candidate-rewrite-2',
+      'outcome','uncertain','deliveryDisposition','may_have_committed',
+      'failurePhase','read_back','retryAllowed',false,
+      'retryReason','','reconciliationReason','Conflicting provider candidate',
+      'requestSummary',jsonb_build_object('method','POST'),
+      'responseSummary',jsonb_build_object(
+        'mutationCandidateObserved',true,'candidateSysId',repeat('4',32),
+        'candidateNumber','INC0014444','mutationHttpStatus',201,
+        'postWriteMarkerVerified',false
+      ),
+      'mutationCandidateSysId',repeat('4',32),
+      'mutationCandidateNumber','INC0014444',
+      'mutationCandidateHttpStatus',201,
+      'mutationCandidateSource','mutation_response',
+      'targetSysId','','targetNumber','','errorCode','SERVICENOW_WRITE_READ_BACK_FAILED',
+      'errorMessage','Conflicting provider candidate',
+      'finishedAt','2026-07-23T01:04:40.000Z'
+    ));
+    raise exception 'A later Attempt replaced the mutation candidate';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT' then raise; end if;
+  end;
+  if not exists (
+    select 1 from public.servicenow_write_mutation_candidates
+    where command_id='command-candidate-rewrite-01'
+      and sys_id=repeat('5',32) and number='INC0015555'
+  ) then
+    raise exception 'Conflicting Attempt changed the original mutation candidate';
   end if;
 
   perform * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
@@ -1385,13 +1583,18 @@ begin
     or has_table_privilege('service_role','public.servicenow_write_mappings','insert')
     or has_table_privilege('service_role','public.servicenow_write_commands','update')
     or has_table_privilege('service_role','public.servicenow_write_attempts','insert')
+    or has_table_privilege('service_role','public.servicenow_write_mutation_candidates','insert')
+    or has_table_privilege('service_role','public.servicenow_write_mutation_candidates','update')
+    or has_table_privilege('service_role','public.servicenow_write_mutation_candidates','delete')
     or has_table_privilege('service_role','public.servicenow_ticket_links','update')
     or has_table_privilege('service_role','public.servicenow_write_reconciliation_events','insert')
     or has_table_privilege('service_role','public.servicenow_write_readiness_proofs','insert') then
     raise exception 'service_role can directly mutate an authoritative ledger';
   end if;
   if has_table_privilege('anon','public.servicenow_write_commands','select')
-    or has_table_privilege('authenticated','public.servicenow_write_commands','select') then
+    or has_table_privilege('authenticated','public.servicenow_write_commands','select')
+    or has_table_privilege('anon','public.servicenow_write_mutation_candidates','select')
+    or has_table_privilege('authenticated','public.servicenow_write_mutation_candidates','select') then
     raise exception 'Browser roles can read the write ledger';
   end if;
   if has_function_privilege('public','public.support_create_servicenow_write_command(jsonb)','execute')
@@ -1441,7 +1644,7 @@ try {
   psql([], acceptanceSql);
   const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice after real intake migrations; full command hash parity, evidence-gated reconciliation, database-clock authority, safe SQL parsing, uncertain outcomes, and ledger grants passed.");
+  console.log("ServiceNow write migration executed twice after real intake migrations; full command hash parity, immutable mutation-candidate continuity, candidate-gated reconciliation, database-clock authority, safe SQL parsing, uncertain outcomes, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

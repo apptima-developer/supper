@@ -1,5 +1,6 @@
 import { IntegrationBoundaryError, isIntegrationBoundaryError } from "../../errors";
 import type {
+  ServiceNowSafeResponseSummary,
   ServiceNowWriteDeliveryDisposition,
   ServiceNowWriteFailurePhase,
 } from "./types";
@@ -9,6 +10,10 @@ export type ServiceNowWriteExecutionError = IntegrationBoundaryError & {
   readonly failurePhase: ServiceNowWriteFailurePhase;
   readonly retryAllowed: boolean;
   readonly reconciliationReason?: string;
+  readonly mutationCandidateSysId?: string;
+  readonly mutationCandidateNumber?: string;
+  readonly mutationHttpStatus?: number;
+  readonly safeResponseSummary?: ServiceNowSafeResponseSummary;
 };
 
 export function serviceNowWriteExecutionError(
@@ -18,6 +23,10 @@ export function serviceNowWriteExecutionError(
     failurePhase: ServiceNowWriteFailurePhase;
     retryAllowed: boolean;
     reconciliationReason?: string;
+    mutationCandidateSysId?: string;
+    mutationCandidateNumber?: string;
+    mutationHttpStatus?: number;
+    safeResponseSummary?: ServiceNowSafeResponseSummary;
   },
 ) {
   Object.defineProperties(error, {
@@ -25,6 +34,10 @@ export function serviceNowWriteExecutionError(
     failurePhase: { value: outcome.failurePhase, enumerable: false },
     retryAllowed: { value: outcome.retryAllowed, enumerable: false },
     reconciliationReason: { value: outcome.reconciliationReason, enumerable: false },
+    mutationCandidateSysId: { value: outcome.mutationCandidateSysId, enumerable: false },
+    mutationCandidateNumber: { value: outcome.mutationCandidateNumber, enumerable: false },
+    mutationHttpStatus: { value: outcome.mutationHttpStatus, enumerable: false },
+    safeResponseSummary: { value: outcome.safeResponseSummary, enumerable: false },
   });
   return error as ServiceNowWriteExecutionError;
 }

@@ -163,8 +163,20 @@ export type ServiceNowSafeResponseSummary = {
   number?: string;
   state?: string;
   recoveredByCorrelationMarker?: boolean;
+  mutationCandidateObserved?: boolean;
+  candidateSysId?: string;
+  candidateNumber?: string;
+  mutationHttpStatus?: number;
   postWriteMarkerVerified?: boolean;
   postWriteLookupHttpStatus?: number;
+};
+
+export type ServiceNowWriteMutationCandidate = {
+  sysId: string;
+  number: string;
+  httpStatus: number;
+  observedAt: string;
+  source: "mutation_response";
 };
 
 export type ServiceNowWriteAdapterResult = {
@@ -172,6 +184,7 @@ export type ServiceNowWriteAdapterResult = {
   responseSummary: ServiceNowSafeResponseSummary;
   targetSysId: string;
   targetNumber: string;
+  mutationCandidate?: Omit<ServiceNowWriteMutationCandidate, "observedAt">;
 };
 
 export type ServiceNowWriteReadBackResult = {
@@ -230,6 +243,7 @@ export type ServiceNowWriteCommandSummary = {
   targetTable: string;
   targetSysId?: string;
   targetNumber?: string;
+  mutationCandidate?: ServiceNowWriteMutationCandidate;
   commandMaterialHash: string;
   normalizedPayloadHash: string;
   providerCorrelationMarker?: string;
