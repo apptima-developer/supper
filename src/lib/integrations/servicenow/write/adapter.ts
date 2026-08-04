@@ -494,6 +494,8 @@ export class ServiceNowWriteAdapter {
       );
     }
     let postWriteLookupHttpStatus: number | undefined;
+    let postWriteLookupCorrelationMarkerHash: string | undefined;
+    let postWriteVerifiedCorrelationMarkerHash: string | undefined;
     if (command.commandType === "create_incident") {
       try {
         const marker = command.providerCorrelationMarker || "";
@@ -529,6 +531,9 @@ export class ServiceNowWriteAdapter {
           });
         }
         postWriteLookupHttpStatus = verified.status;
+        const verifiedMarkerHash = hashServiceNowProviderCorrelationMarker(marker);
+        postWriteLookupCorrelationMarkerHash = verifiedMarkerHash;
+        postWriteVerifiedCorrelationMarkerHash = verifiedMarkerHash;
       } catch (error) {
         const cause = isIntegrationBoundaryError(error)
           ? error
@@ -587,6 +592,8 @@ export class ServiceNowWriteAdapter {
           ...mutationCandidateSummary,
           postWriteMarkerVerified: true,
           postWriteLookupHttpStatus,
+          postWriteLookupCorrelationMarkerHash,
+          postWriteVerifiedCorrelationMarkerHash,
         } : {}),
       },
       targetSysId: result.sysId,
@@ -602,18 +609,33 @@ export class ServiceNowWriteAdapter {
   ): Promise<ServiceNowWriteReadBackResult> {
     const operation = operationFor(command);
     if (command.commandType === "create_incident") {
+      const marker = command.providerCorrelationMarker || "";
       const lookup = await this.findByCorrelationMarker(
-        command.providerCorrelationMarker || "",
+        marker,
         operation,
         correlationId,
         signal,
       );
-      if (lookup.rows.length > 1) return { result: "ambiguous", summary: { matchCount: 2, method: "correlation_marker" } };
-      if (!lookup.rows.length) return { result: "not_found", summary: { matchCount: 0, method: "correlation_marker" } };
+      if (lookup.rows.length > 1) return { result: "ambiguous", summary: { matchCount: 2, method: "correlation_marker_exact" } };
+      if (!lookup.rows.length) return { result: "not_found", summary: { matchCount: 0, method: "correlation_marker_exact" } };
       const row = lookup.rows[0];
+      const markerHash = hashServiceNowProviderCorrelationMarker(marker);
       return {
         result: "confirmed_succeeded",
-        summary: { matchCount: 1, method: "correlation_marker" },
+        summary: {
+          method: "correlation_marker_exact",
+          requestMethod: "GET",
+          endpointPath: `/api/now/table/${this.config.incidentTable}`,
+          targetTable: this.config.incidentTable,
+          lookupClassification: "correlation_marker_exact",
+          lookupCorrelationMarkerHash: markerHash,
+          verifiedCorrelationMarkerHash: markerHash,
+          exactMarkerVerified: true,
+          safeHttpStatus: lookup.status,
+          matchCount: 1,
+          targetSysId: row.sysId,
+          targetNumber: row.number,
+        },
         targetSysId: row.sysId,
         targetNumber: row.number,
       };

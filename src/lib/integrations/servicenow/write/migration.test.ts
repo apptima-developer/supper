@@ -131,8 +131,12 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("servicenow_write_attempt_already_recovered");
     expect(sql).toContain("servicenow_write_target_continuity_conflict");
     expect(sql).toContain("recover_stuck_attempt");
-    expect(sql).toContain("jsonb_typeof(v_response_summary->'postwritemarkerverified')<>'boolean'");
-    expect(sql).toContain("is distinct from 'true'::jsonb");
+    expect(sql).toContain("support_servicenow_write_require_string");
+    expect(sql).toContain("support_servicenow_write_require_integer");
+    expect(sql).toContain("support_servicenow_write_require_boolean");
+    expect(sql).toContain("v_response_summary ? 'postwritelookupcorrelationmarkerhash'");
+    expect(sql).toContain("v_response_summary ? 'postwriteverifiedcorrelationmarkerhash'");
+    expect(sql).toContain("is distinct from v_expected_marker_hash");
     expect(sql).toContain("mutation_response");
     expect(sql).toContain("exactmarkerverified");
     expect(sql).toContain("correlation_marker_exact");
@@ -140,7 +144,7 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("verifiedcorrelationmarkerhash");
     expect(sql).toContain("v_expected_field_names");
     expect(sql).toContain("'/api/now/table/'||v_command.target_table||'/'||v_target_sys_id");
-    expect(sql).toContain("p_payload->'safereadbacksummary'->>'requestmethod'<>'get'");
+    expect(sql).toContain("p_payload->'safereadbacksummary','requestmethod'");
     expect(sql).toContain("p_payload->'safereadbacksummary'->'fieldnames'<>v_expected_field_names");
     expect(sql).toContain("servicenow_write_reconciliation_evidence_invalid");
   });

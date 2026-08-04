@@ -77,6 +77,8 @@ describe("ServiceNow write adapter", () => {
       mutationHttpStatus: 201,
       postWriteMarkerVerified: true,
       postWriteLookupHttpStatus: 200,
+      postWriteLookupCorrelationMarkerHash: markerHash,
+      postWriteVerifiedCorrelationMarkerHash: markerHash,
     });
     expect(result.mutationCandidate).toEqual({
       sysId: "a".repeat(32),
@@ -367,6 +369,36 @@ describe("ServiceNow write adapter", () => {
     expect(JSON.stringify(result)).not.toContain("provider content");
   });
 
+  it("returns exact marker-bound create read-back evidence", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, [{
+      sys_id: "a".repeat(32),
+      number: "INC0010001",
+      correlation_id: marker,
+    }]));
+    const result = await new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).readBack(createCommand, correlationId);
+    expect(result).toEqual({
+      result: "confirmed_succeeded",
+      summary: {
+        method: "correlation_marker_exact",
+        requestMethod: "GET",
+        endpointPath: "/api/now/table/incident",
+        targetTable: "incident",
+        lookupClassification: "correlation_marker_exact",
+        lookupCorrelationMarkerHash: markerHash,
+        verifiedCorrelationMarkerHash: markerHash,
+        exactMarkerVerified: true,
+        safeHttpStatus: 200,
+        matchCount: 1,
+        targetSysId: "a".repeat(32),
+        targetNumber: "INC0010001",
+      },
+      targetSysId: "a".repeat(32),
+      targetNumber: "INC0010001",
+    });
+  });
+
   it("rejects a mixed target pair returned by separate number and sys_id reads", async () => {
     const sysId = "b".repeat(32);
     const fetchMock = vi.fn()
@@ -557,6 +589,92 @@ describe("ServiceNow write adapter", () => {
     });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(String(fetchMock.mock.calls[0][0])).toContain("/oauth_token.do");
+  });
+
+  it("allows one OAuth acquisition for every provider request when tokens are short-lived", async () => {
+    const oauthConfig: ServiceNowEnabledConfig = {
+      enabled: true,
+      authMode: "oauth_client_credentials",
+      clientId: "unit-test-short-lived-client",
+      clientSecret: "unit-test-secret",
+      instanceUrl: "https://example.service-now.com",
+      timeoutMs: 5_000,
+      pageSize: 25,
+      incidentTable: "incident",
+    };
+    let tokenCalls = 0;
+    let providerCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/oauth_token.do")) {
+        tokenCalls += 1;
+        return new Response(JSON.stringify({
+          access_token: `short-token-${tokenCalls}`,
+          token_type: "Bearer",
+          expires_in: 1,
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      providerCalls += 1;
+      if (providerCalls === 1) return providerResponse(200, []);
+      if (providerCalls === 2) return providerResponse(201, {
+        sys_id: "a".repeat(32), number: "INC0010001", state: "1",
+      });
+      return providerResponse(200, [{
+        sys_id: "a".repeat(32), number: "INC0010001", state: "1", correlation_id: marker,
+      }]);
+    });
+    await expect(new ServiceNowWriteAdapter(oauthConfig, {
+      fetch: fetchMock as typeof fetch,
+      now: () => 1_000,
+    }).execute(createCommand, correlationId)).resolves.toMatchObject({
+      responseSummary: {
+        postWriteMarkerVerified: true,
+        postWriteLookupCorrelationMarkerHash: markerHash,
+        postWriteVerifiedCorrelationMarkerHash: markerHash,
+      },
+    });
+    expect(providerCalls).toBe(3);
+    expect(tokenCalls).toBe(3);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("reuses one long-lived OAuth token across the bounded create operation", async () => {
+    const oauthConfig: ServiceNowEnabledConfig = {
+      enabled: true,
+      authMode: "oauth_client_credentials",
+      clientId: "unit-test-long-lived-client",
+      clientSecret: "unit-test-secret",
+      instanceUrl: "https://example.service-now.com",
+      timeoutMs: 5_000,
+      pageSize: 25,
+      incidentTable: "incident",
+    };
+    let tokenCalls = 0;
+    let providerCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/oauth_token.do")) {
+        tokenCalls += 1;
+        return new Response(JSON.stringify({
+          access_token: "long-token",
+          token_type: "Bearer",
+          expires_in: 60,
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      providerCalls += 1;
+      if (providerCalls === 1) return providerResponse(200, []);
+      if (providerCalls === 2) return providerResponse(201, {
+        sys_id: "a".repeat(32), number: "INC0010001", state: "1",
+      });
+      return providerResponse(200, [{
+        sys_id: "a".repeat(32), number: "INC0010001", state: "1", correlation_id: marker,
+      }]);
+    });
+    await new ServiceNowWriteAdapter(oauthConfig, {
+      fetch: fetchMock as typeof fetch,
+      now: () => 1_000,
+    }).execute(createCommand, correlationId);
+    expect(providerCalls).toBe(3);
+    expect(tokenCalls).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("uses GET only for readiness", async () => {

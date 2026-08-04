@@ -120,6 +120,27 @@ describe("ServiceNow authentication", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([1, 29, 30])(
+    "does not reuse an OAuth token with expires_in=%s inside the safety margin",
+    async (expiresIn) => {
+      const config = parseServiceNowConfig({ ...basicEnv, SERVICENOW_AUTH_MODE: "oauth_client_credentials", SERVICENOW_CLIENT_ID: `short-${expiresIn}`, SERVICENOW_CLIENT_SECRET: "secret" });
+      if (!config.enabled) throw new Error("expected enabled config");
+      const fetchMock = vi.fn(async () => jsonResponse({ access_token: `token-${fetchMock.mock.calls.length}`, token_type: "Bearer", expires_in: expiresIn }));
+      await getServiceNowAuthorization(config, { correlationId, operation: "provider.test" }, { fetch: fetchMock as typeof fetch, now: () => 1_000 });
+      await getServiceNowAuthorization(config, { correlationId, operation: "provider.test" }, { fetch: fetchMock as typeof fetch, now: () => 1_000 });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("reuses a long-lived OAuth token while it remains outside the safety margin", async () => {
+    const config = parseServiceNowConfig({ ...basicEnv, SERVICENOW_AUTH_MODE: "oauth_client_credentials", SERVICENOW_CLIENT_ID: "long-lived", SERVICENOW_CLIENT_SECRET: "secret" });
+    if (!config.enabled) throw new Error("expected enabled config");
+    const fetchMock = vi.fn(async () => jsonResponse({ access_token: "long-lived-token", token_type: "Bearer", expires_in: 60 }));
+    await getServiceNowAuthorization(config, { correlationId, operation: "provider.test" }, { fetch: fetchMock as typeof fetch, now: () => 1_000 });
+    await getServiceNowAuthorization(config, { correlationId, operation: "provider.test" }, { fetch: fetchMock as typeof fetch, now: () => 10_000 });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("rejects malformed OAuth responses", async () => {
     const config = parseServiceNowConfig({ ...basicEnv, SERVICENOW_AUTH_MODE: "oauth_client_credentials", SERVICENOW_CLIENT_ID: "client", SERVICENOW_CLIENT_SECRET: "secret" });
     if (!config.enabled) throw new Error("expected enabled config");

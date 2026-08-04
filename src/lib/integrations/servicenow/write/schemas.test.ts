@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createServiceNowWriteCommandRequestSchema,
   serviceNowCreateIncidentInputSchema,
+  serviceNowSafeResponseSummarySchema,
   serviceNowUpdateIncidentInputSchema,
 } from "./schemas";
 
@@ -107,6 +108,32 @@ describe("ServiceNow write schemas", () => {
       sourceType: "manual",
       operationReference: "work-note:test",
       payload: { sysId: "a".repeat(32), text: "x".repeat(20_001) },
+    })).toThrow();
+  });
+
+  it("requires complete matching marker hashes for a verified post-create proof", () => {
+    const markerHash = "a".repeat(64);
+    const valid = {
+      httpStatus: 201,
+      sysId: "b".repeat(32),
+      number: "INC0010001",
+      mutationCandidateObserved: true,
+      candidateSysId: "b".repeat(32),
+      candidateNumber: "INC0010001",
+      mutationHttpStatus: 201,
+      postWriteMarkerVerified: true,
+      postWriteLookupHttpStatus: 200,
+      postWriteLookupCorrelationMarkerHash: markerHash,
+      postWriteVerifiedCorrelationMarkerHash: markerHash,
+    };
+    expect(serviceNowSafeResponseSummarySchema.parse(valid)).toEqual(valid);
+    expect(() => serviceNowSafeResponseSummarySchema.parse({
+      ...valid,
+      postWriteVerifiedCorrelationMarkerHash: "c".repeat(64),
+    })).toThrow(/marker proof/i);
+    expect(() => serviceNowSafeResponseSummarySchema.parse({
+      ...valid,
+      postWriteLookupCorrelationMarkerHash: null,
     })).toThrow();
   });
 });

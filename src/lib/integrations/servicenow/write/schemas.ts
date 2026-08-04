@@ -215,6 +215,8 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   mutationHttpStatus: z.number().int().min(100).max(599).optional(),
   postWriteMarkerVerified: z.boolean().optional(),
   postWriteLookupHttpStatus: z.number().int().min(100).max(599).optional(),
+  postWriteLookupCorrelationMarkerHash: hashSchema.optional(),
+  postWriteVerifiedCorrelationMarkerHash: hashSchema.optional(),
   verifiedCorrelationMarkerHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((value, context) => {
   const hasCandidate = value.candidateSysId !== undefined || value.candidateNumber !== undefined
@@ -226,6 +228,14 @@ export const serviceNowSafeResponseSummarySchema = z.object({
     || value.mutationHttpStatus === undefined
   )) {
     context.addIssue({ code: "custom", message: "Mutation candidate summary is incomplete" });
+  }
+  if (value.postWriteMarkerVerified === true && (
+    value.postWriteLookupHttpStatus === undefined
+    || !value.postWriteLookupCorrelationMarkerHash
+    || !value.postWriteVerifiedCorrelationMarkerHash
+    || value.postWriteLookupCorrelationMarkerHash !== value.postWriteVerifiedCorrelationMarkerHash
+  )) {
+    context.addIssue({ code: "custom", message: "Post-write marker proof is incomplete" });
   }
 });
 

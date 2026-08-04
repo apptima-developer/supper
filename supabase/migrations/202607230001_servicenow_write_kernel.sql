@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.8: operation lease, late-outcome, marker proof, and terminal projection closure.
+-- SUPPER AI-2.0.9: null-safe proof, complete marker binding, and OAuth lease closure.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -474,6 +474,98 @@ begin
   if v_text = 'true' then return true; end if;
   if v_text = 'false' then return false; end if;
   raise exception using errcode = '22023', message = p_error_code;
+end;
+$$;
+
+create or replace function public.support_servicenow_write_require_string(
+  p_object jsonb,
+  p_key text,
+  p_error_code text,
+  p_pattern text default null,
+  p_max_length integer default null
+)
+returns text
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_text text;
+begin
+  if p_error_code !~ '^SERVICENOW_WRITE_[A-Z0-9_]{1,64}$'
+    or p_object is null
+    or jsonb_typeof(p_object) <> 'object'
+    or p_key is null
+    or not (p_object ? p_key)
+    or jsonb_typeof(p_object->p_key) <> 'string' then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  v_text := p_object->>p_key;
+  if v_text is null
+    or v_text = ''
+    or (p_pattern is not null and v_text !~ p_pattern)
+    or (p_max_length is not null and length(v_text) > p_max_length) then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  return v_text;
+end;
+$$;
+
+create or replace function public.support_servicenow_write_require_integer(
+  p_object jsonb,
+  p_key text,
+  p_error_code text,
+  p_minimum integer,
+  p_maximum integer
+)
+returns integer
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+declare
+  v_value integer;
+begin
+  if p_object is null
+    or jsonb_typeof(p_object) <> 'object'
+    or p_key is null
+    or not (p_object ? p_key)
+    or jsonb_typeof(p_object->p_key) <> 'number' then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  v_value := public.support_servicenow_write_parse_integer(
+    p_object->p_key,
+    p_error_code
+  );
+  if v_value < p_minimum or v_value > p_maximum then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  return v_value;
+end;
+$$;
+
+create or replace function public.support_servicenow_write_require_boolean(
+  p_object jsonb,
+  p_key text,
+  p_error_code text
+)
+returns boolean
+language plpgsql
+immutable
+set search_path = pg_catalog, public, extensions, pg_temp
+as $$
+begin
+  if p_object is null
+    or jsonb_typeof(p_object) <> 'object'
+    or p_key is null
+    or not (p_object ? p_key)
+    or jsonb_typeof(p_object->p_key) <> 'boolean' then
+    raise exception using errcode = '22023', message = p_error_code;
+  end if;
+  return public.support_servicenow_write_parse_boolean(
+    p_object->p_key,
+    p_error_code
+  );
 end;
 $$;
 
@@ -1512,11 +1604,13 @@ begin
   end if;
   -- The database owns this operation-wide budget. It is derived only from
   -- committed command material and the committed connection configuration.
-  v_provider_request_budget := case
-    when v_command.command_type='create_incident' then 3
-    when nullif(v_command.normalized_payload->>'targetNumber','') is not null then 2
-    else 1
-  end + case when v_connection_auth_mode='oauth_client_credentials' then 1 else 0 end;
+  v_provider_request_budget := (
+    case
+      when v_command.command_type='create_incident' then 3
+      when nullif(v_command.normalized_payload->>'targetNumber','') is not null then 2
+      else 1
+    end
+  ) * case when v_connection_auth_mode='oauth_client_credentials' then 2 else 1 end;
   v_recovery_delay_ms := least(
     15 * 60 * 1000,
     v_provider_request_budget * v_connection_timeout_ms + 2 * 60 * 1000
@@ -1679,22 +1773,45 @@ begin
   v_retry_allowed := public.support_servicenow_write_parse_boolean(
     p_payload->'retryAllowed', 'SERVICENOW_WRITE_RESULT_INVALID'
   );
-  v_target_sys_id := nullif(p_payload->>'targetSysId','');
-  v_target_number := nullif(p_payload->>'targetNumber','');
-  v_candidate_sys_id := nullif(p_payload->>'mutationCandidateSysId','');
-  v_candidate_number := nullif(p_payload->>'mutationCandidateNumber','');
-  v_candidate_source := nullif(p_payload->>'mutationCandidateSource','');
-  v_candidate_proof_status := nullif(p_payload->>'mutationCandidateProofStatus','');
+  v_target_sys_id := case
+    when nullif(p_payload->>'targetSysId','') is not null then
+      public.support_servicenow_write_require_string(
+        p_payload,'targetSysId','SERVICENOW_WRITE_RESULT_INVALID','^[a-f0-9]{32}$',32
+      )
+    else null
+  end;
+  v_target_number := case
+    when nullif(p_payload->>'targetNumber','') is not null then
+      public.support_servicenow_write_require_string(
+        p_payload,'targetNumber','SERVICENOW_WRITE_RESULT_INVALID','^[A-Za-z0-9_-]{1,80}$',80
+      )
+    else null
+  end;
   v_request_summary := coalesce(p_payload->'requestSummary','{}'::jsonb);
   v_response_summary := coalesce(p_payload->'responseSummary','{}'::jsonb);
-  v_candidate_present := v_candidate_sys_id is not null
-    or v_candidate_number is not null
-    or p_payload ? 'mutationCandidateHttpStatus'
-    or v_candidate_source is not null
-    or v_candidate_proof_status is not null;
+  v_candidate_present := p_payload ?| array[
+    'mutationCandidateSysId','mutationCandidateNumber','mutationCandidateHttpStatus',
+    'mutationCandidateSource','mutationCandidateProofStatus'
+  ];
   if v_candidate_present then
-    v_candidate_http_status := public.support_servicenow_write_parse_integer(
-      p_payload->'mutationCandidateHttpStatus', 'SERVICENOW_WRITE_RESULT_INVALID'
+    v_candidate_sys_id := public.support_servicenow_write_require_string(
+      p_payload,'mutationCandidateSysId','SERVICENOW_WRITE_RESULT_INVALID',
+      '^[a-f0-9]{32}$',32
+    );
+    v_candidate_number := public.support_servicenow_write_require_string(
+      p_payload,'mutationCandidateNumber','SERVICENOW_WRITE_RESULT_INVALID',
+      '^[A-Za-z0-9_-]{1,80}$',80
+    );
+    v_candidate_http_status := public.support_servicenow_write_require_integer(
+      p_payload,'mutationCandidateHttpStatus','SERVICENOW_WRITE_RESULT_INVALID',100,599
+    );
+    v_candidate_source := public.support_servicenow_write_require_string(
+      p_payload,'mutationCandidateSource','SERVICENOW_WRITE_RESULT_INVALID',
+      '^[a-z_]{1,80}$',80
+    );
+    v_candidate_proof_status := public.support_servicenow_write_require_string(
+      p_payload,'mutationCandidateProofStatus','SERVICENOW_WRITE_RESULT_INVALID',
+      '^[a-z_]{1,80}$',80
     );
   end if;
   if (v_target_sys_id is not null and v_target_sys_id !~ '^[a-f0-9]{32}$')
@@ -1779,40 +1896,112 @@ begin
       or v_attempt.execution_mode = 'dry_run'
       or v_outcome not in ('succeeded','uncertain')
       or v_candidate_http_status not between 200 and 299
-      or v_request_summary->>'method'<>'POST'
-      or not (v_response_summary ? 'mutationCandidateObserved')
-      or jsonb_typeof(v_response_summary->'mutationCandidateObserved')<>'boolean'
-      or v_response_summary->'mutationCandidateObserved'
-        is distinct from 'true'::jsonb
-      or not (v_response_summary ? 'candidateSysId')
-      or not (v_response_summary ? 'candidateNumber')
-      or not (v_response_summary ? 'mutationHttpStatus')
-      or v_response_summary->>'candidateSysId' <> v_candidate_sys_id
-      or v_response_summary->>'candidateNumber' <> v_candidate_number
-      or public.support_servicenow_write_parse_integer(
-        v_response_summary->'mutationHttpStatus',
-        'SERVICENOW_WRITE_RESULT_INVALID'
-      ) <> v_candidate_http_status
+      or public.support_servicenow_write_require_string(
+        v_request_summary,'method','SERVICENOW_WRITE_RESULT_INVALID','^[A-Z]{3,5}$',5
+      ) is distinct from 'POST'
+      or public.support_servicenow_write_require_boolean(
+        v_response_summary,'mutationCandidateObserved','SERVICENOW_WRITE_RESULT_INVALID'
+      ) is distinct from true
+      or public.support_servicenow_write_require_string(
+        v_response_summary,'candidateSysId','SERVICENOW_WRITE_RESULT_INVALID',
+        '^[a-f0-9]{32}$',32
+      ) is distinct from v_candidate_sys_id
+      or public.support_servicenow_write_require_string(
+        v_response_summary,'candidateNumber','SERVICENOW_WRITE_RESULT_INVALID',
+        '^[A-Za-z0-9_-]{1,80}$',80
+      ) is distinct from v_candidate_number
+      or public.support_servicenow_write_require_integer(
+        v_response_summary,'mutationHttpStatus','SERVICENOW_WRITE_RESULT_INVALID',100,599
+      ) is distinct from v_candidate_http_status
       or (
         v_outcome = 'succeeded'
         and (
           v_candidate_proof_status <> 'marker_verified'
-          or not (v_response_summary ? 'postWriteMarkerVerified')
-          or jsonb_typeof(v_response_summary->'postWriteMarkerVerified')<>'boolean'
-          or v_response_summary->'postWriteMarkerVerified'
-            is distinct from 'true'::jsonb
-          or v_target_sys_id <> v_candidate_sys_id
-          or v_target_number <> v_candidate_number
+          or not (v_request_summary ?& array[
+            'method','endpointPath','targetTable','fieldNames','targetSysId','targetNumber'
+          ])
+          or public.support_servicenow_write_require_string(
+            v_request_summary,'endpointPath','SERVICENOW_WRITE_RESULT_INVALID','^/[^ ]+$',500
+          ) is distinct from '/api/now/table/'||v_command.target_table
+          or public.support_servicenow_write_require_string(
+            v_request_summary,'targetTable','SERVICENOW_WRITE_RESULT_INVALID',
+            '^[a-z][a-z0-9_]{0,79}$',80
+          ) is distinct from v_command.target_table
+          or public.support_servicenow_write_require_string(
+            v_request_summary,'targetSysId','SERVICENOW_WRITE_RESULT_INVALID',
+            '^[a-f0-9]{32}$',32
+          ) is distinct from v_candidate_sys_id
+          or public.support_servicenow_write_require_string(
+            v_request_summary,'targetNumber','SERVICENOW_WRITE_RESULT_INVALID',
+            '^[A-Za-z0-9_-]{1,80}$',80
+          ) is distinct from v_candidate_number
+          or jsonb_typeof(v_request_summary->'fieldNames')<>'array'
+          or v_request_summary->'fieldNames'<>v_expected_field_names
+          or exists (
+            select 1 from jsonb_object_keys(v_request_summary) supplied(key)
+            where supplied.key not in (
+              'method','endpointPath','targetTable','fieldNames','targetSysId','targetNumber'
+            )
+          )
+          or not (v_response_summary ?& array['httpStatus','sysId','number'])
+          or public.support_servicenow_write_require_integer(
+            v_response_summary,'httpStatus','SERVICENOW_WRITE_RESULT_INVALID',200,299
+          ) is distinct from v_candidate_http_status
+          or public.support_servicenow_write_require_string(
+            v_response_summary,'sysId','SERVICENOW_WRITE_RESULT_INVALID',
+            '^[a-f0-9]{32}$',32
+          ) is distinct from v_candidate_sys_id
+          or public.support_servicenow_write_require_string(
+            v_response_summary,'number','SERVICENOW_WRITE_RESULT_INVALID',
+            '^[A-Za-z0-9_-]{1,80}$',80
+          ) is distinct from v_candidate_number
+          or public.support_servicenow_write_require_boolean(
+            v_response_summary,'postWriteMarkerVerified','SERVICENOW_WRITE_RESULT_INVALID'
+          ) is distinct from true
+          or public.support_servicenow_write_require_integer(
+            v_response_summary,'postWriteLookupHttpStatus',
+            'SERVICENOW_WRITE_RESULT_INVALID',200,299
+          ) not between 200 and 299
+          or public.support_servicenow_write_require_string(
+            v_response_summary,'postWriteLookupCorrelationMarkerHash',
+            'SERVICENOW_WRITE_RESULT_INVALID','^[a-f0-9]{64}$',64
+          ) is distinct from v_expected_marker_hash
+          or public.support_servicenow_write_require_string(
+            v_response_summary,'postWriteVerifiedCorrelationMarkerHash',
+            'SERVICENOW_WRITE_RESULT_INVALID','^[a-f0-9]{64}$',64
+          ) is distinct from v_expected_marker_hash
+          or v_response_summary->>'postWriteLookupCorrelationMarkerHash'
+            is distinct from v_response_summary->>'postWriteVerifiedCorrelationMarkerHash'
+          or (
+            v_response_summary ? 'state'
+            and (
+              jsonb_typeof(v_response_summary->'state') <> 'string'
+              or length(v_response_summary->>'state') > 80
+            )
+          )
+          or exists (
+            select 1 from jsonb_object_keys(v_response_summary) supplied(key)
+            where supplied.key not in (
+              'httpStatus','sysId','number','state','mutationCandidateObserved',
+              'candidateSysId','candidateNumber','mutationHttpStatus',
+              'postWriteMarkerVerified','postWriteLookupHttpStatus',
+              'postWriteLookupCorrelationMarkerHash',
+              'postWriteVerifiedCorrelationMarkerHash'
+            )
+          )
+          or v_target_sys_id is distinct from v_candidate_sys_id
+          or v_target_number is distinct from v_candidate_number
         )
       )
       or (
         v_outcome = 'uncertain'
         and (
           v_candidate_proof_status='marker_verified'
-          or not (v_response_summary ? 'postWriteMarkerVerified')
-          or jsonb_typeof(v_response_summary->'postWriteMarkerVerified')<>'boolean'
-          or v_response_summary->'postWriteMarkerVerified'
-            is distinct from 'false'::jsonb
+          or public.support_servicenow_write_require_boolean(
+            v_response_summary,'postWriteMarkerVerified','SERVICENOW_WRITE_RESULT_INVALID'
+          ) is distinct from false
+          or v_response_summary ? 'postWriteLookupCorrelationMarkerHash'
+          or v_response_summary ? 'postWriteVerifiedCorrelationMarkerHash'
         )
       )
       or v_response_summary ? 'recoveredByCorrelationMarker'
@@ -1826,6 +2015,9 @@ begin
       or v_response_summary ? 'candidateNumber'
       or v_response_summary ? 'mutationHttpStatus'
       or v_response_summary ? 'postWriteMarkerVerified'
+      or v_response_summary ? 'postWriteLookupHttpStatus'
+      or v_response_summary ? 'postWriteLookupCorrelationMarkerHash'
+      or v_response_summary ? 'postWriteVerifiedCorrelationMarkerHash'
     ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
   end if;
@@ -1858,25 +2050,37 @@ begin
           'httpStatus','sysId','number','recoveredByCorrelationMarker',
           'providerWritePerformed','exactMarkerVerified','verifiedCorrelationMarkerHash'
         ])
-        or not (v_response_summary ? 'recoveredByCorrelationMarker')
-        or jsonb_typeof(v_response_summary->'recoveredByCorrelationMarker')<>'boolean'
-        or v_response_summary->'recoveredByCorrelationMarker'
-          is distinct from 'true'::jsonb
-        or not (v_response_summary ? 'providerWritePerformed')
-        or jsonb_typeof(v_response_summary->'providerWritePerformed')<>'boolean'
-        or v_response_summary->'providerWritePerformed'
-          is distinct from 'false'::jsonb
-        or not (v_response_summary ? 'exactMarkerVerified')
-        or jsonb_typeof(v_response_summary->'exactMarkerVerified')<>'boolean'
-        or v_response_summary->'exactMarkerVerified'
-          is distinct from 'true'::jsonb
-        or jsonb_typeof(v_response_summary->'httpStatus')<>'number'
-        or public.support_servicenow_write_parse_integer(
-          v_response_summary->'httpStatus','SERVICENOW_WRITE_RESULT_INVALID'
+        or public.support_servicenow_write_require_boolean(
+          v_response_summary,'recoveredByCorrelationMarker','SERVICENOW_WRITE_RESULT_INVALID'
+        ) is distinct from true
+        or public.support_servicenow_write_require_boolean(
+          v_response_summary,'providerWritePerformed','SERVICENOW_WRITE_RESULT_INVALID'
+        ) is distinct from false
+        or public.support_servicenow_write_require_boolean(
+          v_response_summary,'exactMarkerVerified','SERVICENOW_WRITE_RESULT_INVALID'
+        ) is distinct from true
+        or public.support_servicenow_write_require_integer(
+          v_response_summary,'httpStatus','SERVICENOW_WRITE_RESULT_INVALID',200,299
         ) not between 200 and 299
-        or v_response_summary->>'sysId'<>v_target_sys_id
-        or v_response_summary->>'number'<>v_target_number
-        or v_response_summary->>'verifiedCorrelationMarkerHash'<>v_expected_marker_hash
+        or public.support_servicenow_write_require_string(
+          v_response_summary,'sysId','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{32}$',32
+        ) is distinct from v_target_sys_id
+        or public.support_servicenow_write_require_string(
+          v_response_summary,'number','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[A-Za-z0-9_-]{1,80}$',80
+        ) is distinct from v_target_number
+        or public.support_servicenow_write_require_string(
+          v_response_summary,'verifiedCorrelationMarkerHash','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{64}$',64
+        ) is distinct from v_expected_marker_hash
+        or (
+          v_response_summary ? 'state'
+          and (
+            jsonb_typeof(v_response_summary->'state') <> 'string'
+            or length(v_response_summary->>'state') > 80
+          )
+        )
         or exists (
           select 1 from jsonb_object_keys(v_response_summary) supplied(key)
           where supplied.key not in (
@@ -1888,15 +2092,34 @@ begin
           'method','endpointPath','targetTable','fieldNames','targetSysId',
           'targetNumber','lookupClassification','lookupCorrelationMarkerHash'
         ])
-        or v_request_summary->>'method'<>'GET'
-        or v_request_summary->>'targetTable'<>v_command.target_table
-        or v_request_summary->>'endpointPath'<>'/api/now/table/'||v_command.target_table
-        or v_request_summary->>'lookupClassification'<>'correlation_marker_exact'
-        or v_request_summary->>'targetSysId'<>v_target_sys_id
-        or v_request_summary->>'targetNumber'<>v_target_number
-        or v_request_summary->>'lookupCorrelationMarkerHash'<>v_expected_marker_hash
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'method','SERVICENOW_WRITE_RESULT_INVALID','^[A-Z]{3,5}$',5
+        ) is distinct from 'GET'
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetTable','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-z][a-z0-9_]{0,79}$',80
+        ) is distinct from v_command.target_table
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'endpointPath','SERVICENOW_WRITE_RESULT_INVALID','^/[^ ]+$',500
+        ) is distinct from '/api/now/table/'||v_command.target_table
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'lookupClassification','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-z_]{1,80}$',80
+        ) is distinct from 'correlation_marker_exact'
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetSysId','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{32}$',32
+        ) is distinct from v_target_sys_id
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetNumber','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[A-Za-z0-9_-]{1,80}$',80
+        ) is distinct from v_target_number
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'lookupCorrelationMarkerHash','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{64}$',64
+        ) is distinct from v_expected_marker_hash
         or v_request_summary->>'lookupCorrelationMarkerHash'
-          <>v_response_summary->>'verifiedCorrelationMarkerHash'
+          is distinct from v_response_summary->>'verifiedCorrelationMarkerHash'
         or jsonb_typeof(v_request_summary->'fieldNames')<>'array'
         or v_request_summary->'fieldNames'
           <> '["correlation_id","number","state","sys_id"]'::jsonb
@@ -1918,12 +2141,24 @@ begin
         or not (v_request_summary ?& array[
           'method','endpointPath','targetTable','fieldNames','targetSysId','targetNumber'
         ])
-        or v_request_summary->>'method'<>'PATCH'
-        or v_request_summary->>'targetTable'<>v_command.target_table
-        or v_request_summary->>'endpointPath'
-          <> '/api/now/table/'||v_command.target_table||'/'||v_target_sys_id
-        or v_request_summary->>'targetSysId'<>v_target_sys_id
-        or v_request_summary->>'targetNumber'<>v_target_number
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'method','SERVICENOW_WRITE_RESULT_INVALID','^[A-Z]{3,5}$',5
+        ) is distinct from 'PATCH'
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetTable','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-z][a-z0-9_]{0,79}$',80
+        ) is distinct from v_command.target_table
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'endpointPath','SERVICENOW_WRITE_RESULT_INVALID','^/[^ ]+$',500
+        ) is distinct from '/api/now/table/'||v_command.target_table||'/'||v_target_sys_id
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetSysId','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{32}$',32
+        ) is distinct from v_target_sys_id
+        or public.support_servicenow_write_require_string(
+          v_request_summary,'targetNumber','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[A-Za-z0-9_-]{1,80}$',80
+        ) is distinct from v_target_number
         or jsonb_typeof(v_request_summary->'fieldNames')<>'array'
         or v_request_summary->'fieldNames'<>v_expected_field_names
         or exists (
@@ -1933,13 +2168,24 @@ begin
           )
         )
         or not (v_response_summary ?& array['httpStatus','sysId','number'])
-        or jsonb_typeof(v_response_summary->'httpStatus')<>'number'
-        or public.support_servicenow_write_parse_integer(
-          v_response_summary->'httpStatus','SERVICENOW_WRITE_RESULT_INVALID'
+        or public.support_servicenow_write_require_integer(
+          v_response_summary,'httpStatus','SERVICENOW_WRITE_RESULT_INVALID',200,299
         ) not between 200 and 299
-        or v_response_summary->>'sysId'<>v_target_sys_id
-        or v_response_summary->>'number'<>v_target_number
-        or length(coalesce(v_response_summary->>'state',''))>80
+        or public.support_servicenow_write_require_string(
+          v_response_summary,'sysId','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[a-f0-9]{32}$',32
+        ) is distinct from v_target_sys_id
+        or public.support_servicenow_write_require_string(
+          v_response_summary,'number','SERVICENOW_WRITE_RESULT_INVALID',
+          '^[A-Za-z0-9_-]{1,80}$',80
+        ) is distinct from v_target_number
+        or (
+          v_response_summary ? 'state'
+          and (
+            jsonb_typeof(v_response_summary->'state') <> 'string'
+            or length(v_response_summary->>'state') > 80
+          )
+        )
         or exists (
           select 1 from jsonb_object_keys(v_response_summary) supplied(key)
           where supplied.key not in ('httpStatus','sysId','number','state')
@@ -2216,6 +2462,7 @@ declare
   v_verification_note text;
   v_evidence_classification text;
   v_expected_field_names jsonb;
+  v_expected_marker_hash text;
   v_db_now timestamptz := statement_timestamp();
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
@@ -2316,6 +2563,11 @@ begin
   select coalesce(jsonb_agg(field_name order by field_name),'[]'::jsonb)
   into v_expected_field_names
   from jsonb_object_keys(v_command.normalized_payload->'fields') field_name;
+  if v_command.command_type='create_incident' then
+    v_expected_marker_hash := public.support_intake_sha256_hex(
+      v_command.provider_correlation_marker
+    );
+  end if;
   select * into v_candidate
   from public.servicenow_write_mutation_candidate_events candidate
   where candidate.command_id = v_command.id
@@ -2391,26 +2643,46 @@ begin
         'method','requestMethod','endpointPath','targetTable','fieldNames',
         'matchedFields','expectedFields','evidenceClassification','targetSysId','targetNumber'
       ])
-      or p_payload->'safeReadBackSummary'->>'method'<>'exact_sys_id'
-      or p_payload->'safeReadBackSummary'->>'requestMethod'<>'GET'
-      or p_payload->'safeReadBackSummary'->>'targetTable'<>v_command.target_table
-      or p_payload->'safeReadBackSummary'->>'endpointPath'
-        <> '/api/now/table/'||v_command.target_table||'/'||v_target_sys_id
-      or p_payload->'safeReadBackSummary'->>'targetSysId'<>v_target_sys_id
-      or p_payload->'safeReadBackSummary'->>'targetNumber'<>v_target_number
-      or p_payload->'safeReadBackSummary'->>'evidenceClassification'<>'provider_matched'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','method',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-z_]{1,80}$',80
+      ) is distinct from 'exact_sys_id'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','requestMethod',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[A-Z]{3,5}$',5
+      ) is distinct from 'GET'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetTable',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',
+        '^[a-z][a-z0-9_]{0,79}$',80
+      ) is distinct from v_command.target_table
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','endpointPath',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^/[^ ]+$',500
+      ) is distinct from '/api/now/table/'||v_command.target_table||'/'||v_target_sys_id
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetSysId',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-f0-9]{32}$',32
+      ) is distinct from v_target_sys_id
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetNumber',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',
+        '^[A-Za-z0-9_-]{1,80}$',80
+      ) is distinct from v_target_number
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','evidenceClassification',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-z_]{1,80}$',80
+      ) is distinct from 'provider_matched'
       or jsonb_typeof(p_payload->'safeReadBackSummary'->'fieldNames')<>'array'
       or p_payload->'safeReadBackSummary'->'fieldNames'<>v_expected_field_names
-      or jsonb_typeof(p_payload->'safeReadBackSummary'->'matchedFields')<>'number'
-      or jsonb_typeof(p_payload->'safeReadBackSummary'->'expectedFields')<>'number'
-      or public.support_servicenow_write_parse_integer(
-        p_payload->'safeReadBackSummary'->'matchedFields',
-        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID'
-      )<>jsonb_array_length(v_expected_field_names)
-      or public.support_servicenow_write_parse_integer(
-        p_payload->'safeReadBackSummary'->'expectedFields',
-        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID'
-      )<>jsonb_array_length(v_expected_field_names)
+      or public.support_servicenow_write_require_integer(
+        p_payload->'safeReadBackSummary','matchedFields',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',0,30
+      ) is distinct from jsonb_array_length(v_expected_field_names)
+      or public.support_servicenow_write_require_integer(
+        p_payload->'safeReadBackSummary','expectedFields',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',0,30
+      ) is distinct from jsonb_array_length(v_expected_field_names)
       or (
         p_payload->'safeReadBackSummary' ? 'mutationCandidateMatched'
         and (
@@ -2426,6 +2698,94 @@ begin
           'method','requestMethod','endpointPath','targetTable','fieldNames',
           'matchedFields','expectedFields','evidenceClassification','targetSysId','targetNumber',
           'mutationCandidateMatched'
+        )
+      )
+    ) then
+    raise exception using
+      errcode='22023',
+      message='SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID';
+  end if;
+  if v_action='reconcile_by_read_back'
+    and v_result='confirmed_succeeded'
+    and v_command.command_type='create_incident'
+    and (
+      not (coalesce(p_payload->'safeReadBackSummary','{}'::jsonb) ?& array[
+        'method','requestMethod','endpointPath','targetTable','lookupClassification',
+        'lookupCorrelationMarkerHash','verifiedCorrelationMarkerHash',
+        'exactMarkerVerified','safeHttpStatus','matchCount','targetSysId',
+        'targetNumber','evidenceClassification'
+      ])
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','method',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-z_]{1,80}$',80
+      ) is distinct from 'correlation_marker_exact'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','requestMethod',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[A-Z]{3,5}$',5
+      ) is distinct from 'GET'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','endpointPath',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^/[^ ]+$',500
+      ) is distinct from '/api/now/table/'||v_command.target_table
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetTable',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',
+        '^[a-z][a-z0-9_]{0,79}$',80
+      ) is distinct from v_command.target_table
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','lookupClassification',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-z_]{1,80}$',80
+      ) is distinct from 'correlation_marker_exact'
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','lookupCorrelationMarkerHash',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-f0-9]{64}$',64
+      ) is distinct from v_expected_marker_hash
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','verifiedCorrelationMarkerHash',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-f0-9]{64}$',64
+      ) is distinct from v_expected_marker_hash
+      or p_payload->'safeReadBackSummary'->>'lookupCorrelationMarkerHash'
+        is distinct from p_payload->'safeReadBackSummary'->>'verifiedCorrelationMarkerHash'
+      or public.support_servicenow_write_require_boolean(
+        p_payload->'safeReadBackSummary','exactMarkerVerified',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID'
+      ) is distinct from true
+      or public.support_servicenow_write_require_integer(
+        p_payload->'safeReadBackSummary','safeHttpStatus',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',200,299
+      ) not between 200 and 299
+      or public.support_servicenow_write_require_integer(
+        p_payload->'safeReadBackSummary','matchCount',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',0,100
+      ) is distinct from 1
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetSysId',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-f0-9]{32}$',32
+      ) is distinct from v_target_sys_id
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','targetNumber',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID',
+        '^[A-Za-z0-9_-]{1,80}$',80
+      ) is distinct from v_target_number
+      or public.support_servicenow_write_require_string(
+        p_payload->'safeReadBackSummary','evidenceClassification',
+        'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID','^[a-z_]{1,80}$',80
+      ) is distinct from 'provider_matched'
+      or (
+        v_candidate_present
+        and public.support_servicenow_write_require_boolean(
+          p_payload->'safeReadBackSummary','mutationCandidateMatched',
+          'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID'
+        ) is distinct from true
+      )
+      or exists (
+        select 1
+        from jsonb_object_keys(p_payload->'safeReadBackSummary') supplied(key)
+        where supplied.key not in (
+          'method','requestMethod','endpointPath','targetTable','lookupClassification',
+          'lookupCorrelationMarkerHash','verifiedCorrelationMarkerHash',
+          'exactMarkerVerified','safeHttpStatus','matchCount','targetSysId',
+          'targetNumber','evidenceClassification','mutationCandidateMatched'
         )
       )
     ) then
@@ -2746,6 +3106,9 @@ for each row execute function public.support_servicenow_write_block_reconciliati
 revoke all privileges on function public.support_servicenow_write_parse_timestamp(jsonb,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_parse_integer(jsonb,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_parse_boolean(jsonb,text) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_require_string(jsonb,text,text,text,integer) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_require_integer(jsonb,text,text,integer,integer) from public, anon, authenticated, service_role;
+revoke all privileges on function public.support_servicenow_write_require_boolean(jsonb,text,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_segment(text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_configuration_fingerprint(text,text,text,text) from public, anon, authenticated, service_role;
 revoke all privileges on function public.support_servicenow_write_validate_mapping(text,jsonb) from public, anon, authenticated, service_role;
@@ -2790,28 +3153,28 @@ revoke execute on function public.support_recover_servicenow_write_attempt(jsonb
 grant execute on function public.support_recover_servicenow_write_attempt(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.8 authoritative command ledger with candidate-scoped confirmation, exact target continuity, and separate semantic and normalized provider hashes.';
+  'AI-2.0.9 authoritative command ledger with null-safe candidate proof, exact target continuity, and separate semantic and normalized provider hashes.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.8 attempt ledger with an immutable database-owned operation request budget, recovery lease, idempotent terminal material, explicit delivery disposition, and uncertain outcome.';
+  'AI-2.0.9 attempt ledger with an immutable database-owned worst-case OAuth/provider request budget, recovery lease, idempotent terminal material, explicit delivery disposition, and uncertain outcome.';
 comment on table public.servicenow_write_mutation_candidate_events is
-  'AI-2.0.8 append-only per-Attempt Incident candidate evidence; historical candidates are never overwritten by Retry.';
+  'AI-2.0.9 append-only per-Attempt Incident candidate evidence; historical candidates are never overwritten by Retry.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.8 immutable reconciliation history scoped to the current candidate event when one exists.';
+  'AI-2.0.9 immutable reconciliation history scoped to the current candidate event when one exists.';
 comment on table public.servicenow_write_attempt_recovery_events is
-  'AI-2.0.8 immutable administrator recovery ledger; the recovery operation makes no provider request while the original mutation outcome remains unknown.';
+  'AI-2.0.9 immutable administrator recovery ledger; the recovery operation makes no provider request while the original mutation outcome remains unknown.';
 comment on table public.servicenow_write_readiness_proofs is
-  'AI-2.0.8 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
+  'AI-2.0.9 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.8 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+  'AI-2.0.9 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
 comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean,boolean,boolean,boolean) is
-  'AI-2.0.8 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
+  'AI-2.0.9 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.8 consumes candidate-scoped one-time confirmation, enforces candidate continuity and exact successful read-back proof, and records mutation-free reconciliation using database time.';
+  'AI-2.0.9 consumes candidate-scoped one-time confirmation, enforces null-safe exact read-back proof and candidate continuity, and records mutation-free reconciliation using database time.';
 comment on function public.support_record_servicenow_write_readiness(jsonb) is
-  'AI-2.0.8 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
+  'AI-2.0.9 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.8 ServiceNow operation proof closure',null,current_user)
+values ('202607230001','AI-2.0.9 ServiceNow null-safe proof closure',null,current_user)
 on conflict (version) do nothing;
 
 commit;

@@ -118,6 +118,8 @@ for (const required of [
   "expected.correlationMarker",
   "postWriteMarkerVerified",
   "postWriteLookupHttpStatus",
+  "postWriteLookupCorrelationMarkerHash",
+  "postWriteVerifiedCorrelationMarkerHash",
 ]) {
   if (!writeAdapterSource.includes(required)) {
     throw new Error(`ServiceNow exact lookup verification is missing ${required}`);
@@ -185,6 +187,9 @@ insert into public.support_tickets (
   'open','open','Incident','Medium','{}',now()
 ), (
   'ticket-write-00000002','WRITE-2','customer-write','Write verifier',
+  'open','open','Incident','Medium','{}',now()
+), (
+  'ticket-write-null-proof','WRITE-NULL','customer-write','Write verifier',
   'open','open','Incident','Medium','{}',now()
 );
 `;
@@ -446,9 +451,115 @@ do $$
 declare
   v_version integer;
   v_hash text;
+  v_marker_hash text;
+  v_nonce text := public.support_intake_sha256_hex('reconcile-exact-create-proof');
+  v_sys_id text := repeat('a',32);
+  v_number text := 'INC0081002';
+  v_valid_summary jsonb;
+  v_invalid record;
+begin
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload(
+      'reconcile-exact-create-proof','manual-op:reconcile-exact-create-proof',
+      'Exact create reconciliation proof','supper_ticket','ticket-write-null-proof'
+    )
+  );
+  update public.servicenow_write_commands set
+    status='reconciliation_required',delivery_disposition='may_have_committed',
+    failure_phase='read_back',retry_allowed=false,next_retry_at=null
+  where id='reconcile-exact-create-proof';
+  select version,normalized_payload_hash,
+    public.support_intake_sha256_hex(provider_correlation_marker)
+  into v_version,v_hash,v_marker_hash
+  from public.servicenow_write_commands where id='reconcile-exact-create-proof';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','reconcile-exact-create-proof','action','reconcile_by_read_back',
+    'actorUserId','admin-user','expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce,
+    'issuedAt',public.supper_test_iso(statement_timestamp()),
+    'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+  ));
+  v_valid_summary := jsonb_build_object(
+    'method','correlation_marker_exact','requestMethod','GET',
+    'endpointPath','/api/now/table/incident','targetTable','incident',
+    'lookupClassification','correlation_marker_exact',
+    'lookupCorrelationMarkerHash',v_marker_hash,
+    'verifiedCorrelationMarkerHash',v_marker_hash,
+    'exactMarkerVerified',true,'safeHttpStatus',200,'matchCount',1,
+    'targetSysId',v_sys_id,'targetNumber',v_number,
+    'evidenceClassification','provider_matched'
+  );
+  for v_invalid in
+    select * from (values
+      ('arbitrary-target',jsonb_build_object(
+        'method','correlation_marker_exact','matchCount',1,
+        'targetSysId',v_sys_id,'targetNumber',v_number,
+        'evidenceClassification','provider_matched'
+      )),
+      ('marker-mismatch',jsonb_set(
+        v_valid_summary,'{verifiedCorrelationMarkerHash}',to_jsonb(repeat('f',64))
+      )),
+      ('null-lookup-hash',jsonb_set(
+        v_valid_summary,'{lookupCorrelationMarkerHash}','null'::jsonb
+      )),
+      ('null-verified-hash',jsonb_set(
+        v_valid_summary,'{verifiedCorrelationMarkerHash}','null'::jsonb
+      )),
+      ('null-exact-marker',jsonb_set(
+        v_valid_summary,'{exactMarkerVerified}','null'::jsonb
+      )),
+      ('null-method',jsonb_set(v_valid_summary,'{method}','null'::jsonb))
+    ) as invalid_create_reconciliation(suffix,summary)
+  loop
+    begin
+      perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+        'commandId','reconcile-exact-create-proof','action','reconcile_by_read_back',
+        'result','confirmed_succeeded','safeReadBackSummary',v_invalid.summary,
+        'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
+        'requestId','request-create-proof-'||v_invalid.suffix,
+        'checkedAt',public.supper_test_iso(statement_timestamp()),
+        'confirmed',true,'expectedVersion',v_version,
+        'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+      ));
+      raise exception 'Invalid create reconciliation proof % was accepted',v_invalid.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
+    end;
+    if exists (
+      select 1 from public.servicenow_ticket_links
+      where supper_ticket_id='ticket-write-null-proof'
+    ) then
+      raise exception 'Invalid create reconciliation proof % created a Ticket link',v_invalid.suffix;
+    end if;
+  end loop;
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','reconcile-exact-create-proof','action','reconcile_by_read_back',
+    'result','confirmed_succeeded','safeReadBackSummary',v_valid_summary,
+    'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
+    'requestId','request-create-proof-valid',
+    'checkedAt',public.supper_test_iso(statement_timestamp()),
+    'confirmed',true,'expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+  ));
+  if not exists (
+    select 1 from public.servicenow_ticket_links
+    where supper_ticket_id='ticket-write-null-proof'
+      and servicenow_sys_id=v_sys_id and servicenow_number=v_number
+  ) then
+    raise exception 'Exact marker-bound create reconciliation did not create its Ticket link';
+  end if;
+end;
+$$;
+
+do $$
+declare
+  v_version integer;
+  v_hash text;
   v_nonce text := public.support_intake_sha256_hex('reconcile-exact-update-proof');
   v_sys_id text := repeat('c',32);
   v_number text := 'INC0081001';
+  v_valid_summary jsonb;
+  v_invalid record;
 begin
   perform * from public.support_create_servicenow_write_command(
     public.supper_test_write_payload_for(
@@ -471,36 +582,53 @@ begin
     'issuedAt',public.supper_test_iso(statement_timestamp()),
     'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
   ));
-  begin
-    perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
-      'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
-      'result','confirmed_succeeded','safeReadBackSummary','{}'::jsonb,
-      'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
-      'requestId','request-reconcile-empty-proof',
-      'checkedAt',public.supper_test_iso(statement_timestamp()),
-      'confirmed',true,'expectedVersion',v_version,
-      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
-    ));
-    raise exception 'Empty successful update reconciliation evidence was accepted';
-  exception when invalid_parameter_value then
-    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
-  end;
-  if exists (
-    select 1 from public.servicenow_ticket_links
-    where supper_ticket_id='ticket-write-00000002'
-  ) then
-    raise exception 'Invalid update reconciliation evidence created a Ticket link';
-  end if;
+  v_valid_summary := jsonb_build_object(
+    'method','exact_sys_id','requestMethod','GET',
+    'endpointPath','/api/now/table/incident/'||v_sys_id,
+    'targetTable','incident','fieldNames',jsonb_build_array('state'),
+    'matchedFields',1,'expectedFields',1,
+    'evidenceClassification','provider_matched',
+    'targetSysId',v_sys_id,'targetNumber',v_number
+  );
+  for v_invalid in
+    select * from (values
+      ('empty','{}'::jsonb),
+      ('null-method',jsonb_set(v_valid_summary,'{method}','null'::jsonb)),
+      ('null-request-method',jsonb_set(v_valid_summary,'{requestMethod}','null'::jsonb)),
+      ('null-endpoint',jsonb_set(v_valid_summary,'{endpointPath}','null'::jsonb)),
+      ('null-table',jsonb_set(v_valid_summary,'{targetTable}','null'::jsonb)),
+      ('null-fields',jsonb_set(v_valid_summary,'{fieldNames}','null'::jsonb)),
+      ('null-matched',jsonb_set(v_valid_summary,'{matchedFields}','null'::jsonb)),
+      ('null-expected',jsonb_set(v_valid_summary,'{expectedFields}','null'::jsonb)),
+      ('null-evidence',jsonb_set(v_valid_summary,'{evidenceClassification}','null'::jsonb)),
+      ('null-sys-id',jsonb_set(v_valid_summary,'{targetSysId}','null'::jsonb)),
+      ('null-number',jsonb_set(v_valid_summary,'{targetNumber}','null'::jsonb))
+    ) as invalid_update_reconciliation(suffix,summary)
+  loop
+    begin
+      perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+        'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
+        'result','confirmed_succeeded','safeReadBackSummary',v_invalid.summary,
+        'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
+        'requestId','request-reconcile-invalid-'||v_invalid.suffix,
+        'checkedAt',public.supper_test_iso(statement_timestamp()),
+        'confirmed',true,'expectedVersion',v_version,
+        'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+      ));
+      raise exception 'Invalid update reconciliation evidence % was accepted',v_invalid.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
+    end;
+    if exists (
+      select 1 from public.servicenow_ticket_links
+      where supper_ticket_id='ticket-write-00000002'
+    ) then
+      raise exception 'Invalid update reconciliation evidence % created a Ticket link',v_invalid.suffix;
+    end if;
+  end loop;
   perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
     'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
-    'result','confirmed_succeeded','safeReadBackSummary',jsonb_build_object(
-      'method','exact_sys_id','requestMethod','GET',
-      'endpointPath','/api/now/table/incident/'||v_sys_id,
-      'targetTable','incident','fieldNames',jsonb_build_array('state'),
-      'matchedFields',1,'expectedFields',1,
-      'evidenceClassification','provider_matched',
-      'targetSysId',v_sys_id,'targetNumber',v_number
-    ),
+    'result','confirmed_succeeded','safeReadBackSummary',v_valid_summary,
     'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
     'requestId','request-reconcile-exact-proof',
     'checkedAt',public.supper_test_iso(statement_timestamp()),
@@ -518,6 +646,117 @@ begin
   ) then
     raise exception 'Exact successful update reconciliation proof was not accepted';
   end if;
+end;
+$$;
+
+do $$
+declare
+  v_case record;
+  v_command_id text;
+  v_version integer;
+  v_hash text;
+  v_nonce text;
+  v_attempt_id text;
+  v_payload jsonb;
+  v_attempt record;
+  v_oauth_fingerprint text := public.support_servicenow_write_configuration_fingerprint(
+    'https://example.service-now.com','incident','oauth_client_credentials','unversioned'
+  );
+  v_basic_fingerprint text := public.support_servicenow_write_configuration_fingerprint(
+    'https://example.service-now.com','incident','basic','unversioned'
+  );
+begin
+  perform * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
+    'id','connection-test-00000001','name','Test PDI','active',true,
+    'authMode','oauth_client_credentials','instanceUrl','https://example.service-now.com',
+    'incidentTable','incident','configVersion','unversioned',
+    'configurationFingerprint',v_oauth_fingerprint,'timeoutMs',60000,
+    'metadata',jsonb_build_object('source','sql-oauth-lease-test'),
+    'updatedAt',public.supper_test_iso(statement_timestamp())
+  ));
+  perform * from public.support_record_servicenow_write_readiness(jsonb_build_object(
+    'connectionId','connection-test-00000001',
+    'configurationFingerprint',v_oauth_fingerprint,
+    'testedAt',public.supper_test_iso(statement_timestamp()),
+    'expiresAt',public.supper_test_iso(statement_timestamp()+interval '5 minutes'),
+    'testStatus','succeeded','safeHttpStatus',200,
+    'testedByUserId','admin-user','safeErrorCode','',
+    'updatedAt',public.supper_test_iso(statement_timestamp())
+  ));
+  for v_case in
+    select * from (values
+      ('create','create_incident',6,480000),
+      ('number','update_incident',4,360000),
+      ('sys-id','update_incident',2,240000)
+    ) as oauth_lease_case(suffix,command_type,expected_requests,expected_budget_ms)
+  loop
+    v_command_id := 'oauth-lease-budget-'||v_case.suffix;
+    v_attempt_id := 'attempt-oauth-lease-'||v_case.suffix;
+    v_payload := case v_case.command_type
+      when 'create_incident' then public.supper_test_write_payload(
+        v_command_id,'manual-op:oauth-lease:'||v_case.suffix,'OAuth lease verifier'
+      )
+      else public.supper_test_write_payload_for(
+        v_command_id,'update_incident','manual-op:oauth-lease:'||v_case.suffix,
+        case when v_case.suffix='number'
+          then jsonb_build_object('number','INC0061001','state','2')
+          else jsonb_build_object('sysId',repeat('6',32),'state','2') end,
+        'manual',null
+      )
+    end;
+    perform * from public.support_create_servicenow_write_command(v_payload);
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands where id=v_command_id;
+    v_nonce := public.support_intake_sha256_hex('oauth-lease:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId',v_command_id,'action','execute','actorUserId','admin-user',
+      'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId',v_command_id,'attemptId',v_attempt_id,
+      'executionMode','live','retry',false,'requestId','request-'||v_command_id,
+      'startedAt',public.supper_test_iso(statement_timestamp()),
+      'actorUserId','admin-user','confirmed',true,'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+    ));
+    select * into v_attempt from public.servicenow_write_attempts where id=v_attempt_id;
+    if v_attempt.provider_request_budget<>v_case.expected_requests
+      or v_attempt.recovery_budget_ms<>v_case.expected_budget_ms
+      or round(extract(epoch from (v_attempt.recoverable_at-v_attempt.started_at))*1000)::integer
+        <>v_case.expected_budget_ms then
+      raise exception 'OAuth worst-case recovery budget failed for %',v_case.suffix;
+    end if;
+    perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+      'commandId',v_command_id,'attemptId',v_attempt_id,
+      'outcome','failed','deliveryDisposition','definitely_rejected',
+      'failurePhase','authorization','retryAllowed',false,
+      'retryReason','','reconciliationReason','',
+      'requestSummary','{}'::jsonb,'responseSummary','{}'::jsonb,
+      'targetSysId','','targetNumber','','errorCode','SERVICENOW_OAUTH_FAILED',
+      'errorMessage','OAuth lease verifier terminal closure',
+      'finishedAt',public.supper_test_iso(statement_timestamp())
+    ));
+  end loop;
+  perform * from public.support_upsert_servicenow_write_connection(jsonb_build_object(
+    'id','connection-test-00000001','name','Test PDI','active',true,
+    'authMode','basic','instanceUrl','https://example.service-now.com',
+    'incidentTable','incident','configVersion','unversioned',
+    'configurationFingerprint',v_basic_fingerprint,'timeoutMs',60000,
+    'metadata',jsonb_build_object('source','sql-test'),
+    'updatedAt',public.supper_test_iso(statement_timestamp())
+  ));
+  perform * from public.support_record_servicenow_write_readiness(jsonb_build_object(
+    'connectionId','connection-test-00000001',
+    'configurationFingerprint',v_basic_fingerprint,
+    'testedAt',public.supper_test_iso(statement_timestamp()),
+    'expiresAt',public.supper_test_iso(statement_timestamp()+interval '5 minutes'),
+    'testStatus','succeeded','safeHttpStatus',200,
+    'testedByUserId','admin-user','safeErrorCode','',
+    'updatedAt',public.supper_test_iso(statement_timestamp())
+  ));
 end;
 $$;
 
@@ -683,11 +922,19 @@ begin
         ('empty-request','{}'::jsonb,v_valid_response),
         ('empty-response',v_valid_request,'{}'::jsonb),
         ('wrong-method',jsonb_set(v_valid_request,'{method}','"GET"'::jsonb),v_valid_response),
+        ('null-method',jsonb_set(v_valid_request,'{method}','null'::jsonb),v_valid_response),
         ('wrong-endpoint',jsonb_set(v_valid_request,'{endpointPath}','"/api/now/table/incident/bad"'::jsonb),v_valid_response),
+        ('null-endpoint',jsonb_set(v_valid_request,'{endpointPath}','null'::jsonb),v_valid_response),
         ('wrong-request-sys-id',jsonb_set(v_valid_request,'{targetSysId}',to_jsonb(repeat('9',32))),v_valid_response),
+        ('null-request-sys-id',jsonb_set(v_valid_request,'{targetSysId}','null'::jsonb),v_valid_response),
+        ('null-request-number',jsonb_set(v_valid_request,'{targetNumber}','null'::jsonb),v_valid_response),
         ('wrong-response-sys-id',v_valid_request,jsonb_set(v_valid_response,'{sysId}',to_jsonb(repeat('9',32)))),
+        ('null-response-sys-id',v_valid_request,jsonb_set(v_valid_response,'{sysId}','null'::jsonb)),
+        ('null-response-number',v_valid_request,jsonb_set(v_valid_response,'{number}','null'::jsonb)),
         ('wrong-number',v_valid_request,jsonb_set(v_valid_response,'{number}','"INC0099999"'::jsonb)),
         ('forged-status',v_valid_request,jsonb_set(v_valid_response,'{httpStatus}','500'::jsonb)),
+        ('null-status',v_valid_request,jsonb_set(v_valid_response,'{httpStatus}','null'::jsonb)),
+        ('non-string-state',v_valid_request,v_valid_response||jsonb_build_object('state',true)),
         ('extra-response-evidence',v_valid_request,v_valid_response||jsonb_build_object('rawBody','forbidden')),
         ('incorrect-field',jsonb_set(v_valid_request,'{fieldNames}',case
           when v_case.command_type='add_comment' then '["work_notes"]'::jsonb
@@ -816,6 +1063,7 @@ declare
   v_payload jsonb;
   v_status text;
   v_attempt_count integer;
+  v_marker_hash text;
 begin
   select count(*) into v_attempt_count from public.servicenow_write_attempts;
   for v_case in
@@ -851,6 +1099,12 @@ begin
     from public.servicenow_write_commands
     where id='matrix-valid-'||v_case.suffix;
     v_nonce := public.support_intake_sha256_hex('matrix-valid:'||v_case.suffix);
+    if v_case.suffix='matched' then
+      select public.support_intake_sha256_hex(provider_correlation_marker)
+      into v_marker_hash
+      from public.servicenow_write_commands
+      where id='matrix-valid-'||v_case.suffix;
+    end if;
     perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
       'commandId','matrix-valid-'||v_case.suffix,
       'action',v_case.action,
@@ -865,10 +1119,21 @@ begin
       'commandId','matrix-valid-'||v_case.suffix,
       'action',v_case.action,
       'result',v_case.result,
-      'safeReadBackSummary',jsonb_build_object(
-        'method','matrix_verifier',
-        'evidenceClassification',v_case.evidence
-      ),
+      'safeReadBackSummary',case when v_case.suffix='matched' then
+        jsonb_build_object(
+          'method','correlation_marker_exact','requestMethod','GET',
+          'endpointPath','/api/now/table/incident','targetTable','incident',
+          'lookupClassification','correlation_marker_exact',
+          'lookupCorrelationMarkerHash',v_marker_hash,
+          'verifiedCorrelationMarkerHash',v_marker_hash,
+          'exactMarkerVerified',true,'safeHttpStatus',200,'matchCount',1,
+          'targetSysId',v_case."targetSysId",'targetNumber',v_case."targetNumber",
+          'evidenceClassification',v_case.evidence
+        )
+        else jsonb_build_object(
+          'method','matrix_verifier',
+          'evidenceClassification',v_case.evidence
+        ) end,
       'targetSysId',coalesce(v_case."targetSysId",''),
       'targetNumber',coalesce(v_case."targetNumber",''),
       'actorUserId','admin-user',
@@ -2091,11 +2356,25 @@ begin
     'commandId','command-retry-success-01','attemptId','attempt-retry-success-b',
     'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
     'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
-    'requestSummary',jsonb_build_object('method','POST'),
+    'requestSummary',jsonb_build_object(
+      'method','POST','endpointPath','/api/now/table/incident',
+      'targetTable','incident',
+      'fieldNames',jsonb_build_array('correlation_id','description','short_description'),
+      'targetSysId',repeat('9',32),'targetNumber','INC0099999'
+    ),
     'responseSummary',jsonb_build_object(
+      'httpStatus',201,'sysId',repeat('9',32),'number','INC0099999',
       'mutationCandidateObserved',true,'candidateSysId',repeat('9',32),
       'candidateNumber','INC0099999','mutationHttpStatus',201,
-      'postWriteMarkerVerified',true
+      'postWriteMarkerVerified',true,'postWriteLookupHttpStatus',200,
+      'postWriteLookupCorrelationMarkerHash',public.support_intake_sha256_hex(
+        (select provider_correlation_marker from public.servicenow_write_commands
+         where id='command-retry-success-01')
+      ),
+      'postWriteVerifiedCorrelationMarkerHash',public.support_intake_sha256_hex(
+        (select provider_correlation_marker from public.servicenow_write_commands
+         where id='command-retry-success-01')
+      )
     ),
     'mutationCandidateSysId',repeat('9',32),
     'mutationCandidateNumber','INC0099999',
@@ -2171,31 +2450,70 @@ begin
     'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
     'confirmationNonceHash',repeat('2',64)
   ));
+  select public.support_intake_sha256_hex(provider_correlation_marker)
+  into v_marker_hash
+  from public.servicenow_write_commands where id='command-proof-negative-01';
+  v_command := jsonb_build_object(
+    'commandId','command-proof-negative-01','attemptId','attempt-proof-negative-01',
+    'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+    'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+    'requestSummary',jsonb_build_object(
+      'method','POST','endpointPath','/api/now/table/incident',
+      'targetTable','incident',
+      'fieldNames',jsonb_build_array('correlation_id','description','short_description'),
+      'targetSysId',repeat('3',32),'targetNumber','INC0033333'
+    ),
+    'responseSummary',jsonb_build_object(
+      'httpStatus',201,'sysId',repeat('3',32),'number','INC0033333',
+      'mutationCandidateObserved',true,'candidateSysId',repeat('3',32),
+      'candidateNumber','INC0033333','mutationHttpStatus',201,
+      'postWriteMarkerVerified',true,'postWriteLookupHttpStatus',200,
+      'postWriteLookupCorrelationMarkerHash',v_marker_hash,
+      'postWriteVerifiedCorrelationMarkerHash',v_marker_hash
+    ),
+    'mutationCandidateSysId',repeat('3',32),
+    'mutationCandidateNumber','INC0033333',
+    'mutationCandidateHttpStatus',201,
+    'mutationCandidateSource','mutation_response',
+    'mutationCandidateProofStatus','marker_verified',
+    'targetSysId',repeat('3',32),'targetNumber','INC0033333',
+    'errorCode','','errorMessage','',
+    'finishedAt',public.supper_test_iso(statement_timestamp())
+  );
   for v_attempt in
-    select *
-    from jsonb_to_recordset('[
-      {"suffix":"missing","summary":{"mutationCandidateObserved":true,"candidateSysId":"33333333333333333333333333333333","candidateNumber":"INC0033333","mutationHttpStatus":201}},
-      {"suffix":"null","summary":{"mutationCandidateObserved":true,"candidateSysId":"33333333333333333333333333333333","candidateNumber":"INC0033333","mutationHttpStatus":201,"postWriteMarkerVerified":null}},
-      {"suffix":"false","summary":{"mutationCandidateObserved":true,"candidateSysId":"33333333333333333333333333333333","candidateNumber":"INC0033333","mutationHttpStatus":201,"postWriteMarkerVerified":false}},
-      {"suffix":"mixed-recovery","summary":{"mutationCandidateObserved":true,"candidateSysId":"33333333333333333333333333333333","candidateNumber":"INC0033333","mutationHttpStatus":201,"postWriteMarkerVerified":true,"recoveredByCorrelationMarker":true,"providerWritePerformed":false}}
-    ]'::jsonb) as proof_case(suffix text, summary jsonb)
+    select * from (values
+      ('candidate-sys-null',jsonb_set(v_command,'{mutationCandidateSysId}','null'::jsonb)),
+      ('candidate-number-null',jsonb_set(v_command,'{mutationCandidateNumber}','null'::jsonb)),
+      ('candidate-number-wrong-type',jsonb_set(v_command,'{mutationCandidateNumber}','333333'::jsonb)),
+      ('request-method-null',jsonb_set(v_command,'{requestSummary,method}','null'::jsonb)),
+      ('request-endpoint-null',jsonb_set(v_command,'{requestSummary,endpointPath}','null'::jsonb)),
+      ('request-target-null',jsonb_set(v_command,'{requestSummary,targetSysId}','null'::jsonb)),
+      ('response-status-null',jsonb_set(v_command,'{responseSummary,httpStatus}','null'::jsonb)),
+      ('response-sys-null',jsonb_set(v_command,'{responseSummary,sysId}','null'::jsonb)),
+      ('response-number-null',jsonb_set(v_command,'{responseSummary,number}','null'::jsonb)),
+      ('candidate-summary-sys-null',jsonb_set(v_command,'{responseSummary,candidateSysId}','null'::jsonb)),
+      ('candidate-summary-number-null',jsonb_set(v_command,'{responseSummary,candidateNumber}','null'::jsonb)),
+      ('post-write-flag-null',jsonb_set(v_command,'{responseSummary,postWriteMarkerVerified}','null'::jsonb)),
+      ('post-write-flag-false',jsonb_set(v_command,'{responseSummary,postWriteMarkerVerified}','false'::jsonb)),
+      ('lookup-hash-null',jsonb_set(v_command,'{responseSummary,postWriteLookupCorrelationMarkerHash}','null'::jsonb)),
+      ('verified-hash-null',jsonb_set(v_command,'{responseSummary,postWriteVerifiedCorrelationMarkerHash}','null'::jsonb)),
+      ('missing-lookup-hash',jsonb_set(v_command,'{responseSummary}',(v_command->'responseSummary')-'postWriteLookupCorrelationMarkerHash')),
+      ('missing-verified-hash',jsonb_set(v_command,'{responseSummary}',(v_command->'responseSummary')-'postWriteVerifiedCorrelationMarkerHash')),
+      ('wrong-marker-hash',jsonb_set(jsonb_set(
+        v_command,'{responseSummary,postWriteLookupCorrelationMarkerHash}',to_jsonb(repeat('f',64))
+      ),'{responseSummary,postWriteVerifiedCorrelationMarkerHash}',to_jsonb(repeat('f',64)))),
+      ('marker-hash-mismatch',jsonb_set(
+        v_command,'{responseSummary,postWriteVerifiedCorrelationMarkerHash}',to_jsonb(repeat('e',64))
+      )),
+      ('mixed-recovery',jsonb_set(
+        v_command,'{responseSummary}',(v_command->'responseSummary')||jsonb_build_object(
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false
+        )
+      ))
+    ) as proof_case(suffix,payload)
   loop
     begin
-      perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
-        'commandId','command-proof-negative-01','attemptId','attempt-proof-negative-01',
-        'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
-        'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
-        'requestSummary',jsonb_build_object('method','POST'),
-        'responseSummary',v_attempt.summary,
-        'mutationCandidateSysId',repeat('3',32),
-        'mutationCandidateNumber','INC0033333',
-        'mutationCandidateHttpStatus',201,
-        'mutationCandidateSource','mutation_response',
-        'mutationCandidateProofStatus','marker_verified',
-        'targetSysId',repeat('3',32),'targetNumber','INC0033333',
-        'errorCode','','errorMessage','',
-        'finishedAt',public.supper_test_iso(statement_timestamp())
-      ));
+      perform * from public.support_finish_servicenow_write_attempt(v_attempt.payload);
       raise exception 'Invalid candidate proof case % was accepted',v_attempt.suffix;
     exception when invalid_parameter_value then
       if sqlerrm<>'SERVICENOW_WRITE_RESULT_INVALID' then raise; end if;
@@ -2371,6 +2689,14 @@ begin
     select * from (values
       ('missing-request-hash',v_g2_request-'lookupCorrelationMarkerHash',v_g2_response),
       ('missing-response-hash',v_g2_request,v_g2_response-'verifiedCorrelationMarkerHash'),
+      ('null-request-method',jsonb_set(v_g2_request,'{method}','null'::jsonb),v_g2_response),
+      ('null-endpoint',jsonb_set(v_g2_request,'{endpointPath}','null'::jsonb),v_g2_response),
+      ('null-request-target',jsonb_set(v_g2_request,'{targetSysId}','null'::jsonb),v_g2_response),
+      ('null-response-sys-id',v_g2_request,jsonb_set(v_g2_response,'{sysId}','null'::jsonb)),
+      ('null-response-number',v_g2_request,jsonb_set(v_g2_response,'{number}','null'::jsonb)),
+      ('null-request-hash',jsonb_set(v_g2_request,'{lookupCorrelationMarkerHash}','null'::jsonb),v_g2_response),
+      ('null-response-hash',v_g2_request,jsonb_set(v_g2_response,'{verifiedCorrelationMarkerHash}','null'::jsonb)),
+      ('null-exact-marker',v_g2_request,jsonb_set(v_g2_response,'{exactMarkerVerified}','null'::jsonb)),
       ('wrong-marker-hash',jsonb_set(v_g2_request,'{lookupCorrelationMarkerHash}',to_jsonb(repeat('f',64))),jsonb_set(v_g2_response,'{verifiedCorrelationMarkerHash}',to_jsonb(repeat('f',64)))),
       ('request-response-hash-mismatch',jsonb_set(v_g2_request,'{lookupCorrelationMarkerHash}',to_jsonb(repeat('e',64))),v_g2_response)
     ) as invalid_marker_hash(suffix,request_summary,response_summary)
@@ -2889,7 +3215,7 @@ try {
   psql([], acceptanceSql);
   const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice after real intake migrations; operation-wide recovery leases, unified late-response closure, marker-hash-bound G2 proof, exact non-create execution and reconciliation evidence, terminal Candidate projection, database-clock authority, and ledger grants passed.");
+console.log("ServiceNow write migration executed twice after real intake migrations; null-safe G1/G2/non-create/reconciliation proof, G1/G2 marker binding, exact create/update read-back evidence, worst-case OAuth recovery leases, late-response closure, terminal Candidate projection, database-clock authority, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

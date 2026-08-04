@@ -108,7 +108,9 @@ export function serviceNowOperationProviderRequestBudget(
     : command.targetNumber
       ? 2
       : 1;
-  return providerRequests + (authMode === "oauth_client_credentials" ? 1 : 0);
+  return authMode === "oauth_client_credentials"
+    ? providerRequests * 2
+    : providerRequests;
 }
 
 export function buildServiceNowNormalizedPayloadMaterial(

@@ -134,7 +134,7 @@ describe("ServiceNow write idempotency", () => {
       fields: { correlation_id: `SUPPER:${"a".repeat(64)}` },
     };
     expect(serviceNowOperationProviderRequestBudget(create, "basic")).toBe(3);
-    expect(serviceNowOperationProviderRequestBudget(create, "oauth_client_credentials")).toBe(4);
+    expect(serviceNowOperationProviderRequestBudget(create, "oauth_client_credentials")).toBe(6);
     expect(serviceNowOperationProviderRequestBudget({
       ...create,
       commandType: "update_incident",
@@ -143,7 +143,17 @@ describe("ServiceNow write idempotency", () => {
     expect(serviceNowOperationProviderRequestBudget({
       ...create,
       commandType: "update_incident",
+      targetNumber: "INC0000001",
+    }, "oauth_client_credentials")).toBe(4);
+    expect(serviceNowOperationProviderRequestBudget({
+      ...create,
+      commandType: "update_incident",
       targetSysId: "b".repeat(32),
     }, "basic")).toBe(1);
+    expect(serviceNowOperationProviderRequestBudget({
+      ...create,
+      commandType: "update_incident",
+      targetSysId: "b".repeat(32),
+    }, "oauth_client_credentials")).toBe(2);
   });
 });

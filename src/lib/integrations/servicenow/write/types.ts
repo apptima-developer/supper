@@ -184,6 +184,8 @@ export type ServiceNowSafeResponseSummary = {
   mutationHttpStatus?: number;
   postWriteMarkerVerified?: boolean;
   postWriteLookupHttpStatus?: number;
+  postWriteLookupCorrelationMarkerHash?: string;
+  postWriteVerifiedCorrelationMarkerHash?: string;
   verifiedCorrelationMarkerHash?: string;
 };
 
