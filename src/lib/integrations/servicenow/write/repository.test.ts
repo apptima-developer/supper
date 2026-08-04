@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-import { safeServiceNowWriteCommand } from "./repository";
+import {
+  currentServiceNowMutationCandidate,
+  latestTerminalCandidateResolutions,
+  safeServiceNowWriteCommand,
+} from "./repository";
+import type {
+  ServiceNowWriteMutationCandidate,
+  ServiceNowWriteReconciliationEventSummary,
+} from "./types";
 
 const validRow = {
   id: "command-id-0000000001",
@@ -84,5 +92,54 @@ describe("ServiceNow write persisted row parsing", () => {
       ...validRow,
       safe_response_summary: { accessToken: "forbidden" },
     })).toThrow(/integrity validation/i);
+  });
+});
+
+describe("ServiceNow mutation Candidate projection", () => {
+  const candidateId = `sn-candidate-${"c".repeat(64)}`;
+  const event = (
+    id: string,
+    result: ServiceNowWriteReconciliationEventSummary["result"],
+    createdAt: string,
+  ): ServiceNowWriteReconciliationEventSummary => ({
+    id,
+    mutationCandidateEventId: candidateId,
+    action: "reconcile_by_read_back",
+    result,
+    evidenceClassification: "provider_inconclusive",
+    safeReadBackSummary: { evidenceClassification: "provider_inconclusive" },
+    actorUserId: "admin-id",
+    commandVersionBefore: 2,
+    commandVersionAfter: 3,
+    createdAt,
+  });
+
+  it("keeps the newest terminal resolution when older or nonterminal history follows", () => {
+    const newestTerminal = event("terminal-new", "confirmed_not_applied", "2026-08-04T03:00:00.000Z");
+    const resolutions = latestTerminalCandidateResolutions([
+      event("inconclusive-newer", "inconclusive", "2026-08-04T04:00:00.000Z"),
+      newestTerminal,
+      event("terminal-old", "confirmed_succeeded", "2026-08-04T02:00:00.000Z"),
+      event("not-found-old", "not_found", "2026-08-04T01:00:00.000Z"),
+    ]);
+    expect(resolutions.get(candidateId)).toBe(newestTerminal);
+  });
+
+  it("returns Candidate B after resolved Candidate A", () => {
+    const candidate = (id: string, resolutionState: ServiceNowWriteMutationCandidate["resolutionState"]): ServiceNowWriteMutationCandidate => ({
+      id,
+      attemptId: `attempt-${id.slice(-8)}`,
+      attemptNumber: resolutionState === "current_unresolved" ? 2 : 1,
+      sysId: "d".repeat(32),
+      number: resolutionState === "current_unresolved" ? "INC0000002" : "INC0000001",
+      httpStatus: 201,
+      observedAt: "2026-08-04T03:00:00.000Z",
+      source: "mutation_response",
+      proofStatus: "marker_not_verified",
+      resolutionState,
+    });
+    const candidateA = candidate(`sn-candidate-${"a".repeat(64)}`, "confirmed_not_applied");
+    const candidateB = candidate(`sn-candidate-${"b".repeat(64)}`, "current_unresolved");
+    expect(currentServiceNowMutationCandidate([candidateA, candidateB])).toBe(candidateB);
   });
 });

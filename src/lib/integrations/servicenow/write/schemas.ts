@@ -197,6 +197,7 @@ export const serviceNowSafeRequestSummarySchema = z.object({
   fieldNames: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,79}$/)).max(30),
   targetSysId: serviceNowSysIdWriteSchema.optional(),
   targetNumber: serviceNowNumberWriteSchema.optional(),
+  lookupClassification: z.literal("correlation_marker_exact").optional(),
 }).strict();
 
 export const serviceNowSafeResponseSummarySchema = z.object({
@@ -206,6 +207,7 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   state: z.string().max(80).optional(),
   recoveredByCorrelationMarker: z.boolean().optional(),
   providerWritePerformed: z.boolean().optional(),
+  exactMarkerVerified: z.boolean().optional(),
   mutationCandidateObserved: z.boolean().optional(),
   candidateSysId: serviceNowSysIdWriteSchema.optional(),
   candidateNumber: serviceNowNumberWriteSchema.optional(),
@@ -315,6 +317,9 @@ export const serviceNowWriteAttemptRowSchema = z.object({
   safe_error_code: nullableText(80),
   safe_error_message: nullableText(240),
   started_at: timestampSchema,
+  recoverable_at: timestampSchema,
+  recovery_lease_version: z.number().int().positive(),
+  recovery_reason: nullableText(240),
   finished_at: nullableTimestamp,
 }).strict();
 

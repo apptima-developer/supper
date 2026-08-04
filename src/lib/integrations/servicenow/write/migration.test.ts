@@ -83,6 +83,13 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("next_retry_at");
     expect(sql).toContain("for update");
     expect(sql).toContain("unique (command_id, attempt_number)");
+    expect(sql).toContain("recoverable_at");
+    expect(sql).toContain("recovery_lease_version");
+    expect(sql).toContain("recoverable_at >= started_at + interval '2 minutes'");
+    expect(sql).toContain("servicenow_write_attempt_recovery_too_early");
+    expect(sql).toContain("recoveryoperationproviderrequestperformed");
+    expect(sql).toContain("originalmutationoutcome");
+    expect(sql).not.toMatch(/'recoveredbyadministrator',true,\s*'providerwriteperformed',false/);
   });
 
   it("requires one-time confirmations and append-only reconciliation", () => {
@@ -118,10 +125,14 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("servicenow_write_mutation_candidate_events_append_only");
     expect(sql).toContain("servicenow_write_attempt_recovery_events");
     expect(sql).toContain("servicenow_write_attempt_finish_conflict");
+    expect(sql).toContain("servicenow_write_attempt_already_recovered");
+    expect(sql).toContain("servicenow_write_target_continuity_conflict");
     expect(sql).toContain("recover_stuck_attempt");
     expect(sql).toContain("jsonb_typeof(v_response_summary->'postwritemarkerverified')<>'boolean'");
     expect(sql).toContain("is distinct from 'true'::jsonb");
     expect(sql).toContain("mutation_response");
+    expect(sql).toContain("exactmarkerverified");
+    expect(sql).toContain("correlation_marker_exact");
   });
 
   it("enforces fresh readiness and exception-safe payload parsing", () => {

@@ -166,6 +166,7 @@ export type ServiceNowSafeRequestSummary = {
   fieldNames: string[];
   targetSysId?: string;
   targetNumber?: string;
+  lookupClassification?: "correlation_marker_exact";
 };
 
 export type ServiceNowSafeResponseSummary = {
@@ -175,6 +176,7 @@ export type ServiceNowSafeResponseSummary = {
   state?: string;
   recoveredByCorrelationMarker?: boolean;
   providerWritePerformed?: boolean;
+  exactMarkerVerified?: boolean;
   mutationCandidateObserved?: boolean;
   candidateSysId?: string;
   candidateNumber?: string;
@@ -238,6 +240,9 @@ export type ServiceNowWriteAttemptSummary = {
   safeErrorCode?: string;
   safeErrorMessage?: string;
   startedAt: string;
+  attemptStartedAt: string;
+  recoverableAt: string;
+  recoveryEligible: boolean;
   finishedAt?: string;
 };
 

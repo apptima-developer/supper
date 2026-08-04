@@ -400,6 +400,7 @@ export class ServiceNowWriteAdapter {
             fieldNames: ["correlation_id", "number", "state", "sys_id"],
             targetSysId: existing.sysId,
             targetNumber: existing.number,
+            lookupClassification: "correlation_marker_exact",
           },
           responseSummary: {
             httpStatus: markerLookup.status,
@@ -408,6 +409,7 @@ export class ServiceNowWriteAdapter {
             state: typeof existing.row.state === "string" ? existing.row.state : undefined,
             recoveredByCorrelationMarker: true,
             providerWritePerformed: false,
+            exactMarkerVerified: true,
           },
           targetSysId: existing.sysId,
           targetNumber: existing.number,

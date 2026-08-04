@@ -128,7 +128,10 @@ function operationalError(error: unknown): never {
   if (message.includes("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the ServiceNow write command");
   if (message.includes("SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT", "Verified target conflicts with the recorded ServiceNow mutation candidate");
   if (message.includes("SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE")) throw new HttpError(409, "SERVICENOW_WRITE_MUTATION_CANDIDATE_STALE", "The reviewed ServiceNow mutation candidate is no longer current");
+  if (message.includes("SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT", "ServiceNow returned a target that conflicts with the original command");
+  if (message.includes("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED", "The ServiceNow write attempt was already recovered and cannot accept a late result");
   if (message.includes("SERVICENOW_WRITE_ATTEMPT_FINISH_CONFLICT")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_FINISH_CONFLICT", "The ServiceNow write attempt was already finalized with different terminal material");
+  if (message.includes("SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY", "The ServiceNow write attempt is still inside its recovery lease");
   if (message.includes("SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED")) throw new HttpError(409, "SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED", "The ServiceNow write attempt is not eligible for manual recovery");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID")) throw new HttpError(409, "SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID", "ServiceNow write reconciliation evidence does not support this decision");
   if (message.includes("SERVICENOW_WRITE_RECONCILIATION_INVALID")) throw new HttpError(400, "SERVICENOW_WRITE_RECONCILIATION_INVALID", "ServiceNow write reconciliation evidence is invalid");
@@ -479,6 +482,16 @@ async function execute(
       finishedAt: now().toISOString(),
     });
   } catch (error) {
+    if (error instanceof Error
+      && error.message.includes("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED")) {
+      logServerCritical("SERVICENOW_WRITE_LATE_RESPONSE_AFTER_RECOVERY", error, {
+        requestId: input.requestId,
+        operation: "servicenow.write.finish",
+        commandId: input.commandId,
+        attemptId,
+      });
+      operationalError(error);
+    }
     const finishedAt = now();
     const classified = isServiceNowWriteExecutionError(error);
     const uncertain = !classified || error.deliveryDisposition === "may_have_committed";
@@ -755,7 +768,13 @@ export async function reconcileCommand(
     }
     if ((normalized.targetSysId && normalized.targetSysId !== targetSysId)
       || (normalized.targetNumber && normalized.targetNumber !== targetNumber)) {
-      throw new HttpError(409, "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT", "Verified target conflicts with the original command target");
+      throw new HttpError(
+        409,
+        normalized.commandType === "create_incident"
+          ? "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT"
+          : "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT",
+        "Verified target conflicts with the original command target",
+      );
     }
     if (mutationCandidate
       && (mutationCandidate.sysId !== targetSysId || mutationCandidate.number !== targetNumber)) {
@@ -962,13 +981,11 @@ export async function recoverStuckAttempt(
   dependencies: Dependencies = {},
 ) {
   const { repository } = await ledgerRuntime(dependencies);
-  const recoveredAt = (dependencies.now || (() => new Date()))().toISOString();
   try {
     await repository.recoverAttempt({
       commandId: input.commandId,
       actorUserId: input.session.userId,
       requestId: input.requestId,
-      recoveredAt,
       confirmed: input.confirmation.confirmed,
       expectedVersion: input.confirmation.expectedVersion,
       expectedNormalizedPayloadHash: input.confirmation.expectedNormalizedPayloadHash,

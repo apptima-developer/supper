@@ -34,6 +34,10 @@ const writeTypesSource = readFileSync(
   path.join(root, "src/lib/integrations/servicenow/write/types.ts"),
   "utf8",
 );
+const writeMigrationSource = readFileSync(
+  path.join(root, "supabase/migrations/202607230001_servicenow_write_kernel.sql"),
+  "utf8",
+);
 for (const required of [
   "SignJWT",
   "jwtVerify",
@@ -46,6 +50,24 @@ for (const required of [
   if (!manualIdentitySource.includes(required)) {
     throw new Error(`Manual operation identity is missing ${required}`);
   }
+}
+for (const required of [
+  "recoverable_at",
+  "recovery_lease_version",
+  "SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY",
+  "recoveryOperationProviderRequestPerformed",
+  "originalMutationOutcome",
+  "exactMarkerVerified",
+  "correlation_marker_exact",
+  "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT",
+  "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED",
+]) {
+  if (!writeMigrationSource.includes(required)) {
+    throw new Error(`ServiceNow recovery proof migration is missing ${required}`);
+  }
+}
+if (writeMigrationSource.includes("'recoveredByAdministrator',true,\n      'providerWritePerformed',false")) {
+  throw new Error("Administrative recovery still claims the original provider mutation was absent");
 }
 if (writeServiceSource.includes("`manual-op:${commandId}`")) {
   throw new Error("Manual operation identity is still derived from a per-request command ID");
@@ -413,6 +435,172 @@ begin
     retry_allowed=false,
     next_retry_at=null
   where id=p_command_id;
+end;
+$$;
+
+do $$
+declare
+  v_case record;
+  v_version integer;
+  v_hash text;
+  v_nonce text;
+  v_command_id text;
+begin
+  for v_case in
+    select * from (values
+      ('update-sys-id','update_incident',jsonb_build_object('sysId',repeat('d',32),'state','2'),repeat('e',32),'INC0070001',repeat('d',32),'INC0070001'),
+      ('update-number','update_incident',jsonb_build_object('number','INC0070002','state','2'),repeat('e',32),'INC0099999',repeat('e',32),'INC0070002'),
+      ('comment-number','add_comment',jsonb_build_object('number','INC0070003','text','Continuity comment'),repeat('e',32),'INC0099999',repeat('e',32),'INC0070003'),
+      ('work-note-sys-id','add_work_note',jsonb_build_object('sysId',repeat('d',32),'text','Continuity work note'),repeat('e',32),'INC0070004',repeat('d',32),'INC0070004')
+    ) as continuity_case(
+      suffix,command_type,payload,conflict_sys_id,conflict_number,
+      valid_sys_id,valid_number
+    )
+  loop
+    v_command_id := 'continuity-'||v_case.suffix;
+    perform * from public.support_create_servicenow_write_command(
+      public.supper_test_write_payload_for(
+        v_command_id,v_case.command_type,'manual-op:continuity:'||v_case.suffix,
+        v_case.payload,'manual',null
+      )
+    );
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands where id=v_command_id;
+    v_nonce := public.support_intake_sha256_hex('continuity:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId',v_command_id,'action','execute','actorUserId','admin-user',
+      'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
+      'executionMode','live','retry',false,'requestId','request-'||v_command_id,
+      'startedAt',public.supper_test_iso(statement_timestamp()),
+      'actorUserId','admin-user','confirmed',true,'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+    ));
+    begin
+      perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+        'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
+        'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+        'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+        'requestSummary',jsonb_build_object('method','PATCH'),
+        'responseSummary',jsonb_build_object(
+          'httpStatus',200,'sysId',v_case.conflict_sys_id,'number',v_case.conflict_number
+        ),
+        'targetSysId',v_case.conflict_sys_id,'targetNumber',v_case.conflict_number,
+        'errorCode','','errorMessage','',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      ));
+      raise exception 'Non-create target continuity conflict % was accepted',v_case.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT' then raise; end if;
+    end;
+    if not exists (
+      select 1 from public.servicenow_write_commands command_record
+      join public.servicenow_write_attempts attempt_record
+        on attempt_record.command_id=command_record.id
+      where command_record.id=v_command_id
+        and command_record.status='executing'
+        and attempt_record.outcome='executing'
+        and not exists (
+          select 1 from public.servicenow_ticket_links ticket_link
+          where ticket_link.servicenow_sys_id=v_case.conflict_sys_id
+            and ticket_link.servicenow_number=v_case.conflict_number
+        )
+    ) then
+      raise exception 'Continuity conflict % changed command, Attempt, or Ticket link state',v_case.suffix;
+    end if;
+    perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+      'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
+      'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+      'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+      'requestSummary',jsonb_build_object('method','PATCH'),
+      'responseSummary',jsonb_build_object(
+        'httpStatus',200,'sysId',v_case.valid_sys_id,'number',v_case.valid_number
+      ),
+      'targetSysId',v_case.valid_sys_id,'targetNumber',v_case.valid_number,
+      'errorCode','','errorMessage','',
+      'finishedAt',public.supper_test_iso(statement_timestamp())
+    ));
+    if not exists (
+      select 1 from public.servicenow_write_commands
+      where id=v_command_id and status='succeeded'
+        and target_sys_id=v_case.valid_sys_id
+        and target_number=v_case.valid_number
+    ) then
+      raise exception 'Safe missing counterpart resolution % was not persisted',v_case.suffix;
+    end if;
+  end loop;
+  for v_case in
+    select * from (values
+      ('update-read-back','update_incident','reconcile_by_read_back',jsonb_build_object('sysId',repeat('d',32),'state','2'),repeat('e',32),'INC0080001'),
+      ('comment-manual','add_comment','mark_succeeded_after_verification',jsonb_build_object('number','INC0080002','text','Continuity comment review'),repeat('e',32),'INC0099999'),
+      ('work-note-manual','add_work_note','mark_succeeded_after_verification',jsonb_build_object('sysId',repeat('d',32),'text','Continuity work note review'),repeat('e',32),'INC0080003')
+    ) as reconciliation_continuity(
+      suffix,command_type,action,payload,conflict_sys_id,conflict_number
+    )
+  loop
+    v_command_id := 'reconcile-continuity-'||v_case.suffix;
+    perform * from public.support_create_servicenow_write_command(
+      public.supper_test_write_payload_for(
+        v_command_id,v_case.command_type,'manual-op:reconcile-continuity:'||v_case.suffix,
+        v_case.payload,'manual',null
+      )
+    );
+    update public.servicenow_write_commands set
+      status='reconciliation_required',delivery_disposition='may_have_committed',
+      failure_phase='read_back',retry_allowed=false,next_retry_at=null
+    where id=v_command_id;
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands where id=v_command_id;
+    v_nonce := public.support_intake_sha256_hex('reconcile-continuity:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId',v_command_id,'action',v_case.action,'actorUserId','admin-user',
+      'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    begin
+      perform * from public.support_reconcile_servicenow_write_command(
+        jsonb_build_object(
+          'commandId',v_command_id,'action',v_case.action,
+          'result','confirmed_succeeded','safeReadBackSummary',jsonb_build_object(
+            'method','continuity_verifier','evidenceClassification',
+            case when v_case.action='reconcile_by_read_back'
+              then 'provider_matched'
+              else 'provider_target_matched_manual_verification' end
+          ),
+          'targetSysId',v_case.conflict_sys_id,'targetNumber',v_case.conflict_number,
+          'actorUserId','admin-user','requestId','request-'||v_command_id,
+          'checkedAt',public.supper_test_iso(statement_timestamp()),
+          'confirmed',true,'expectedVersion',v_version,
+          'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+        ) || case when v_case.action='reconcile_by_read_back' then '{}'::jsonb else
+          jsonb_build_object(
+            'verificationAcknowledged',true,
+            'verificationNote','Conflicting target continuity must be rejected.'
+          ) end
+      );
+      raise exception 'Reconciliation target continuity conflict % was accepted',v_case.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT' then raise; end if;
+    end;
+    if not exists (
+      select 1 from public.servicenow_write_commands command_record
+      where command_record.id=v_command_id
+        and command_record.status='reconciliation_required'
+        and (
+          command_record.target_sys_id is not distinct from nullif(command_record.normalized_payload->>'targetSysId','')
+          and command_record.target_number is not distinct from nullif(command_record.normalized_payload->>'targetNumber','')
+        )
+    ) then
+      raise exception 'Reconciliation conflict % changed authoritative target state',v_case.suffix;
+    end if;
+  end loop;
 end;
 $$;
 
@@ -1599,6 +1787,35 @@ begin
     'confirmationNonceHash',repeat('d',64),
     'mutationCandidateEventId',v_candidate_event_id
   ));
+  insert into public.servicenow_write_reconciliation_events (
+    id,command_id,mutation_candidate_event_id,action,result,evidence_classification,
+    safe_read_back_summary,actor_user_id,request_id,
+    command_version_before,command_version_after,created_at
+  ) values (
+    'sn-reconcile-projection-older-inconclusive',
+    'command-retry-success-01',v_candidate_event_id,
+    'reconcile_by_read_back','inconclusive','provider_inconclusive',
+    jsonb_build_object(
+      'method','exact_target',
+      'evidenceClassification','provider_inconclusive'
+    ),
+    'admin-user','request-projection-older',1,2,
+    statement_timestamp()-interval '1 minute'
+  );
+  if not exists (
+    select 1
+    from public.servicenow_write_reconciliation_events terminal_resolution
+    where terminal_resolution.mutation_candidate_event_id=v_candidate_event_id
+      and terminal_resolution.result='confirmed_not_applied'
+      and terminal_resolution.created_at=(
+        select max(newest_terminal.created_at)
+        from public.servicenow_write_reconciliation_events newest_terminal
+        where newest_terminal.mutation_candidate_event_id=v_candidate_event_id
+          and newest_terminal.result in ('confirmed_succeeded','confirmed_not_applied')
+      )
+  ) then
+    raise exception 'Older inconclusive history overrode terminal Candidate A resolution';
+  end if;
   select version,normalized_payload_hash into v_version,v_hash
   from public.servicenow_write_commands where id='command-retry-success-01';
   perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
@@ -1812,14 +2029,86 @@ begin
     'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
     'confirmationNonceHash',repeat('1',64)
   ));
+  for v_attempt in
+    select * from (values
+      (
+        'missing-identity',
+        jsonb_build_object(
+          'httpStatus',200,'recoveredByCorrelationMarker',true,
+          'providerWritePerformed',false,'exactMarkerVerified',true
+        ),repeat('2',32),'INC0022222'
+      ),
+      (
+        'sys-id-mismatch',
+        jsonb_build_object(
+          'httpStatus',200,'sysId',repeat('3',32),'number','INC0022222',
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
+          'exactMarkerVerified',true
+        ),repeat('2',32),'INC0022222'
+      ),
+      (
+        'number-mismatch',
+        jsonb_build_object(
+          'httpStatus',200,'sysId',repeat('2',32),'number','INC0099999',
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
+          'exactMarkerVerified',true
+        ),repeat('2',32),'INC0022222'
+      ),
+      (
+        'missing-exact-proof',
+        jsonb_build_object(
+          'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false
+        ),repeat('2',32),'INC0022222'
+      ),
+      (
+        'forged-target-pair',
+        jsonb_build_object(
+          'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
+          'exactMarkerVerified',true
+        ),repeat('4',32),'INC0044444'
+      )
+    ) as invalid_g2(suffix,response_summary,target_sys_id,target_number)
+  loop
+    begin
+      perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+        'commandId','command-marker-recovery-01','attemptId','attempt-marker-recovery-01',
+        'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+        'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+        'requestSummary',jsonb_build_object(
+          'method','GET','endpointPath','/api/now/table/incident',
+          'targetTable','incident','fieldNames',jsonb_build_array(
+            'correlation_id','number','state','sys_id'
+          ),'targetSysId',repeat('2',32),'targetNumber','INC0022222',
+          'lookupClassification','correlation_marker_exact'
+        ),
+        'responseSummary',v_attempt.response_summary,
+        'targetSysId',v_attempt.target_sys_id,'targetNumber',v_attempt.target_number,
+        'errorCode','','errorMessage','',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      ));
+      raise exception 'Invalid G2 case % was accepted',v_attempt.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_RESULT_INVALID' then raise; end if;
+    end;
+  end loop;
   perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
     'commandId','command-marker-recovery-01','attemptId','attempt-marker-recovery-01',
     'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
     'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
-    'requestSummary',jsonb_build_object('method','GET','lookup','correlation_marker'),
+    'requestSummary',jsonb_build_object(
+      'method','GET','endpointPath','/api/now/table/incident',
+      'targetTable','incident','fieldNames',jsonb_build_array(
+        'correlation_id','number','state','sys_id'
+      ),'targetSysId',repeat('2',32),'targetNumber','INC0022222',
+      'lookupClassification','correlation_marker_exact'
+    ),
     'responseSummary',jsonb_build_object(
+      'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
       'recoveredByCorrelationMarker',true,
-      'providerWritePerformed',false
+      'providerWritePerformed',false,
+      'exactMarkerVerified',true
     ),
     'targetSysId',repeat('2',32),'targetNumber','INC0022222',
     'errorCode','','errorMessage','',
@@ -1834,6 +2123,9 @@ begin
       and attempt_record.request_summary->>'method'='GET'
       and attempt_record.response_summary->'recoveredByCorrelationMarker'='true'::jsonb
       and attempt_record.response_summary->'providerWritePerformed'='false'::jsonb
+      and attempt_record.response_summary->'exactMarkerVerified'='true'::jsonb
+      and attempt_record.response_summary->>'sysId'=repeat('2',32)
+      and attempt_record.response_summary->>'number'='INC0022222'
       and not exists (
         select 1 from public.servicenow_write_mutation_candidate_events candidate
         where candidate.command_id=command_record.id
@@ -1866,6 +2158,52 @@ begin
   ));
   select version,normalized_payload_hash into v_version,v_hash
   from public.servicenow_write_commands where id='command-stuck-recovery-01';
+  begin
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','command-stuck-recovery-01','action','recover_stuck_attempt',
+      'actorUserId','admin-user','expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('b',64),
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    raise exception 'Immediate recovery confirmation bypassed the recovery lease';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY' then raise; end if;
+  end;
+  begin
+    perform * from public.support_recover_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-stuck-recovery-01','actorUserId','admin-user',
+      'requestId','request-stuck-recover','recoveredAt','2000-01-01T00:00:00.000Z',
+      'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('b',64)
+    ));
+    raise exception 'Caller recovery time bypass material was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID' then raise; end if;
+  end;
+  perform set_config('session_replication_role','replica',true);
+  update public.servicenow_write_attempts set
+    started_at=statement_timestamp()-interval '3 minutes',
+    recoverable_at=statement_timestamp()+interval '1 second'
+  where id='attempt-stuck-recovery-01';
+  perform set_config('session_replication_role','origin',true);
+  begin
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId','command-stuck-recovery-01','action','recover_stuck_attempt',
+      'actorUserId','admin-user','expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',repeat('b',64),
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    raise exception 'Recovery confirmation one second before eligibility was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY' then raise; end if;
+  end;
+  perform set_config('session_replication_role','replica',true);
+  update public.servicenow_write_attempts
+  set recoverable_at=statement_timestamp()
+  where id='attempt-stuck-recovery-01';
+  perform set_config('session_replication_role','origin',true);
   perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
     'commandId','command-stuck-recovery-01','action','recover_stuck_attempt',
     'actorUserId','admin-user','expectedVersion',v_version,
@@ -1873,10 +2211,31 @@ begin
     'issuedAt',public.supper_test_iso(statement_timestamp()),
     'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
   ));
+  perform set_config('session_replication_role','replica',true);
+  update public.servicenow_write_attempts
+  set recoverable_at=statement_timestamp()+interval '1 second'
+  where id='attempt-stuck-recovery-01';
+  perform set_config('session_replication_role','origin',true);
+  begin
+    perform * from public.support_recover_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-stuck-recovery-01','actorUserId','admin-user',
+      'requestId','request-stuck-recover','confirmed',true,
+      'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',repeat('b',64)
+    ));
+    raise exception 'Recovery RPC bypassed database eligibility time';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY' then raise; end if;
+  end;
+  perform set_config('session_replication_role','replica',true);
+  update public.servicenow_write_attempts
+  set recoverable_at=statement_timestamp()
+  where id='attempt-stuck-recovery-01';
+  perform set_config('session_replication_role','origin',true);
   perform * from public.support_recover_servicenow_write_attempt(jsonb_build_object(
     'commandId','command-stuck-recovery-01','actorUserId','admin-user',
-    'requestId','request-stuck-recover','recoveredAt',public.supper_test_iso(statement_timestamp()),
-    'confirmed',true,'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+    'requestId','request-stuck-recover','confirmed',true,
+    'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
     'confirmationNonceHash',repeat('b',64)
   ));
   select id into v_recovery_event_id
@@ -1890,9 +2249,40 @@ begin
       and command_record.status='reconciliation_required'
       and attempt_record.outcome='uncertain'
       and attempt_record.request_summary='{}'::jsonb
-      and attempt_record.response_summary->'providerWritePerformed'='false'::jsonb
+      and attempt_record.response_summary->'recoveryOperationProviderRequestPerformed'='false'::jsonb
+      and attempt_record.response_summary->>'originalMutationOutcome'='unknown'
+      and not (attempt_record.response_summary ? 'providerWritePerformed')
   ) then
     raise exception 'Administrative recovery did not close the stuck ledger state safely';
+  end if;
+  begin
+    perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+      'commandId','command-stuck-recovery-01','attemptId','attempt-stuck-recovery-01',
+      'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+      'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+      'requestSummary',jsonb_build_object('method','POST'),
+      'responseSummary',jsonb_build_object('httpStatus',201),
+      'targetSysId',repeat('5',32),'targetNumber','INC0055555',
+      'errorCode','','errorMessage','',
+      'finishedAt',public.supper_test_iso(statement_timestamp())
+    ));
+    raise exception 'Late provider finish rewrote a recovered Attempt';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED' then raise; end if;
+  end;
+  if not exists (
+    select 1 from public.servicenow_write_commands command_record
+    join public.servicenow_write_attempts attempt_record
+      on attempt_record.command_id=command_record.id
+    where command_record.id='command-stuck-recovery-01'
+      and command_record.status='reconciliation_required'
+      and attempt_record.outcome='uncertain'
+      and not exists (
+        select 1 from public.servicenow_write_mutation_candidate_events candidate
+        where candidate.command_id=command_record.id
+      )
+  ) then
+    raise exception 'Late provider finish changed recovered command or Candidate state';
   end if;
   begin
     update public.servicenow_write_attempt_recovery_events
@@ -2145,7 +2535,7 @@ try {
   psql([], acceptanceSql);
   const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice after real intake migrations; per-Attempt Candidate A/B history, retry success and uncertainty, strict G1/G2 proof, stale-candidate rejection, stuck-Attempt recovery, command hash parity, database-clock authority, and ledger grants passed.");
+  console.log("ServiceNow write migration executed twice after real intake migrations; recovery leases, truthful recovery evidence, late-response closure, exact G1/G2 proof, non-create target continuity, Candidate A/B projection, database-clock authority, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

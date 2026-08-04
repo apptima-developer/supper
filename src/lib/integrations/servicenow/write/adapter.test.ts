@@ -102,7 +102,19 @@ describe("ServiceNow write adapter", () => {
     expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
     expect(result.responseSummary).toMatchObject({
       recoveredByCorrelationMarker: true,
+      providerWritePerformed: false,
+      exactMarkerVerified: true,
+      httpStatus: 200,
+      sysId: "b".repeat(32),
       number: "INC0010002",
+    });
+    expect(result.requestSummary).toMatchObject({
+      method: "GET",
+      endpointPath: "/api/now/table/incident",
+      targetTable: "incident",
+      targetSysId: "b".repeat(32),
+      targetNumber: "INC0010002",
+      lookupClassification: "correlation_marker_exact",
     });
   });
 

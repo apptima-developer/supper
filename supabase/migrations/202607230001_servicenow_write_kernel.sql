@@ -1,4 +1,4 @@
--- SUPPER AI-2.0.6: per-Attempt candidate events and database proof closure.
+-- SUPPER AI-2.0.7: recovery lease, exact target proof, and candidate projection closure.
 -- This migration remained unapplied on the isolated development project and
 -- is amended in place before first application. It performs no provider call.
 
@@ -209,11 +209,19 @@ create table if not exists public.servicenow_write_attempts (
   safe_error_message text check (safe_error_message is null or length(safe_error_message) between 1 and 240),
   request_id text check (request_id is null or length(request_id) between 8 and 100),
   started_at timestamptz not null,
+  recoverable_at timestamptz not null,
+  recovery_lease_version integer not null default 1 check (
+    recovery_lease_version between 1 and 1000000
+  ),
+  recovery_reason text check (
+    recovery_reason is null or length(recovery_reason) between 1 and 240
+  ),
   finished_at timestamptz,
   terminal_material_hash text check (
     terminal_material_hash is null or terminal_material_hash ~ '^[a-f0-9]{64}$'
   ),
   unique (command_id, attempt_number),
+  check (recoverable_at >= started_at + interval '2 minutes'),
   check ((outcome = 'executing' and finished_at is null) or (outcome <> 'executing' and finished_at is not null)),
   check ((outcome = 'uncertain' and delivery_disposition = 'may_have_committed' and not retry_allowed) or outcome <> 'uncertain')
 );
@@ -1294,6 +1302,7 @@ set search_path = pg_catalog, public, extensions, pg_temp
 as $$
 declare
   v_command public.servicenow_write_commands%rowtype;
+  v_attempt public.servicenow_write_attempts%rowtype;
   v_expected_version integer;
   v_db_now timestamptz := statement_timestamp();
   v_issued_at timestamptz;
@@ -1358,6 +1367,21 @@ begin
     )
   order by candidate.attempt_number desc
   limit 1;
+  if p_payload->>'action'='recover_stuck_attempt' then
+    select * into v_attempt
+    from public.servicenow_write_attempts attempt_record
+    where attempt_record.command_id=v_command.id
+      and attempt_record.outcome='executing'
+    order by attempt_record.attempt_number desc
+    limit 1
+    for update;
+    if v_attempt.id is null or v_attempt.terminal_material_hash is not null then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_NOT_ALLOWED';
+    end if;
+    if v_db_now < v_attempt.recoverable_at then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY';
+    end if;
+  end if;
   if (p_payload->>'action'='execute' and v_command.status not in ('validated','dry_run_ready'))
     or (p_payload->>'action'='retry' and (
       v_command.status<>'retry_scheduled' or not v_command.retry_allowed
@@ -1415,6 +1439,9 @@ declare
   v_started_at timestamptz;
   v_expected_version integer;
   v_readiness public.servicenow_write_readiness_proofs%rowtype;
+  v_connection_timeout_ms integer;
+  v_recovery_delay_ms integer;
+  v_recoverable_at timestamptz;
   v_db_now timestamptz := statement_timestamp();
 begin
   if p_payload is null or jsonb_typeof(p_payload)<>'object'
@@ -1473,6 +1500,17 @@ begin
   if v_command.id is null then
     raise exception using errcode='P0002',message='SERVICENOW_WRITE_COMMAND_NOT_FOUND';
   end if;
+  select timeout_ms into v_connection_timeout_ms
+  from public.servicenow_write_connections
+  where id=v_command.connection_id;
+  if v_connection_timeout_ms is null then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_CONNECTION_UNAVAILABLE';
+  end if;
+  v_recovery_delay_ms := least(
+    15 * 60 * 1000,
+    greatest(2 * 60 * 1000 + v_connection_timeout_ms, 2 * 60 * 1000)
+  );
+  v_recoverable_at := v_db_now + make_interval(secs => v_recovery_delay_ms / 1000.0);
   if v_command.status='executing' then
     raise exception using errcode='55P03',message='SERVICENOW_WRITE_COMMAND_BUSY';
   end if;
@@ -1524,10 +1562,11 @@ begin
   select coalesce(max(existing.attempt_number),0)+1 into v_attempt_number
   from public.servicenow_write_attempts existing where existing.command_id=v_command.id;
   insert into public.servicenow_write_attempts (
-    id,command_id,attempt_number,execution_mode,outcome,request_id,started_at
+    id,command_id,attempt_number,execution_mode,outcome,request_id,started_at,
+    recoverable_at,recovery_lease_version
   ) values (
     p_payload->>'attemptId',v_command.id,v_attempt_number,v_mode,'executing',
-    nullif(p_payload->>'requestId',''),v_started_at
+    nullif(p_payload->>'requestId',''),v_started_at,v_recoverable_at,1
   );
   update public.servicenow_write_commands command_record set
     version=command_record.version+1,status='executing',
@@ -1693,6 +1732,13 @@ begin
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_NOT_EXECUTING';
   end if;
   if v_attempt.outcome<>'executing' then
+    if v_attempt.safe_error_code='SERVICENOW_WRITE_ATTEMPT_RECOVERED'
+      or exists (
+        select 1 from public.servicenow_write_attempt_recovery_events recovery
+        where recovery.attempt_id=v_attempt.id
+      ) then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED';
+    end if;
     if v_attempt.terminal_material_hash is not distinct from v_terminal_material_hash then
       return query select v_command.id,v_command.status,v_command.attempt_count,
         v_command.next_retry_at,v_command.target_sys_id,v_command.target_number,v_command.version;
@@ -1786,7 +1832,11 @@ begin
       raise exception using errcode='22023',message='SERVICENOW_WRITE_SUCCESS_TARGET_REQUIRED';
     end if;
     if v_command.command_type='create_incident' and not v_candidate_present then
-      if not (v_response_summary ? 'recoveredByCorrelationMarker')
+      if not (v_response_summary ?& array[
+          'httpStatus','sysId','number','recoveredByCorrelationMarker',
+          'providerWritePerformed','exactMarkerVerified'
+        ])
+        or not (v_response_summary ? 'recoveredByCorrelationMarker')
         or jsonb_typeof(v_response_summary->'recoveredByCorrelationMarker')<>'boolean'
         or v_response_summary->'recoveredByCorrelationMarker'
           is distinct from 'true'::jsonb
@@ -1794,21 +1844,59 @@ begin
         or jsonb_typeof(v_response_summary->'providerWritePerformed')<>'boolean'
         or v_response_summary->'providerWritePerformed'
           is distinct from 'false'::jsonb
-        or v_request_summary->>'method'<>'GET'
+        or not (v_response_summary ? 'exactMarkerVerified')
+        or jsonb_typeof(v_response_summary->'exactMarkerVerified')<>'boolean'
+        or v_response_summary->'exactMarkerVerified'
+          is distinct from 'true'::jsonb
+        or jsonb_typeof(v_response_summary->'httpStatus')<>'number'
+        or public.support_servicenow_write_parse_integer(
+          v_response_summary->'httpStatus','SERVICENOW_WRITE_RESULT_INVALID'
+        ) not between 200 and 299
+        or v_response_summary->>'sysId'<>v_target_sys_id
+        or v_response_summary->>'number'<>v_target_number
         or exists (
-          select 1 from public.servicenow_write_attempts evidence_attempt
-          where evidence_attempt.command_id=v_command.id
-            and evidence_attempt.id<>v_attempt.id
-            and evidence_attempt.request_summary->>'method' in ('POST','PATCH')
+          select 1 from jsonb_object_keys(v_response_summary) supplied(key)
+          where supplied.key not in (
+            'httpStatus','sysId','number','state','recoveredByCorrelationMarker',
+            'providerWritePerformed','exactMarkerVerified'
+          )
+        )
+        or not (v_request_summary ?& array[
+          'method','endpointPath','targetTable','fieldNames','targetSysId',
+          'targetNumber','lookupClassification'
+        ])
+        or v_request_summary->>'method'<>'GET'
+        or v_request_summary->>'targetTable'<>v_command.target_table
+        or v_request_summary->>'endpointPath'<>'/api/now/table/'||v_command.target_table
+        or v_request_summary->>'lookupClassification'<>'correlation_marker_exact'
+        or v_request_summary->>'targetSysId'<>v_target_sys_id
+        or v_request_summary->>'targetNumber'<>v_target_number
+        or jsonb_typeof(v_request_summary->'fieldNames')<>'array'
+        or v_request_summary->'fieldNames'
+          <> '["correlation_id","number","state","sys_id"]'::jsonb
+        or exists (
+          select 1 from jsonb_object_keys(v_request_summary) supplied(key)
+          where supplied.key not in (
+            'method','endpointPath','targetTable','fieldNames','targetSysId',
+            'targetNumber','lookupClassification'
+          )
         )
         or exists (
           select 1 from public.servicenow_write_mutation_candidate_events existing_candidate
-          where existing_candidate.command_id=v_command.id
+          where existing_candidate.attempt_id=v_attempt.id
         ) then
         raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
       end if;
     elsif v_command.command_type<>'create_incident' and v_candidate_present then
       raise exception using errcode='22023',message='SERVICENOW_WRITE_RESULT_INVALID';
+    end if;
+    if v_command.command_type<>'create_incident' and (
+      (nullif(v_command.normalized_payload->>'targetSysId','') is not null
+        and v_target_sys_id is distinct from nullif(v_command.normalized_payload->>'targetSysId',''))
+      or (nullif(v_command.normalized_payload->>'targetNumber','') is not null
+        and v_target_number is distinct from nullif(v_command.normalized_payload->>'targetNumber',''))
+    ) then
+      raise exception using errcode='22023',message='SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT';
     end if;
     v_status := 'succeeded';
   elsif v_outcome='uncertain' then
@@ -2192,10 +2280,19 @@ begin
       errcode='22023',
       message='SERVICENOW_WRITE_MUTATION_CANDIDATE_CONFLICT';
   end if;
-  if (v_command.target_sys_id is not null and v_target_sys_id is not null
-      and v_command.target_sys_id <> v_target_sys_id)
-    or (v_command.target_number is not null and v_target_number is not null
-      and v_command.target_number <> v_target_number) then
+  if v_result='confirmed_succeeded' and v_command.command_type<>'create_incident' and (
+      (nullif(v_command.normalized_payload->>'targetSysId','') is not null
+        and v_target_sys_id is distinct from nullif(v_command.normalized_payload->>'targetSysId',''))
+      or (nullif(v_command.normalized_payload->>'targetNumber','') is not null
+        and v_target_number is distinct from nullif(v_command.normalized_payload->>'targetNumber',''))
+    ) then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT';
+  elsif v_command.command_type='create_incident' and (
+      (v_command.target_sys_id is not null and v_target_sys_id is not null
+        and v_command.target_sys_id<>v_target_sys_id)
+      or (v_command.target_number is not null and v_target_number is not null
+        and v_command.target_number<>v_target_number)
+    ) then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT';
   end if;
   if v_command.version<>v_expected_version
@@ -2315,7 +2412,6 @@ declare
   v_attempt public.servicenow_write_attempts%rowtype;
   v_current_candidate_event_id text;
   v_expected_version integer;
-  v_recovered_at timestamptz;
   v_version_before integer;
   v_db_now timestamptz := statement_timestamp();
 begin
@@ -2324,7 +2420,7 @@ begin
     or exists (
       select 1 from jsonb_object_keys(p_payload) supplied(key)
       where supplied.key not in (
-        'commandId','actorUserId','requestId','recoveredAt','confirmed',
+        'commandId','actorUserId','requestId','confirmed',
         'expectedVersion','expectedNormalizedPayloadHash',
         'confirmationNonceHash','mutationCandidateEventId'
       )
@@ -2341,14 +2437,9 @@ begin
   v_expected_version := public.support_servicenow_write_parse_integer(
     p_payload->'expectedVersion','SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID'
   );
-  v_recovered_at := public.support_servicenow_write_parse_timestamp(
-    p_payload->'recoveredAt','SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID'
-  );
-  if v_expected_version<1
-    or v_recovered_at not between v_db_now-interval '2 minutes' and v_db_now+interval '2 minutes' then
+  if v_expected_version<1 then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_INVALID';
   end if;
-  v_recovered_at := v_db_now;
   select * into v_command
   from public.servicenow_write_commands
   where servicenow_write_commands.id=p_payload->>'commandId'
@@ -2363,6 +2454,9 @@ begin
   order by attempt_record.attempt_number desc
   limit 1
   for update;
+  if v_attempt.id is not null and v_db_now < v_attempt.recoverable_at then
+    raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY';
+  end if;
   select candidate.id into v_current_candidate_event_id
   from public.servicenow_write_mutation_candidate_events candidate
   where candidate.command_id=v_command.id
@@ -2374,6 +2468,7 @@ begin
   order by candidate.attempt_number desc
   limit 1;
   if v_command.status<>'executing' or v_attempt.id is null
+    or v_attempt.terminal_material_hash is not null
     or v_command.version<>v_expected_version
     or v_command.normalized_payload_hash<>p_payload->>'expectedNormalizedPayloadHash'
     or v_command.confirmation_nonce_hash<>p_payload->>'confirmationNonceHash'
@@ -2390,14 +2485,16 @@ begin
   update public.servicenow_write_attempts attempt_record set
     response_summary=jsonb_build_object(
       'recoveredByAdministrator',true,
-      'providerWritePerformed',false
+      'recoveryOperationProviderRequestPerformed',false,
+      'originalMutationOutcome','unknown'
     ),
     outcome='uncertain',delivery_disposition='may_have_committed',
     failure_phase='mutation_dispatch',retry_allowed=false,retry_reason=null,
-    reconciliation_reason='Administrator recovered a stuck executing Attempt',
+    reconciliation_reason='Recovery action made no provider request; original mutation outcome remains unknown',
+    recovery_reason='administrator_recovery_after_lease',
     safe_error_code='SERVICENOW_WRITE_ATTEMPT_RECOVERED',
     safe_error_message='Attempt state requires reconciliation after administrative recovery',
-    finished_at=v_recovered_at,
+    finished_at=v_db_now,
     terminal_material_hash=public.support_intake_sha256_hex(
       'recovery:'||v_command.id||':'||v_attempt.id||':'||v_version_before::text
     )
@@ -2406,16 +2503,17 @@ begin
     version=command_record.version+1,status='reconciliation_required',
     safe_response_summary=jsonb_build_object(
       'recoveredByAdministrator',true,
-      'providerWritePerformed',false
+      'recoveryOperationProviderRequestPerformed',false,
+      'originalMutationOutcome','unknown'
     ),
     delivery_disposition='may_have_committed',failure_phase='mutation_dispatch',
     retry_allowed=false,retry_reason=null,next_retry_at=null,
-    reconciliation_reason='Administrator recovered a stuck executing Attempt',
+    reconciliation_reason='Recovery action made no provider request; original mutation outcome remains unknown',
     error_code='SERVICENOW_WRITE_ATTEMPT_RECOVERED',
     error_message='Attempt state requires reconciliation after administrative recovery',
     confirmation_nonce_hash=null,confirmation_action=null,confirmation_user_id=null,
     confirmation_expires_at=null,confirmation_mutation_candidate_event_id=null,
-    updated_at=v_recovered_at
+    updated_at=v_db_now
   where command_record.id=v_command.id
   returning * into v_command;
   insert into public.servicenow_write_attempt_recovery_events (
@@ -2426,7 +2524,7 @@ begin
       v_command.id||':'||v_attempt.id||':'||v_version_before::text
     ),
     v_command.id,v_attempt.id,v_attempt.attempt_number,p_payload->>'actorUserId',
-    nullif(p_payload->>'requestId',''),v_version_before,v_command.version,v_recovered_at
+    nullif(p_payload->>'requestId',''),v_version_before,v_command.version,v_db_now
   );
   return query select v_command.id,v_command.status,v_command.attempt_count,
     v_command.next_retry_at,v_command.target_sys_id,v_command.target_number,v_command.version;
@@ -2475,7 +2573,9 @@ as $$
 begin
   if new.id<>old.id or new.command_id<>old.command_id
     or new.attempt_number<>old.attempt_number or new.execution_mode<>old.execution_mode
-    or new.request_id is distinct from old.request_id or new.started_at<>old.started_at then
+    or new.request_id is distinct from old.request_id or new.started_at<>old.started_at
+    or new.recoverable_at<>old.recoverable_at
+    or new.recovery_lease_version<>old.recovery_lease_version then
     raise exception using errcode='22023',message='SERVICENOW_WRITE_ATTEMPT_IDENTITY_IMMUTABLE';
   end if;
   return new;
@@ -2573,28 +2673,28 @@ revoke execute on function public.support_recover_servicenow_write_attempt(jsonb
 grant execute on function public.support_recover_servicenow_write_attempt(jsonb) to service_role;
 
 comment on table public.servicenow_write_commands is
-  'AI-2.0.6 authoritative command ledger with candidate-scoped confirmation and separate semantic command and normalized provider hashes.';
+  'AI-2.0.7 authoritative command ledger with candidate-scoped confirmation, exact target continuity, and separate semantic and normalized provider hashes.';
 comment on table public.servicenow_write_attempts is
-  'AI-2.0.6 attempt ledger with idempotent terminal material, explicit delivery disposition, and uncertain outcome.';
+  'AI-2.0.7 attempt ledger with a database-clock recovery lease, idempotent terminal material, explicit delivery disposition, and uncertain outcome.';
 comment on table public.servicenow_write_mutation_candidate_events is
-  'AI-2.0.6 append-only per-Attempt Incident candidate evidence; historical candidates are never overwritten by Retry.';
+  'AI-2.0.7 append-only per-Attempt Incident candidate evidence; historical candidates are never overwritten by Retry.';
 comment on table public.servicenow_write_reconciliation_events is
-  'AI-2.0.6 immutable reconciliation history scoped to the current candidate event when one exists.';
+  'AI-2.0.7 immutable reconciliation history scoped to the current candidate event when one exists.';
 comment on table public.servicenow_write_attempt_recovery_events is
-  'AI-2.0.6 immutable administrator recovery ledger for stuck executing Attempts; recovery performs no provider mutation.';
+  'AI-2.0.7 immutable administrator recovery ledger; the recovery operation makes no provider request while the original mutation outcome remains unknown.';
 comment on table public.servicenow_write_readiness_proofs is
-  'AI-2.0.6 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
+  'AI-2.0.7 database-clock five-minute sanitized GET readiness proof bound to a non-secret configuration fingerprint.';
 comment on function public.support_create_servicenow_write_command(jsonb) is
-  'AI-2.0.6 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
+  'AI-2.0.7 validates payload/mapping and independently recomputes full semantic and normalized provider hashes before persistence.';
 comment on function public.support_validate_servicenow_reconciliation_evidence(text,text,text,text,text,text,boolean,boolean,boolean,boolean,boolean) is
-  'AI-2.0.6 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
+  'AI-2.0.7 rejects contradictory reconciliation action, result, evidence, command type, target pair, candidate context, and acknowledgment combinations.';
 comment on function public.support_reconcile_servicenow_write_command(jsonb) is
-  'AI-2.0.6 consumes candidate-scoped one-time confirmation, enforces candidate continuity and the evidence matrix, and records mutation-free reconciliation using database time.';
+  'AI-2.0.7 consumes candidate-scoped one-time confirmation, enforces candidate continuity and the evidence matrix, and records mutation-free reconciliation using database time.';
 comment on function public.support_record_servicenow_write_readiness(jsonb) is
-  'AI-2.0.6 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
+  'AI-2.0.7 accepts at most two minutes caller clock skew and persists database-clock bounded GET readiness evidence without secrets.';
 
 insert into public.support_schema_migrations (version,description,checksum,applied_by)
-values ('202607230001','AI-2.0.6 ServiceNow candidate event lifecycle and database proof closure',null,current_user)
+values ('202607230001','AI-2.0.7 ServiceNow recovery lease and exact target proof closure',null,current_user)
 on conflict (version) do nothing;
 
 commit;

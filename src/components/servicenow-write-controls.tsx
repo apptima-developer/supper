@@ -24,6 +24,7 @@ import type {
   ServiceNowWriteReconciliationAction,
   ServiceNowWriteStatus,
 } from "@/lib/integrations/servicenow/write/types";
+import { serviceNowRecoveryAvailability } from "@/lib/integrations/servicenow/write/recovery";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -171,6 +172,7 @@ export function ServiceNowWriteControls() {
   const [verificationAcknowledged, setVerificationAcknowledged] = useState(false);
   const [duplicateJournalRiskAcknowledged, setDuplicateJournalRiskAcknowledged] = useState(false);
   const [mutationCandidateRiskAcknowledged, setMutationCandidateRiskAcknowledged] = useState(false);
+  const [uiNow, setUiNow] = useState(() => Date.now());
 
   const loadSummary = useCallback(async () => {
     setSummary(await api<ServiceNowWriteOperationsSummary>("/api/integrations/servicenow/write/operations"));
@@ -197,6 +199,12 @@ export function ServiceNowWriteControls() {
     }).catch((error) => toast.error(error instanceof Error ? error.message : "Could not load write controls"));
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!detailOpen || selected?.status !== "executing") return;
+    const timer = window.setInterval(() => setUiNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [detailOpen, selected?.status]);
 
   function setField(name: string, value: string) {
     setFields((current) => ({ ...current, [name]: value }));
@@ -270,6 +278,15 @@ export function ServiceNowWriteControls() {
     command: ServiceNowWriteCommandSummary,
     action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction,
   ) {
+    const freshCommand = await api<ServiceNowWriteCommandSummary>(
+      `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}`,
+    );
+    if (freshCommand.version !== command.version
+      || freshCommand.normalizedPayloadHash !== command.normalizedPayloadHash
+      || freshCommand.mutationCandidate?.id !== command.mutationCandidate?.id) {
+      setSelected(freshCommand);
+      throw new Error("Command state changed; review the refreshed command before confirming");
+    }
     const confirmation = await api<ServiceNowWriteConfirmation>(
       `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}/confirmation`,
       {
@@ -277,10 +294,10 @@ export function ServiceNowWriteControls() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action,
-          expectedVersion: command.version,
-          expectedNormalizedPayloadHash: command.normalizedPayloadHash,
-          ...(command.mutationCandidate
-            ? { mutationCandidateEventId: command.mutationCandidate.id }
+          expectedVersion: freshCommand.version,
+          expectedNormalizedPayloadHash: freshCommand.normalizedPayloadHash,
+          ...(freshCommand.mutationCandidate
+            ? { mutationCandidateEventId: freshCommand.mutationCandidate.id }
             : {}),
         }),
       },
@@ -385,18 +402,37 @@ export function ServiceNowWriteControls() {
         ? "Connection tested"
         : "Connection untested";
 
-  function openConfirmedAction(
+  async function openConfirmedAction(
     command: ServiceNowWriteCommandSummary,
     action: "execute" | "retry" | "recover_stuck_attempt" | ServiceNowWriteReconciliationAction,
   ) {
-    setVerifiedTargetSysId(command.mutationCandidate?.sysId || command.targetSysId || "");
-    setVerifiedTargetNumber(command.mutationCandidate?.number || command.targetNumber || "");
-    setVerificationNote("");
-    setVerificationAcknowledged(false);
-    setDuplicateJournalRiskAcknowledged(false);
-    setMutationCandidateRiskAcknowledged(false);
-    setPendingAction({ command, action });
+    setBusy(`review-${action}`);
+    try {
+      const freshCommand = await api<ServiceNowWriteCommandSummary>(
+        `/api/integrations/servicenow/write/commands/${encodeURIComponent(command.id)}`,
+      );
+      setSelected(freshCommand);
+      if (action === "recover_stuck_attempt"
+        && !serviceNowRecoveryAvailability(freshCommand).canRequestRecovery) {
+        throw new Error("The executing Attempt is still inside its recovery lease");
+      }
+      setVerifiedTargetSysId(freshCommand.mutationCandidate?.sysId || freshCommand.targetSysId || "");
+      setVerifiedTargetNumber(freshCommand.mutationCandidate?.number || freshCommand.targetNumber || "");
+      setVerificationNote("");
+      setVerificationAcknowledged(false);
+      setDuplicateJournalRiskAcknowledged(false);
+      setMutationCandidateRiskAcknowledged(false);
+      setPendingAction({ command: freshCommand, action });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not refresh command state");
+    } finally {
+      setBusy("");
+    }
   }
+
+  const recoveryAvailability = selected
+    ? serviceNowRecoveryAvailability(selected, uiNow)
+    : undefined;
 
   return <div className="space-y-4">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -571,6 +607,7 @@ export function ServiceNowWriteControls() {
           </div>
           <div><p className="mb-2 font-semibold">Attempts</p><div className="space-y-2">{selected.attempts?.map((attempt) => <div key={attempt.id} className="rounded-xl border border-sky-100 p-3 dark:border-slate-700">
             <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><Badge tone={statusTone(attempt.outcome)}>{attempt.outcome}</Badge><span>#{attempt.attemptNumber} · {attempt.executionMode}</span></div><span className="text-slate-400">{timestamp(attempt.startedAt)} → {timestamp(attempt.finishedAt)}</span></div>
+            {attempt.outcome === "executing" && <p className="mt-2 text-slate-500">Recovery lease expires {timestamp(attempt.recoverableAt)}{attempt.recoveryEligible ? " · eligible when this detail was loaded" : ""}</p>}
             {attempt.safeErrorCode && <p className="mt-2 text-rose-600">{attempt.safeErrorCode}: {attempt.safeErrorMessage}</p>}
             {(attempt.failurePhase || attempt.deliveryDisposition) && <p className="mt-2 text-slate-500">{attempt.failurePhase || "-"} · {attempt.deliveryDisposition || "-"} · retry {attempt.retryAllowed ? "allowed" : "blocked"}</p>}
           </div>)}{!selected.attempts?.length && <p className="text-slate-400">No attempt recorded yet.</p>}</div></div>
@@ -588,14 +625,19 @@ export function ServiceNowWriteControls() {
             {Object.keys(event.safeReadBackSummary).length > 0 && <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-slate-950 p-2 text-[10px] leading-5 text-amber-100">{JSON.stringify(event.safeReadBackSummary, null, 2)}</pre>}
           </div>)}{!selected.reconciliationHistory?.length && <p className="text-slate-400">No reconciliation decision recorded.</p>}</div></div>
           {Boolean(selected.recoveryHistory?.length) && <div><p className="mb-2 font-semibold">Attempt recovery history</p><div className="space-y-2">{selected.recoveryHistory?.map((event) => <div key={event.id} className="rounded-xl border border-rose-100 bg-rose-50/30 p-3 dark:border-rose-900 dark:bg-rose-950/10">
-            <div className="flex flex-wrap items-center justify-between gap-2"><span>Attempt #{event.attemptNumber} recovered without a provider mutation</span><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
+            <div className="flex flex-wrap items-center justify-between gap-2"><span>Attempt #{event.attemptNumber}: the recovery action made no provider request; the original mutation outcome remains unknown</span><span className="text-slate-400">{timestamp(event.createdAt)}</span></div>
             <p className="mt-1 text-slate-500">Command version {event.commandVersionBefore} → {event.commandVersionAfter}</p>
           </div>)}</div></div>}
           <div className="flex flex-wrap justify-end gap-2">
             {["validated", "dry_run_ready"].includes(selected.status) && <Button variant="outline" onClick={() => commandAction(selected, "dry-run")} disabled={!!busy}><ShieldCheck size={14} />Dry run</Button>}
             {["validated", "dry_run_ready"].includes(selected.status) && <Button onClick={() => { setDetailOpen(false); openConfirmedAction(selected, "execute"); }} disabled={!!busy || !summary?.readiness.liveWriteReady}><Play size={14} />Execute live</Button>}
             {selected.status === "retry_scheduled" && selected.retryAllowed && summary?.readiness.liveWriteReady && <Button onClick={() => openConfirmedAction(selected, "retry")} disabled={!!busy || selected.attemptCount >= selected.maxAttempts}><RotateCcw size={14} />Manual retry</Button>}
-            {selected.status === "executing" && <Button variant="outline" onClick={() => openConfirmedAction(selected, "recover_stuck_attempt")} disabled={!!busy}><TriangleAlert size={14} />Recover stuck Attempt</Button>}
+            {selected.status === "executing" && <div className="text-right">
+              <Button variant="outline" onClick={() => openConfirmedAction(selected, "recover_stuck_attempt")} disabled={!!busy || !recoveryAvailability?.canRequestRecovery}><TriangleAlert size={14} />Recover stuck Attempt</Button>
+              <p className="mt-1 text-[10px] text-slate-400">{recoveryAvailability?.canRequestRecovery
+                ? "Recovery lease elapsed; state will be refreshed before confirmation."
+                : `Eligible ${timestamp(recoveryAvailability?.recoverableAt)}${recoveryAvailability?.remainingMilliseconds ? ` · ${Math.ceil(recoveryAvailability.remainingMilliseconds / 1000)}s` : ""}`}</p>
+            </div>}
           </div>
         </div>}
       </DialogContent>
@@ -613,7 +655,7 @@ export function ServiceNowWriteControls() {
               || pendingAction.action === "mark_not_applied_after_verification")
               && <p className="mt-2 font-medium">This records a reviewed outcome and never resends the ServiceNow mutation.</p>}
             {pendingAction.action === "recover_stuck_attempt" && <p className="mt-2 font-semibold text-rose-700 dark:text-rose-300">
-              This closes the executing Attempt as uncertain, records immutable recovery history, and performs no ServiceNow request. The command will require reconciliation.
+              This recovery action makes no ServiceNow request. It closes the executing Attempt as uncertain, while the original mutation outcome remains unknown and requires reconciliation.
             </p>}
             {pendingAction.command.mutationCandidate && <p className="mt-2 break-all font-mono text-[10px]">
               Current candidate event: {pendingAction.command.mutationCandidate.id}

@@ -441,6 +441,108 @@ describe("ServiceNow write service", () => {
     }));
   });
 
+  it("passes exact G2 marker recovery identity to the SQL finish payload", async () => {
+    const finishAttempt = vi.fn(async () => ({
+      command_id: "command-id-0000000001",
+      command_status: "succeeded" as const,
+      command_attempt_count: 1,
+      command_target_sys_id: "e".repeat(32),
+      command_target_number: "INC0010005",
+      command_version: 3,
+    }));
+    const repository = {
+      ...freshReadiness(),
+      beginAttempt: vi.fn(async () => begin(normalizedCreate, 1)),
+      finishAttempt,
+      getCommand: vi.fn(async () => commandSummary({ version: 3, status: "succeeded" })),
+    } as unknown as ServiceNowWriteRepository;
+    await executeCommand({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-service-g2-0001",
+      correlationId: "request-service-g2-0001",
+      confirmation,
+    }, {
+      env,
+      repository,
+      adapter: adapter({
+        execute: vi.fn(async () => ({
+          requestSummary: {
+            method: "GET" as const,
+            endpointPath: "/api/now/table/incident",
+            targetTable: "incident",
+            fieldNames: ["correlation_id", "number", "state", "sys_id"],
+            targetSysId: "e".repeat(32),
+            targetNumber: "INC0010005",
+            lookupClassification: "correlation_marker_exact" as const,
+          },
+          responseSummary: {
+            httpStatus: 200,
+            sysId: "e".repeat(32),
+            number: "INC0010005",
+            recoveredByCorrelationMarker: true,
+            providerWritePerformed: false,
+            exactMarkerVerified: true,
+          },
+          targetSysId: "e".repeat(32),
+          targetNumber: "INC0010005",
+        })),
+      }),
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:02:00.000Z"),
+      createId: () => "attempt-id-g2-000000001",
+    });
+    expect(finishAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      targetSysId: "e".repeat(32),
+      targetNumber: "INC0010005",
+      requestSummary: expect.objectContaining({
+        method: "GET",
+        lookupClassification: "correlation_marker_exact",
+        targetSysId: "e".repeat(32),
+        targetNumber: "INC0010005",
+      }),
+      responseSummary: expect.objectContaining({
+        sysId: "e".repeat(32),
+        number: "INC0010005",
+        exactMarkerVerified: true,
+      }),
+    }));
+  });
+
+  it("does not rewrite a recovered Attempt when a late provider result arrives", async () => {
+    const finishAttempt = vi.fn(async () => {
+      throw new Error("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED");
+    });
+    const repository = {
+      ...freshReadiness(),
+      beginAttempt: vi.fn(async () => begin(normalizedCreate, 1)),
+      finishAttempt,
+      getCommand: vi.fn(),
+    } as unknown as ServiceNowWriteRepository;
+    await expect(executeCommand({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-late-response-0001",
+      correlationId: "request-late-response-0001",
+      confirmation,
+    }, {
+      env,
+      repository,
+      adapter: adapter({
+        execute: vi.fn(async () => ({
+          requestSummary: { method: "POST" as const, endpointPath: "/api/now/table/incident", targetTable: "incident", fieldNames: ["short_description"] },
+          responseSummary: { httpStatus: 201, sysId: "a".repeat(32), number: "INC0010001" },
+          targetSysId: "a".repeat(32),
+          targetNumber: "INC0010001",
+        })),
+      }),
+      audit: async () => auditFixture,
+      now: () => new Date("2026-07-23T01:02:00.000Z"),
+      createId: () => "attempt-late-response-0001",
+    })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED" });
+    expect(finishAttempt).toHaveBeenCalledOnce();
+  });
+
   it("schedules retry only for an explicitly safe-to-retry provider outcome", async () => {
     const finishAttempt = vi.fn(async () => ({
       command_id: "command-id-0000000001",
@@ -770,16 +872,24 @@ describe("ServiceNow write service", () => {
   });
 
   it("recovers a stuck attempt through the ledger without loading provider runtime", async () => {
-    const recoverAttempt = vi.fn(async () => ({
-      command_id: "command-id-0000000001",
-      command_status: "reconciliation_required" as const,
-      command_attempt_count: 1,
-      command_version: 3,
-    }));
+    const recoverAttempt = vi.fn(async (input: unknown) => {
+      void input;
+      return {
+        command_id: "command-id-0000000001",
+        command_status: "reconciliation_required" as const,
+        command_attempt_count: 1,
+        command_version: 3,
+      };
+    });
     const getCommand = vi.fn(async () => commandSummary({
       version: 3,
       status: "reconciliation_required",
       attemptCount: 1,
+      safeResponseSummary: {
+        recoveredByAdministrator: true,
+        recoveryOperationProviderRequestPerformed: false,
+        originalMutationOutcome: "unknown",
+      },
     }));
     const result = await recoverStuckAttempt({
       commandId: "command-id-0000000001",
@@ -796,12 +906,38 @@ describe("ServiceNow write service", () => {
       now: () => new Date("2026-07-23T01:06:00.000Z"),
     });
     expect(result.status).toBe("reconciliation_required");
+    expect(result.safeResponseSummary).toEqual({
+      recoveredByAdministrator: true,
+      recoveryOperationProviderRequestPerformed: false,
+      originalMutationOutcome: "unknown",
+    });
     expect(recoverAttempt).toHaveBeenCalledWith(expect.objectContaining({
       commandId: "command-id-0000000001",
       actorUserId: "admin-id",
       mutationCandidateEventId: ledgerMutationCandidate.id,
       confirmationNonceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+    expect(recoverAttempt.mock.calls[0]?.[0]).not.toHaveProperty("recoveredAt");
+  });
+
+  it("returns a bounded error when recovery is requested before the lease", async () => {
+    await expect(recoverStuckAttempt({
+      commandId: "command-id-0000000001",
+      session,
+      requestId: "request-recover-too-early-0001",
+      confirmation,
+    }, {
+      env,
+      repository: {
+        recoverAttempt: vi.fn(async () => {
+          throw new Error("SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY");
+        }),
+      } as unknown as ServiceNowWriteRepository,
+      audit: async () => auditFixture,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY",
+    });
   });
 
   it("rejects stale candidate identity before reconciliation reaches the ledger RPC", async () => {
@@ -1160,6 +1296,35 @@ describe("ServiceNow write service", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
+  it("rejects a non-create manual target that changes the original sys_id", async () => {
+    const reconcile = vi.fn();
+    const readBack = vi.fn();
+    await expect(reconcileCommand({
+      commandId: "command-id-0000000001",
+      action: "mark_succeeded_after_verification",
+      session,
+      requestId: "request-update-target-continuity",
+      correlationId: "request-update-target-continuity",
+      confirmation,
+      verifiedTargetSysId: "c".repeat(32),
+      verifiedTargetNumber: "INC0010004",
+      verificationAcknowledged: true,
+      verificationNote: "Verified the exact existing Incident target.",
+    }, {
+      env,
+      repository: {
+        getNormalizedCommand: vi.fn(async () => normalizedUpdate),
+        reconcile,
+      } as unknown as ServiceNowWriteRepository,
+      adapter: adapter({ readBack }),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT",
+    });
+    expect(readBack).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
   it("rejects manual success when the verified pair conflicts with the persisted mutation candidate", async () => {
     const reconcile = vi.fn();
     const readBack = vi.fn();
@@ -1399,7 +1564,7 @@ describe("ServiceNow write service", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("maps a defensive repository target conflict to a safe conflict response", async () => {
+  it("maps a defensive non-create target continuity conflict to a safe response", async () => {
     await expect(reconcileCommand({
       commandId: "command-id-0000000001",
       action: "mark_succeeded_after_verification",
@@ -1421,7 +1586,7 @@ describe("ServiceNow write service", () => {
           fields: { work_notes: "Reviewed note" },
         })),
         reconcile: vi.fn(async () => {
-          throw new Error("SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT");
+          throw new Error("SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT");
         }),
       } as unknown as ServiceNowWriteRepository,
       adapter: adapter({
@@ -1434,7 +1599,7 @@ describe("ServiceNow write service", () => {
       }),
     })).rejects.toMatchObject({
       status: 409,
-      code: "SERVICENOW_WRITE_VERIFIED_TARGET_CONFLICT",
+      code: "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT",
     });
   });
 
