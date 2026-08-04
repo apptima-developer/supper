@@ -33,6 +33,8 @@ function executingCommand(recoverableAt: string): ServiceNowWriteCommandSummary 
       startedAt: "2026-08-04T02:00:00.000Z",
       attemptStartedAt: "2026-08-04T02:00:00.000Z",
       recoverableAt,
+      providerRequestBudget: 3,
+      recoveryBudgetMs: 135_000,
       recoveryEligible: false,
     }],
   };

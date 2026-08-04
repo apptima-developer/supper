@@ -5,6 +5,7 @@ import type { ServiceNowEnabledConfig } from "../config";
 import { serviceNowError } from "../errors";
 import { serviceNowSysIdWriteSchema } from "./schemas";
 import { serviceNowWriteExecutionError } from "./outcomes";
+import { hashServiceNowProviderCorrelationMarker } from "./idempotency";
 import type {
   NormalizedServiceNowWriteCommand,
   ServiceNowSafeRequestSummary,
@@ -392,6 +393,9 @@ export class ServiceNowWriteAdapter {
       }
       if (markerLookup.rows.length === 1) {
         const existing = markerLookup.rows[0];
+        const markerHash = hashServiceNowProviderCorrelationMarker(
+          command.providerCorrelationMarker || "",
+        );
         return {
           requestSummary: {
             method: "GET",
@@ -401,6 +405,7 @@ export class ServiceNowWriteAdapter {
             targetSysId: existing.sysId,
             targetNumber: existing.number,
             lookupClassification: "correlation_marker_exact",
+            lookupCorrelationMarkerHash: markerHash,
           },
           responseSummary: {
             httpStatus: markerLookup.status,
@@ -410,6 +415,7 @@ export class ServiceNowWriteAdapter {
             recoveredByCorrelationMarker: true,
             providerWritePerformed: false,
             exactMarkerVerified: true,
+            verifiedCorrelationMarkerHash: markerHash,
           },
           targetSysId: existing.sysId,
           targetNumber: existing.number,
@@ -695,13 +701,15 @@ export class ServiceNowWriteAdapter {
       }
     }
     const sysId = command.targetSysId || resolvedNumberIdentity!.sysId;
+    const fieldNames = Object.keys(command.fields).sort();
+    const endpointPath = `/api/now/table/${this.config.incidentTable}/${sysId}`;
     let response;
     try {
       response = await this.request({
         method: "GET",
-        path: `/api/now/table/${this.config.incidentTable}/${sysId}`,
+        path: endpointPath,
         params: new URLSearchParams({
-          sysparm_fields: ["sys_id", "number", ...Object.keys(command.fields)].join(","),
+          sysparm_fields: ["sys_id", "number", ...fieldNames].join(","),
           sysparm_exclude_reference_link: "true",
         }),
         operation,
@@ -719,7 +727,18 @@ export class ServiceNowWriteAdapter {
       ? (response.raw as Record<string, unknown>).result
       : undefined;
     if (!result || typeof result !== "object" || Array.isArray(result)) {
-      return { result: "not_found", summary: { method: "exact_sys_id", matchedFields: 0, expectedFields: Object.keys(command.fields).length } };
+      return {
+        result: "not_found",
+        summary: {
+          method: "exact_sys_id",
+          requestMethod: "GET",
+          endpointPath,
+          targetTable: this.config.incidentTable,
+          fieldNames,
+          matchedFields: 0,
+          expectedFields: fieldNames.length,
+        },
+      };
     }
     const row = this.safeRowIdentity(
       result,
@@ -731,11 +750,19 @@ export class ServiceNowWriteAdapter {
         number: command.targetNumber || resolvedNumberIdentity?.number,
       },
     );
-    const expected = Object.entries(command.fields);
+    const expected = fieldNames.map((field) => [field, command.fields[field]] as const);
     const matchedFields = expected.filter(([field, value]) => String(row.row[field] ?? "") === value).length;
     return {
       result: matchedFields === expected.length ? "confirmed_succeeded" : "inconclusive",
-      summary: { method: "exact_sys_id", matchedFields, expectedFields: expected.length },
+      summary: {
+        method: "exact_sys_id",
+        requestMethod: "GET",
+        endpointPath,
+        targetTable: this.config.incidentTable,
+        fieldNames,
+        matchedFields,
+        expectedFields: expected.length,
+      },
       targetSysId: row.sysId,
       targetNumber: row.number,
     };

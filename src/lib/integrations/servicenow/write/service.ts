@@ -146,6 +146,39 @@ function operationalError(error: unknown): never {
   throw error;
 }
 
+type TerminalOutcomeClassification =
+  | "provider_success"
+  | "classified_provider_error"
+  | "candidate_bearing_uncertain"
+  | "unclassified_provider_error";
+
+function isAlreadyRecoveredError(error: unknown) {
+  return (error instanceof HttpError
+      && error.code === "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED")
+    || (error instanceof Error
+      && error.message.includes("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED"));
+}
+
+async function finishTerminalAttempt(
+  repository: ServiceNowWriteRepository,
+  payload: Record<string, unknown>,
+  context: {
+    requestId: string;
+    commandId: string;
+    attemptId: string;
+    providerErrorCode: string;
+    outcomeClassification: TerminalOutcomeClassification;
+  },
+) {
+  try {
+    return await repository.finishAttempt(payload);
+  } catch (error) {
+    if (!isAlreadyRecoveredError(error)) throw error;
+    logServerCritical("SERVICENOW_WRITE_LATE_RESPONSE_AFTER_RECOVERY", undefined, context);
+    operationalError(error);
+  }
+}
+
 async function auditBestEffort(
   command: ServiceNowWriteCommandSummary,
   session: Session,
@@ -457,7 +490,7 @@ async function execute(
       correlationIdSchema.parse(input.correlationId),
       input.abortSignal,
     );
-    await repository.finishAttempt({
+    await finishTerminalAttempt(repository, {
       commandId: input.commandId,
       attemptId,
       outcome: "succeeded",
@@ -480,18 +513,15 @@ async function execute(
       errorCode: "",
       errorMessage: "",
       finishedAt: now().toISOString(),
+    }, {
+      requestId: input.requestId,
+      commandId: input.commandId,
+      attemptId,
+      providerErrorCode: "SERVICENOW_WRITE_PROVIDER_SUCCESS",
+      outcomeClassification: "provider_success",
     });
   } catch (error) {
-    if (error instanceof Error
-      && error.message.includes("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED")) {
-      logServerCritical("SERVICENOW_WRITE_LATE_RESPONSE_AFTER_RECOVERY", error, {
-        requestId: input.requestId,
-        operation: "servicenow.write.finish",
-        commandId: input.commandId,
-        attemptId,
-      });
-      operationalError(error);
-    }
+    if (isAlreadyRecoveredError(error)) throw error;
     const finishedAt = now();
     const classified = isServiceNowWriteExecutionError(error);
     const uncertain = !classified || error.deliveryDisposition === "may_have_committed";
@@ -515,7 +545,7 @@ async function execute(
       });
     }
     try {
-      await repository.finishAttempt({
+      await finishTerminalAttempt(repository, {
         commandId: input.commandId,
         attemptId,
         outcome: uncertain ? "uncertain" : "failed",
@@ -545,8 +575,19 @@ async function execute(
           nextRetryAt: new Date(finishedAt.getTime() + retryDelayMilliseconds(started.live_attempt_count)).toISOString(),
         } : {}),
         finishedAt: finishedAt.toISOString(),
+      }, {
+        requestId: input.requestId,
+        commandId: input.commandId,
+        attemptId,
+        providerErrorCode: safeErrorCode,
+        outcomeClassification: classified
+          ? error.mutationCandidateSysId
+            ? "candidate_bearing_uncertain"
+            : "classified_provider_error"
+          : "unclassified_provider_error",
       });
     } catch (storageError) {
+      if (isAlreadyRecoveredError(storageError)) throw storageError;
       logServerCritical("SERVICENOW_WRITE_FAILURE_PERSISTENCE_FAILED", storageError, {
         requestId: input.requestId,
         operation: "servicenow.write.execute",

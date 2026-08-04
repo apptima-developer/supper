@@ -5,7 +5,10 @@ import type { Session } from "../../../auth";
 import type { Audit } from "../../../types";
 import { correlationIdSchema } from "../../schemas";
 import { serviceNowError } from "../errors";
-import { buildServiceNowWriteConfigurationFingerprint } from "./idempotency";
+import {
+  buildServiceNowWriteConfigurationFingerprint,
+  hashServiceNowProviderCorrelationMarker,
+} from "./idempotency";
 import { issueManualOperationIdentity } from "./manual-operation";
 import { serviceNowDefaultWriteMapping } from "./normalization";
 import { serviceNowWriteExecutionError } from "./outcomes";
@@ -52,6 +55,7 @@ const env = {
 };
 const hash = "a".repeat(64);
 const marker = `SUPPER:${"b".repeat(64)}`;
+const markerHash = hashServiceNowProviderCorrelationMarker(marker);
 const configurationFingerprint = buildServiceNowWriteConfigurationFingerprint({
   instanceHostname: "example.service-now.com",
   incidentTable: "incident",
@@ -475,6 +479,7 @@ describe("ServiceNow write service", () => {
             targetSysId: "e".repeat(32),
             targetNumber: "INC0010005",
             lookupClassification: "correlation_marker_exact" as const,
+            lookupCorrelationMarkerHash: markerHash,
           },
           responseSummary: {
             httpStatus: 200,
@@ -483,6 +488,7 @@ describe("ServiceNow write service", () => {
             recoveredByCorrelationMarker: true,
             providerWritePerformed: false,
             exactMarkerVerified: true,
+            verifiedCorrelationMarkerHash: markerHash,
           },
           targetSysId: "e".repeat(32),
           targetNumber: "INC0010005",
@@ -500,16 +506,88 @@ describe("ServiceNow write service", () => {
         lookupClassification: "correlation_marker_exact",
         targetSysId: "e".repeat(32),
         targetNumber: "INC0010005",
+        lookupCorrelationMarkerHash: markerHash,
       }),
       responseSummary: expect.objectContaining({
         sysId: "e".repeat(32),
         number: "INC0010005",
         exactMarkerVerified: true,
+        verifiedCorrelationMarkerHash: markerHash,
       }),
     }));
   });
 
-  it("does not rewrite a recovered Attempt when a late provider result arrives", async () => {
+  it.each([
+    {
+      label: "success",
+      classification: "provider_success",
+      execute: async () => ({
+        requestSummary: { method: "POST" as const, endpointPath: "/api/now/table/incident", targetTable: "incident", fieldNames: ["short_description"] },
+        responseSummary: { httpStatus: 201, sysId: "a".repeat(32), number: "INC0010001" },
+        targetSysId: "a".repeat(32),
+        targetNumber: "INC0010001",
+      }),
+    },
+    ...[
+      ["timeout", "SERVICENOW_WRITE_TIMEOUT", "timeout"],
+      ["network disconnect", "SERVICENOW_WRITE_NETWORK_ERROR", "unavailable"],
+      ["HTTP 5xx", "SERVICENOW_WRITE_UNAVAILABLE", "unavailable"],
+      ["malformed 2xx", "SERVICENOW_WRITE_RESPONSE_INVALID", "malformed_response"],
+    ].map(([label, code, category]) => ({
+      label,
+      classification: "classified_provider_error",
+      execute: async () => {
+        throw serviceNowWriteExecutionError(serviceNowError({
+          category: category as "timeout" | "unavailable" | "malformed_response",
+          code,
+          safeMessage: "ServiceNow outcome is not definitive",
+          retryable: false,
+          operation: "ticket.create",
+          correlationId: correlationIdSchema.parse("request-late-response-0001"),
+        }), {
+          deliveryDisposition: "may_have_committed",
+          failurePhase: "mutation_response",
+          retryAllowed: false,
+        });
+      },
+    })),
+    {
+      label: "post-write candidate proof failure",
+      classification: "candidate_bearing_uncertain",
+      execute: async () => {
+        throw serviceNowWriteExecutionError(serviceNowError({
+          category: "conflict",
+          code: "SERVICENOW_WRITE_POST_CREATE_NOT_FOUND",
+          safeMessage: "ServiceNow could not prove the created Incident",
+          retryable: false,
+          operation: "ticket.create",
+          correlationId: correlationIdSchema.parse("request-late-response-0001"),
+        }), {
+          deliveryDisposition: "may_have_committed",
+          failurePhase: "read_back",
+          retryAllowed: false,
+          mutationCandidateSysId: "c".repeat(32),
+          mutationCandidateNumber: "INC0010003",
+          mutationHttpStatus: 201,
+          mutationCandidateProofStatus: "marker_not_found",
+          safeResponseSummary: {
+            httpStatus: 201,
+            mutationCandidateObserved: true,
+            candidateSysId: "c".repeat(32),
+            candidateNumber: "INC0010003",
+            mutationHttpStatus: 201,
+            postWriteMarkerVerified: false,
+          },
+        });
+      },
+    },
+    {
+      label: "unclassified adapter error",
+      classification: "unclassified_provider_error",
+      execute: async () => { throw new Error("internal adapter failure"); },
+    },
+  ])("does not rewrite a recovered Attempt after late $label", async ({ execute, classification }) => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const finishAttempt = vi.fn(async () => {
       throw new Error("SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED");
     });
@@ -529,18 +607,34 @@ describe("ServiceNow write service", () => {
       env,
       repository,
       adapter: adapter({
-        execute: vi.fn(async () => ({
-          requestSummary: { method: "POST" as const, endpointPath: "/api/now/table/incident", targetTable: "incident", fieldNames: ["short_description"] },
-          responseSummary: { httpStatus: 201, sysId: "a".repeat(32), number: "INC0010001" },
-          targetSysId: "a".repeat(32),
-          targetNumber: "INC0010001",
-        })),
+        execute: vi.fn(execute),
       }),
       audit: async () => auditFixture,
       now: () => new Date("2026-07-23T01:02:00.000Z"),
       createId: () => "attempt-late-response-0001",
     })).rejects.toMatchObject({ code: "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED" });
     expect(finishAttempt).toHaveBeenCalledOnce();
+    const entries = logged.mock.calls.map((call) => String(call[0]));
+    logged.mockRestore();
+    const lateEntries = entries.filter((entry) => (
+      entry.includes("SERVICENOW_WRITE_LATE_RESPONSE_AFTER_RECOVERY")
+    ));
+    expect(lateEntries).toHaveLength(1);
+    expect(lateEntries[0]).toContain(classification);
+    const lateEntry = JSON.parse(lateEntries[0]) as Record<string, unknown>;
+    expect(lateEntry).not.toHaveProperty("error");
+    expect(lateEntry.context).toEqual({
+      requestId: "request-late-response-0001",
+      commandId: "command-id-0000000001",
+      attemptId: "attempt-late-response-0001",
+      providerErrorCode: classification === "provider_success"
+        ? "SERVICENOW_WRITE_PROVIDER_SUCCESS"
+        : classification === "unclassified_provider_error"
+          ? "SERVICENOW_WRITE_EXECUTION_UNCERTAIN"
+          : expect.stringMatching(/^SERVICENOW_WRITE_[A-Z0-9_]+$/),
+      outcomeClassification: classification,
+    });
+    expect(entries.join("\n")).not.toContain("SERVICENOW_WRITE_FAILURE_PERSISTENCE_FAILED");
   });
 
   it("schedules retry only for an explicitly safe-to-retry provider outcome", async () => {

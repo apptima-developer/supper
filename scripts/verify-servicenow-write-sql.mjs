@@ -53,6 +53,8 @@ for (const required of [
 }
 for (const required of [
   "recoverable_at",
+  "provider_request_budget",
+  "recovery_budget_ms",
   "recovery_lease_version",
   "SERVICENOW_WRITE_ATTEMPT_RECOVERY_TOO_EARLY",
   "recoveryOperationProviderRequestPerformed",
@@ -61,6 +63,8 @@ for (const required of [
   "correlation_marker_exact",
   "SERVICENOW_WRITE_TARGET_CONTINUITY_CONFLICT",
   "SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED",
+  "lookupCorrelationMarkerHash",
+  "verifiedCorrelationMarkerHash",
 ]) {
   if (!writeMigrationSource.includes(required)) {
     throw new Error(`ServiceNow recovery proof migration is missing ${required}`);
@@ -199,7 +203,7 @@ select * from public.support_upsert_servicenow_write_connection(jsonb_build_obje
   'authMode','basic','instanceUrl','https://example.service-now.com',
   'incidentTable','incident','configVersion','unversioned',
   'configurationFingerprint','b32a9f49f25d2986b9c37ec94bc6d32fbb5242969c83727cf3d65cb912f9c274',
-  'timeoutMs',15000,
+  'timeoutMs',60000,
   'metadata',jsonb_build_object('source','sql-test'),
   'updatedAt','2026-07-23T01:00:00.000Z'
 ));
@@ -440,11 +444,154 @@ $$;
 
 do $$
 declare
+  v_version integer;
+  v_hash text;
+  v_nonce text := public.support_intake_sha256_hex('reconcile-exact-update-proof');
+  v_sys_id text := repeat('c',32);
+  v_number text := 'INC0081001';
+begin
+  perform * from public.support_create_servicenow_write_command(
+    public.supper_test_write_payload_for(
+      'reconcile-exact-update-proof','update_incident',
+      'manual-op:reconcile-exact-update-proof',
+      jsonb_build_object('sysId',v_sys_id,'state','2'),
+      'supper_ticket','ticket-write-00000002'
+    )
+  );
+  update public.servicenow_write_commands set
+    status='reconciliation_required',delivery_disposition='may_have_committed',
+    failure_phase='read_back',retry_allowed=false,next_retry_at=null
+  where id='reconcile-exact-update-proof';
+  select version,normalized_payload_hash into v_version,v_hash
+  from public.servicenow_write_commands where id='reconcile-exact-update-proof';
+  perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+    'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
+    'actorUserId','admin-user','expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce,
+    'issuedAt',public.supper_test_iso(statement_timestamp()),
+    'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+  ));
+  begin
+    perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+      'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
+      'result','confirmed_succeeded','safeReadBackSummary','{}'::jsonb,
+      'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
+      'requestId','request-reconcile-empty-proof',
+      'checkedAt',public.supper_test_iso(statement_timestamp()),
+      'confirmed',true,'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+    ));
+    raise exception 'Empty successful update reconciliation evidence was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm<>'SERVICENOW_WRITE_RECONCILIATION_EVIDENCE_INVALID' then raise; end if;
+  end;
+  if exists (
+    select 1 from public.servicenow_ticket_links
+    where supper_ticket_id='ticket-write-00000002'
+  ) then
+    raise exception 'Invalid update reconciliation evidence created a Ticket link';
+  end if;
+  perform * from public.support_reconcile_servicenow_write_command(jsonb_build_object(
+    'commandId','reconcile-exact-update-proof','action','reconcile_by_read_back',
+    'result','confirmed_succeeded','safeReadBackSummary',jsonb_build_object(
+      'method','exact_sys_id','requestMethod','GET',
+      'endpointPath','/api/now/table/incident/'||v_sys_id,
+      'targetTable','incident','fieldNames',jsonb_build_array('state'),
+      'matchedFields',1,'expectedFields',1,
+      'evidenceClassification','provider_matched',
+      'targetSysId',v_sys_id,'targetNumber',v_number
+    ),
+    'targetSysId',v_sys_id,'targetNumber',v_number,'actorUserId','admin-user',
+    'requestId','request-reconcile-exact-proof',
+    'checkedAt',public.supper_test_iso(statement_timestamp()),
+    'confirmed',true,'expectedVersion',v_version,
+    'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+  ));
+  if not exists (
+    select 1 from public.servicenow_write_commands command_record
+    join public.servicenow_ticket_links ticket_link
+      on ticket_link.supper_ticket_id=command_record.source_entity_reference
+    where command_record.id='reconcile-exact-update-proof'
+      and command_record.status='succeeded'
+      and ticket_link.servicenow_sys_id=v_sys_id
+      and ticket_link.servicenow_number=v_number
+  ) then
+    raise exception 'Exact successful update reconciliation proof was not accepted';
+  end if;
+end;
+$$;
+
+do $$
+declare
+  v_case record;
+  v_command_id text;
+  v_version integer;
+  v_hash text;
+  v_nonce text;
+  v_attempt_id text;
+  v_payload jsonb;
+  v_attempt record;
+begin
+  for v_case in
+    select * from (values
+      ('create','create_incident',3,300000),
+      ('number','update_incident',2,240000),
+      ('sys-id','update_incident',1,180000)
+    ) as lease_case(suffix,command_type,expected_requests,expected_budget_ms)
+  loop
+    v_command_id := 'lease-budget-'||v_case.suffix;
+    v_attempt_id := 'attempt-lease-budget-'||v_case.suffix;
+    v_payload := case v_case.command_type
+      when 'create_incident' then public.supper_test_write_payload(
+        v_command_id,'manual-op:lease-budget:'||v_case.suffix,'Lease budget verifier'
+      )
+      else public.supper_test_write_payload_for(
+        v_command_id,'update_incident','manual-op:lease-budget:'||v_case.suffix,
+        case when v_case.suffix='number'
+          then jsonb_build_object('number','INC0060001','state','2')
+          else jsonb_build_object('sysId',repeat('6',32),'state','2') end
+      )
+    end;
+    perform * from public.support_create_servicenow_write_command(v_payload);
+    select version,normalized_payload_hash into v_version,v_hash
+    from public.servicenow_write_commands where id=v_command_id;
+    v_nonce := public.support_intake_sha256_hex('lease-budget:'||v_case.suffix);
+    perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
+      'commandId',v_command_id,'action','execute','actorUserId','admin-user',
+      'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
+      'confirmationNonceHash',v_nonce,
+      'issuedAt',public.supper_test_iso(statement_timestamp()),
+      'expiresAt',public.supper_test_iso(statement_timestamp()+interval '1 minute')
+    ));
+    perform * from public.support_begin_servicenow_write_attempt(jsonb_build_object(
+      'commandId',v_command_id,'attemptId',v_attempt_id,
+      'executionMode','live','retry',false,'requestId','request-'||v_command_id,
+      'startedAt',public.supper_test_iso(statement_timestamp()),
+      'actorUserId','admin-user','confirmed',true,'expectedVersion',v_version,
+      'expectedNormalizedPayloadHash',v_hash,'confirmationNonceHash',v_nonce
+    ));
+    select * into v_attempt from public.servicenow_write_attempts where id=v_attempt_id;
+    if v_attempt.provider_request_budget<>v_case.expected_requests
+      or v_attempt.recovery_budget_ms<>v_case.expected_budget_ms
+      or round(extract(epoch from (v_attempt.recoverable_at-v_attempt.started_at))*1000)::integer
+        <>v_case.expected_budget_ms
+      or v_attempt.recoverable_at<=statement_timestamp() then
+      raise exception 'Operation-wide recovery budget failed for %',v_case.suffix;
+    end if;
+  end loop;
+end;
+$$;
+
+do $$
+declare
   v_case record;
   v_version integer;
   v_hash text;
   v_nonce text;
   v_command_id text;
+  v_invalid record;
+  v_valid_request jsonb;
+  v_valid_response jsonb;
 begin
   for v_case in
     select * from (values
@@ -486,7 +633,14 @@ begin
         'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
         'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
         'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
-        'requestSummary',jsonb_build_object('method','PATCH'),
+        'requestSummary',jsonb_build_object(
+          'method','PATCH','endpointPath','/api/now/table/incident/'||v_case.conflict_sys_id,
+          'targetTable','incident','fieldNames',case v_case.command_type
+            when 'update_incident' then jsonb_build_array('state')
+            when 'add_comment' then jsonb_build_array('comments')
+            else jsonb_build_array('work_notes') end,
+          'targetSysId',v_case.conflict_sys_id,'targetNumber',v_case.conflict_number
+        ),
         'responseSummary',jsonb_build_object(
           'httpStatus',200,'sysId',v_case.conflict_sys_id,'number',v_case.conflict_number
         ),
@@ -513,14 +667,63 @@ begin
     ) then
       raise exception 'Continuity conflict % changed command, Attempt, or Ticket link state',v_case.suffix;
     end if;
+    v_valid_request := jsonb_build_object(
+      'method','PATCH','endpointPath','/api/now/table/incident/'||v_case.valid_sys_id,
+      'targetTable','incident','fieldNames',case v_case.command_type
+        when 'update_incident' then jsonb_build_array('state')
+        when 'add_comment' then jsonb_build_array('comments')
+        else jsonb_build_array('work_notes') end,
+      'targetSysId',v_case.valid_sys_id,'targetNumber',v_case.valid_number
+    );
+    v_valid_response := jsonb_build_object(
+      'httpStatus',200,'sysId',v_case.valid_sys_id,'number',v_case.valid_number
+    );
+    for v_invalid in
+      select * from (values
+        ('empty-request','{}'::jsonb,v_valid_response),
+        ('empty-response',v_valid_request,'{}'::jsonb),
+        ('wrong-method',jsonb_set(v_valid_request,'{method}','"GET"'::jsonb),v_valid_response),
+        ('wrong-endpoint',jsonb_set(v_valid_request,'{endpointPath}','"/api/now/table/incident/bad"'::jsonb),v_valid_response),
+        ('wrong-request-sys-id',jsonb_set(v_valid_request,'{targetSysId}',to_jsonb(repeat('9',32))),v_valid_response),
+        ('wrong-response-sys-id',v_valid_request,jsonb_set(v_valid_response,'{sysId}',to_jsonb(repeat('9',32)))),
+        ('wrong-number',v_valid_request,jsonb_set(v_valid_response,'{number}','"INC0099999"'::jsonb)),
+        ('forged-status',v_valid_request,jsonb_set(v_valid_response,'{httpStatus}','500'::jsonb)),
+        ('extra-response-evidence',v_valid_request,v_valid_response||jsonb_build_object('rawBody','forbidden')),
+        ('incorrect-field',jsonb_set(v_valid_request,'{fieldNames}',case
+          when v_case.command_type='add_comment' then '["work_notes"]'::jsonb
+          when v_case.command_type='add_work_note' then '["comments"]'::jsonb
+          else '["description"]'::jsonb end),v_valid_response)
+      ) as invalid_evidence(suffix,request_summary,response_summary)
+    loop
+      begin
+        perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+          'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
+          'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+          'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+          'requestSummary',v_invalid.request_summary,
+          'responseSummary',v_invalid.response_summary,
+          'targetSysId',v_case.valid_sys_id,'targetNumber',v_case.valid_number,
+          'errorCode','','errorMessage','',
+          'finishedAt',public.supper_test_iso(statement_timestamp())
+        ));
+        raise exception 'Invalid non-create evidence %/% was accepted',v_case.suffix,v_invalid.suffix;
+      exception when invalid_parameter_value then
+        if sqlerrm<>'SERVICENOW_WRITE_RESULT_INVALID' then raise; end if;
+      end;
+      if exists (
+        select 1 from public.servicenow_ticket_links ticket_link
+        where ticket_link.servicenow_sys_id=v_case.valid_sys_id
+          and ticket_link.servicenow_number=v_case.valid_number
+      ) then
+        raise exception 'Invalid non-create evidence %/% created a Ticket link',v_case.suffix,v_invalid.suffix;
+      end if;
+    end loop;
     perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
       'commandId',v_command_id,'attemptId','attempt-'||v_command_id,
       'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
       'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
-      'requestSummary',jsonb_build_object('method','PATCH'),
-      'responseSummary',jsonb_build_object(
-        'httpStatus',200,'sysId',v_case.valid_sys_id,'number',v_case.valid_number
-      ),
+      'requestSummary',v_valid_request,
+      'responseSummary',v_valid_response,
       'targetSysId',v_case.valid_sys_id,'targetNumber',v_case.valid_number,
       'errorCode','','errorMessage','',
       'finishedAt',public.supper_test_iso(statement_timestamp())
@@ -829,6 +1032,10 @@ declare
   v_hash text;
   v_candidate_event_id text;
   v_recovery_event_id text;
+  v_marker_hash text;
+  v_g2_request jsonb;
+  v_g2_response jsonb;
+  v_late record;
 begin
   if public.support_servicenow_write_configuration_fingerprint(
     'https://example.service-now.com','incident','basic','unversioned'
@@ -1802,6 +2009,32 @@ begin
     'admin-user','request-projection-older',1,2,
     statement_timestamp()-interval '1 minute'
   );
+  insert into public.servicenow_write_reconciliation_events (
+    id,command_id,mutation_candidate_event_id,action,result,evidence_classification,
+    safe_read_back_summary,actor_user_id,request_id,
+    command_version_before,command_version_after,created_at
+  )
+  select
+    'sn-reconcile-projection-inconclusive-'||sequence_number,
+    'command-retry-success-01',v_candidate_event_id,
+    'reconcile_by_read_back','inconclusive','provider_inconclusive',
+    jsonb_build_object('method','exact_target','evidenceClassification','provider_inconclusive'),
+    'admin-user','request-projection-inconclusive-'||sequence_number,2,3,
+    clock_timestamp()+make_interval(secs => sequence_number/1000.0)
+  from generate_series(1,101) sequence_number;
+  insert into public.servicenow_write_reconciliation_events (
+    id,command_id,mutation_candidate_event_id,action,result,evidence_classification,
+    safe_read_back_summary,actor_user_id,request_id,
+    command_version_before,command_version_after,created_at
+  )
+  select
+    'sn-reconcile-projection-not-found-'||sequence_number,
+    'command-retry-success-01',v_candidate_event_id,
+    'reconcile_by_read_back','not_found','provider_not_found',
+    jsonb_build_object('method','correlation_marker','evidenceClassification','provider_not_found'),
+    'admin-user','request-projection-not-found-'||sequence_number,2,3,
+    clock_timestamp()+interval '1 second'+make_interval(secs => sequence_number/1000.0)
+  from generate_series(1,101) sequence_number;
   if not exists (
     select 1
     from public.servicenow_write_reconciliation_events terminal_resolution
@@ -1815,6 +2048,28 @@ begin
       )
   ) then
     raise exception 'Older inconclusive history overrode terminal Candidate A resolution';
+  end if;
+  if exists (
+    select 1 from (
+      select result
+      from public.servicenow_write_reconciliation_events
+      where command_id='command-retry-success-01'
+      order by created_at desc
+      limit 100
+    ) display_window
+    where display_window.result in ('confirmed_succeeded','confirmed_not_applied')
+  ) or not exists (
+    select 1
+    from public.servicenow_write_mutation_candidate_events candidate_b
+    where candidate_b.command_id='command-candidate-rewrite-01'
+      and candidate_b.attempt_number=2
+      and not exists (
+        select 1 from public.servicenow_write_reconciliation_events terminal_resolution
+        where terminal_resolution.mutation_candidate_event_id=candidate_b.id
+          and terminal_resolution.result in ('confirmed_succeeded','confirmed_not_applied')
+      )
+  ) then
+    raise exception 'Terminal Candidate projection depended on the 100-row display window';
   end if;
   select version,normalized_payload_hash into v_version,v_hash
   from public.servicenow_write_commands where id='command-retry-success-01';
@@ -2015,6 +2270,9 @@ begin
   );
   select version,normalized_payload_hash into v_version,v_hash
   from public.servicenow_write_commands where id='command-marker-recovery-01';
+  select public.support_intake_sha256_hex(provider_correlation_marker)
+  into v_marker_hash
+  from public.servicenow_write_commands where id='command-marker-recovery-01';
   perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
     'commandId','command-marker-recovery-01','action','execute','actorUserId','admin-user',
     'expectedVersion',v_version,'expectedNormalizedPayloadHash',v_hash,
@@ -2035,7 +2293,8 @@ begin
         'missing-identity',
         jsonb_build_object(
           'httpStatus',200,'recoveredByCorrelationMarker',true,
-          'providerWritePerformed',false,'exactMarkerVerified',true
+          'providerWritePerformed',false,'exactMarkerVerified',true,
+          'verifiedCorrelationMarkerHash',v_marker_hash
         ),repeat('2',32),'INC0022222'
       ),
       (
@@ -2043,7 +2302,7 @@ begin
         jsonb_build_object(
           'httpStatus',200,'sysId',repeat('3',32),'number','INC0022222',
           'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
-          'exactMarkerVerified',true
+          'exactMarkerVerified',true,'verifiedCorrelationMarkerHash',v_marker_hash
         ),repeat('2',32),'INC0022222'
       ),
       (
@@ -2051,14 +2310,15 @@ begin
         jsonb_build_object(
           'httpStatus',200,'sysId',repeat('2',32),'number','INC0099999',
           'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
-          'exactMarkerVerified',true
+          'exactMarkerVerified',true,'verifiedCorrelationMarkerHash',v_marker_hash
         ),repeat('2',32),'INC0022222'
       ),
       (
         'missing-exact-proof',
         jsonb_build_object(
           'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
-          'recoveredByCorrelationMarker',true,'providerWritePerformed',false
+          'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
+          'verifiedCorrelationMarkerHash',v_marker_hash
         ),repeat('2',32),'INC0022222'
       ),
       (
@@ -2066,7 +2326,7 @@ begin
         jsonb_build_object(
           'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
           'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
-          'exactMarkerVerified',true
+          'exactMarkerVerified',true,'verifiedCorrelationMarkerHash',v_marker_hash
         ),repeat('4',32),'INC0044444'
       )
     ) as invalid_g2(suffix,response_summary,target_sys_id,target_number)
@@ -2081,7 +2341,8 @@ begin
           'targetTable','incident','fieldNames',jsonb_build_array(
             'correlation_id','number','state','sys_id'
           ),'targetSysId',repeat('2',32),'targetNumber','INC0022222',
-          'lookupClassification','correlation_marker_exact'
+          'lookupClassification','correlation_marker_exact',
+          'lookupCorrelationMarkerHash',v_marker_hash
         ),
         'responseSummary',v_attempt.response_summary,
         'targetSysId',v_attempt.target_sys_id,'targetNumber',v_attempt.target_number,
@@ -2089,6 +2350,43 @@ begin
         'finishedAt',public.supper_test_iso(statement_timestamp())
       ));
       raise exception 'Invalid G2 case % was accepted',v_attempt.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_RESULT_INVALID' then raise; end if;
+    end;
+  end loop;
+  v_g2_request := jsonb_build_object(
+    'method','GET','endpointPath','/api/now/table/incident',
+    'targetTable','incident','fieldNames',jsonb_build_array(
+      'correlation_id','number','state','sys_id'
+    ),'targetSysId',repeat('2',32),'targetNumber','INC0022222',
+    'lookupClassification','correlation_marker_exact',
+    'lookupCorrelationMarkerHash',v_marker_hash
+  );
+  v_g2_response := jsonb_build_object(
+    'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
+    'recoveredByCorrelationMarker',true,'providerWritePerformed',false,
+    'exactMarkerVerified',true,'verifiedCorrelationMarkerHash',v_marker_hash
+  );
+  for v_attempt in
+    select * from (values
+      ('missing-request-hash',v_g2_request-'lookupCorrelationMarkerHash',v_g2_response),
+      ('missing-response-hash',v_g2_request,v_g2_response-'verifiedCorrelationMarkerHash'),
+      ('wrong-marker-hash',jsonb_set(v_g2_request,'{lookupCorrelationMarkerHash}',to_jsonb(repeat('f',64))),jsonb_set(v_g2_response,'{verifiedCorrelationMarkerHash}',to_jsonb(repeat('f',64)))),
+      ('request-response-hash-mismatch',jsonb_set(v_g2_request,'{lookupCorrelationMarkerHash}',to_jsonb(repeat('e',64))),v_g2_response)
+    ) as invalid_marker_hash(suffix,request_summary,response_summary)
+  loop
+    begin
+      perform * from public.support_finish_servicenow_write_attempt(jsonb_build_object(
+        'commandId','command-marker-recovery-01','attemptId','attempt-marker-recovery-01',
+        'outcome','succeeded','deliveryDisposition','confirmed_succeeded',
+        'failurePhase','','retryAllowed',false,'retryReason','','reconciliationReason','',
+        'requestSummary',v_attempt.request_summary,
+        'responseSummary',v_attempt.response_summary,
+        'targetSysId',repeat('2',32),'targetNumber','INC0022222',
+        'errorCode','','errorMessage','',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      ));
+      raise exception 'Invalid G2 marker hash case % was accepted',v_attempt.suffix;
     exception when invalid_parameter_value then
       if sqlerrm<>'SERVICENOW_WRITE_RESULT_INVALID' then raise; end if;
     end;
@@ -2102,13 +2400,15 @@ begin
       'targetTable','incident','fieldNames',jsonb_build_array(
         'correlation_id','number','state','sys_id'
       ),'targetSysId',repeat('2',32),'targetNumber','INC0022222',
-      'lookupClassification','correlation_marker_exact'
+      'lookupClassification','correlation_marker_exact',
+      'lookupCorrelationMarkerHash',v_marker_hash
     ),
     'responseSummary',jsonb_build_object(
       'httpStatus',200,'sysId',repeat('2',32),'number','INC0022222',
       'recoveredByCorrelationMarker',true,
       'providerWritePerformed',false,
-      'exactMarkerVerified',true
+      'exactMarkerVerified',true,
+      'verifiedCorrelationMarkerHash',v_marker_hash
     ),
     'targetSysId',repeat('2',32),'targetNumber','INC0022222',
     'errorCode','','errorMessage','',
@@ -2183,8 +2483,9 @@ begin
   end;
   perform set_config('session_replication_role','replica',true);
   update public.servicenow_write_attempts set
-    started_at=statement_timestamp()-interval '3 minutes',
-    recoverable_at=statement_timestamp()+interval '1 second'
+    recoverable_at=statement_timestamp()+interval '1 second',
+    started_at=statement_timestamp()+interval '1 second'
+      -make_interval(secs => recovery_budget_ms/1000.0)
   where id='attempt-stuck-recovery-01';
   perform set_config('session_replication_role','origin',true);
   begin
@@ -2201,7 +2502,8 @@ begin
   end;
   perform set_config('session_replication_role','replica',true);
   update public.servicenow_write_attempts
-  set recoverable_at=statement_timestamp()
+  set recoverable_at=statement_timestamp(),
+    started_at=statement_timestamp()-make_interval(secs => recovery_budget_ms/1000.0)
   where id='attempt-stuck-recovery-01';
   perform set_config('session_replication_role','origin',true);
   perform * from public.support_issue_servicenow_write_confirmation(jsonb_build_object(
@@ -2213,7 +2515,9 @@ begin
   ));
   perform set_config('session_replication_role','replica',true);
   update public.servicenow_write_attempts
-  set recoverable_at=statement_timestamp()+interval '1 second'
+  set recoverable_at=statement_timestamp()+interval '1 second',
+    started_at=statement_timestamp()+interval '1 second'
+      -make_interval(secs => recovery_budget_ms/1000.0)
   where id='attempt-stuck-recovery-01';
   perform set_config('session_replication_role','origin',true);
   begin
@@ -2229,7 +2533,8 @@ begin
   end;
   perform set_config('session_replication_role','replica',true);
   update public.servicenow_write_attempts
-  set recoverable_at=statement_timestamp()
+  set recoverable_at=statement_timestamp(),
+    started_at=statement_timestamp()-make_interval(secs => recovery_budget_ms/1000.0)
   where id='attempt-stuck-recovery-01';
   perform set_config('session_replication_role','origin',true);
   perform * from public.support_recover_servicenow_write_attempt(jsonb_build_object(
@@ -2270,6 +2575,55 @@ begin
   exception when invalid_parameter_value then
     if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED' then raise; end if;
   end;
+  for v_late in
+    select * from (values
+      ('timeout',jsonb_build_object(
+        'commandId','command-stuck-recovery-01','attemptId','attempt-stuck-recovery-01',
+        'outcome','uncertain','deliveryDisposition','may_have_committed',
+        'failurePhase','mutation_dispatch','retryAllowed',false,'retryReason','',
+        'reconciliationReason','Late timeout outcome','requestSummary',jsonb_build_object('method','POST'),
+        'responseSummary','{}'::jsonb,'targetSysId','','targetNumber','',
+        'errorCode','SERVICENOW_WRITE_TIMEOUT','errorMessage','Late timeout outcome',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      )),
+      ('http-5xx',jsonb_build_object(
+        'commandId','command-stuck-recovery-01','attemptId','attempt-stuck-recovery-01',
+        'outcome','uncertain','deliveryDisposition','may_have_committed',
+        'failurePhase','mutation_response','retryAllowed',false,'retryReason','',
+        'reconciliationReason','Late provider 5xx outcome','requestSummary',jsonb_build_object('method','POST'),
+        'responseSummary',jsonb_build_object('httpStatus',503),'targetSysId','','targetNumber','',
+        'errorCode','SERVICENOW_WRITE_UNAVAILABLE','errorMessage','Late provider 5xx outcome',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      )),
+      ('candidate-proof-failure',jsonb_build_object(
+        'commandId','command-stuck-recovery-01','attemptId','attempt-stuck-recovery-01',
+        'outcome','uncertain','deliveryDisposition','may_have_committed',
+        'failurePhase','read_back','retryAllowed',false,'retryReason','',
+        'reconciliationReason','Late Candidate proof failure',
+        'requestSummary',jsonb_build_object('method','POST'),
+        'responseSummary',jsonb_build_object(
+          'mutationCandidateObserved',true,'candidateSysId',repeat('6',32),
+          'candidateNumber','INC0066666','mutationHttpStatus',201,
+          'postWriteMarkerVerified',false
+        ),
+        'mutationCandidateSysId',repeat('6',32),
+        'mutationCandidateNumber','INC0066666','mutationCandidateHttpStatus',201,
+        'mutationCandidateSource','mutation_response',
+        'mutationCandidateProofStatus','marker_not_found',
+        'targetSysId','','targetNumber','',
+        'errorCode','SERVICENOW_WRITE_POST_CREATE_NOT_FOUND',
+        'errorMessage','Late Candidate proof failure',
+        'finishedAt',public.supper_test_iso(statement_timestamp())
+      ))
+    ) as late_outcome(suffix,payload)
+  loop
+    begin
+      perform * from public.support_finish_servicenow_write_attempt(v_late.payload);
+      raise exception 'Late % outcome rewrote a recovered Attempt',v_late.suffix;
+    exception when invalid_parameter_value then
+      if sqlerrm<>'SERVICENOW_WRITE_ATTEMPT_ALREADY_RECOVERED' then raise; end if;
+    end;
+  end loop;
   if not exists (
     select 1 from public.servicenow_write_commands command_record
     join public.servicenow_write_attempts attempt_record
@@ -2535,7 +2889,7 @@ try {
   psql([], acceptanceSql);
   const version = psql(["-Atc", "select version from public.support_schema_migrations where version='202607230001'"]);
   if (version !== "202607230001") throw new Error(`Unexpected write migration version: ${version}`);
-  console.log("ServiceNow write migration executed twice after real intake migrations; recovery leases, truthful recovery evidence, late-response closure, exact G1/G2 proof, non-create target continuity, Candidate A/B projection, database-clock authority, and ledger grants passed.");
+  console.log("ServiceNow write migration executed twice after real intake migrations; operation-wide recovery leases, unified late-response closure, marker-hash-bound G2 proof, exact non-create execution and reconciliation evidence, terminal Candidate projection, database-clock authority, and ledger grants passed.");
 } finally {
   if (started) spawnSync("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"], { encoding: "utf8" });
   for (const target of [dataDirectory, socketDirectory, logPath]) {

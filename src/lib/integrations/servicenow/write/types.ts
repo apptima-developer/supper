@@ -167,6 +167,7 @@ export type ServiceNowSafeRequestSummary = {
   targetSysId?: string;
   targetNumber?: string;
   lookupClassification?: "correlation_marker_exact";
+  lookupCorrelationMarkerHash?: string;
 };
 
 export type ServiceNowSafeResponseSummary = {
@@ -183,6 +184,7 @@ export type ServiceNowSafeResponseSummary = {
   mutationHttpStatus?: number;
   postWriteMarkerVerified?: boolean;
   postWriteLookupHttpStatus?: number;
+  verifiedCorrelationMarkerHash?: string;
 };
 
 export type ServiceNowWriteMutationCandidate = {
@@ -242,6 +244,8 @@ export type ServiceNowWriteAttemptSummary = {
   startedAt: string;
   attemptStartedAt: string;
   recoverableAt: string;
+  providerRequestBudget: number;
+  recoveryBudgetMs: number;
   recoveryEligible: boolean;
   finishedAt?: string;
 };

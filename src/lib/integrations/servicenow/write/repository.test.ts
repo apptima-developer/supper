@@ -3,6 +3,7 @@ vi.mock("server-only", () => ({}));
 import {
   currentServiceNowMutationCandidate,
   latestTerminalCandidateResolutions,
+  projectServiceNowMutationCandidates,
   safeServiceNowWriteCommand,
 } from "./repository";
 import type {
@@ -142,4 +143,49 @@ describe("ServiceNow mutation Candidate projection", () => {
     const candidateB = candidate(`sn-candidate-${"b".repeat(64)}`, "current_unresolved");
     expect(currentServiceNowMutationCandidate([candidateA, candidateB])).toBe(candidateB);
   });
+
+  it.each(["inconclusive", "not_found"] as const)(
+    "keeps terminal projection independent from 101 later %s display events",
+    (laterResult) => {
+      const candidateA = {
+        id: candidateId,
+        command_id: "command-id-0000000001",
+        attempt_id: "attempt-candidate-a",
+        attempt_number: 1,
+        sys_id: "a".repeat(32),
+        number: "INC0000001",
+        http_status: 201,
+        observed_at: "2026-08-04T01:00:00.000Z",
+        source: "mutation_response",
+        proof_status: "marker_not_verified",
+        created_at: "2026-08-04T01:00:00.000Z",
+      };
+      const candidateB = {
+        ...candidateA,
+        id: `sn-candidate-${"b".repeat(64)}`,
+        attempt_id: "attempt-candidate-b",
+        attempt_number: 2,
+        sys_id: "b".repeat(32),
+        number: "INC0000002",
+        created_at: "2026-08-04T05:00:00.000Z",
+      };
+      const terminal = event(
+        "terminal-outside-display-window",
+        "confirmed_not_applied",
+        "2026-08-04T02:00:00.000Z",
+      );
+      const displayHistory = Array.from({ length: 101 }, (_, index) => event(
+        `later-${index}`,
+        laterResult,
+        `2026-08-04T04:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      ));
+      expect(displayHistory).toHaveLength(101);
+      const projection = projectServiceNowMutationCandidates(
+        [candidateA, candidateB],
+        [terminal],
+      );
+      expect(projection.history[0].resolutionState).toBe("confirmed_not_applied");
+      expect(projection.current?.id).toBe(candidateB.id);
+    },
+  );
 });

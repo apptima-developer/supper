@@ -198,6 +198,7 @@ export const serviceNowSafeRequestSummarySchema = z.object({
   targetSysId: serviceNowSysIdWriteSchema.optional(),
   targetNumber: serviceNowNumberWriteSchema.optional(),
   lookupClassification: z.literal("correlation_marker_exact").optional(),
+  lookupCorrelationMarkerHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 
 export const serviceNowSafeResponseSummarySchema = z.object({
@@ -214,6 +215,7 @@ export const serviceNowSafeResponseSummarySchema = z.object({
   mutationHttpStatus: z.number().int().min(100).max(599).optional(),
   postWriteMarkerVerified: z.boolean().optional(),
   postWriteLookupHttpStatus: z.number().int().min(100).max(599).optional(),
+  verifiedCorrelationMarkerHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((value, context) => {
   const hasCandidate = value.candidateSysId !== undefined || value.candidateNumber !== undefined
     || value.mutationHttpStatus !== undefined || value.mutationCandidateObserved !== undefined;
@@ -318,6 +320,8 @@ export const serviceNowWriteAttemptRowSchema = z.object({
   safe_error_message: nullableText(240),
   started_at: timestampSchema,
   recoverable_at: timestampSchema,
+  provider_request_budget: z.number().int().min(1).max(20),
+  recovery_budget_ms: z.number().int().min(120_000).max(900_000),
   recovery_lease_version: z.number().int().positive(),
   recovery_reason: nullableText(240),
   finished_at: nullableTimestamp,

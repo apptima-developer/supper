@@ -92,6 +92,25 @@ export function buildServiceNowProviderCorrelationMarker(idempotencyKey: string)
   return `SUPPER:${idempotencyKey}`;
 }
 
+export function hashServiceNowProviderCorrelationMarker(marker: string) {
+  if (!/^SUPPER:[a-f0-9]{64}$/.test(marker)) {
+    throw new TypeError("ServiceNow provider correlation marker is invalid");
+  }
+  return digest(marker);
+}
+
+export function serviceNowOperationProviderRequestBudget(
+  command: Pick<NormalizedServiceNowWriteCommand, "commandType" | "targetSysId" | "targetNumber">,
+  authMode: string,
+) {
+  const providerRequests = command.commandType === "create_incident"
+    ? 3
+    : command.targetNumber
+      ? 2
+      : 1;
+  return providerRequests + (authMode === "oauth_client_credentials" ? 1 : 0);
+}
+
 export function buildServiceNowNormalizedPayloadMaterial(
   normalized: NormalizedServiceNowWriteCommand,
 ) {

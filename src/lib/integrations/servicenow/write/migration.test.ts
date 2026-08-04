@@ -84,8 +84,11 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("for update");
     expect(sql).toContain("unique (command_id, attempt_number)");
     expect(sql).toContain("recoverable_at");
+    expect(sql).toContain("provider_request_budget");
+    expect(sql).toContain("recovery_budget_ms");
     expect(sql).toContain("recovery_lease_version");
-    expect(sql).toContain("recoverable_at >= started_at + interval '2 minutes'");
+    expect(sql).toContain("recoverable_at = started_at + make_interval");
+    expect(sql).toContain("v_provider_request_budget * v_connection_timeout_ms + 2 * 60 * 1000");
     expect(sql).toContain("servicenow_write_attempt_recovery_too_early");
     expect(sql).toContain("recoveryoperationproviderrequestperformed");
     expect(sql).toContain("originalmutationoutcome");
@@ -133,6 +136,13 @@ describe("ServiceNow write kernel migration", () => {
     expect(sql).toContain("mutation_response");
     expect(sql).toContain("exactmarkerverified");
     expect(sql).toContain("correlation_marker_exact");
+    expect(sql).toContain("lookupcorrelationmarkerhash");
+    expect(sql).toContain("verifiedcorrelationmarkerhash");
+    expect(sql).toContain("v_expected_field_names");
+    expect(sql).toContain("'/api/now/table/'||v_command.target_table||'/'||v_target_sys_id");
+    expect(sql).toContain("p_payload->'safereadbacksummary'->>'requestmethod'<>'get'");
+    expect(sql).toContain("p_payload->'safereadbacksummary'->'fieldnames'<>v_expected_field_names");
+    expect(sql).toContain("servicenow_write_reconciliation_evidence_invalid");
   });
 
   it("enforces fresh readiness and exception-safe payload parsing", () => {

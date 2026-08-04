@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { correlationIdSchema } from "../../schemas";
 import type { ServiceNowEnabledConfig } from "../config";
 import { ServiceNowWriteAdapter } from "./adapter";
+import { hashServiceNowProviderCorrelationMarker } from "./idempotency";
 import type { NormalizedServiceNowWriteCommand } from "./types";
 
 const config: ServiceNowEnabledConfig = {
@@ -16,6 +17,7 @@ const config: ServiceNowEnabledConfig = {
 };
 const correlationId = correlationIdSchema.parse("request-write-adapter-0001");
 const marker = `SUPPER:${"a".repeat(64)}`;
+const markerHash = hashServiceNowProviderCorrelationMarker(marker);
 const createCommand: NormalizedServiceNowWriteCommand = {
   schemaVersion: "servicenow-write-normalized-v2",
   commandType: "create_incident",
@@ -104,6 +106,7 @@ describe("ServiceNow write adapter", () => {
       recoveredByCorrelationMarker: true,
       providerWritePerformed: false,
       exactMarkerVerified: true,
+      verifiedCorrelationMarkerHash: markerHash,
       httpStatus: 200,
       sysId: "b".repeat(32),
       number: "INC0010002",
@@ -115,6 +118,7 @@ describe("ServiceNow write adapter", () => {
       targetSysId: "b".repeat(32),
       targetNumber: "INC0010002",
       lookupClassification: "correlation_marker_exact",
+      lookupCorrelationMarkerHash: markerHash,
     });
   });
 
@@ -332,6 +336,35 @@ describe("ServiceNow write adapter", () => {
     });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it("returns exact bounded update read-back evidence", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse(200, {
+      sys_id: "d".repeat(32),
+      number: "INC0010005",
+      state: "2",
+      description: "provider content must not enter the summary",
+    }));
+    const result = await new ServiceNowWriteAdapter(config, {
+      fetch: fetchMock as typeof fetch,
+    }).readBack(updateCommand, correlationId);
+    expect(result).toEqual({
+      result: "confirmed_succeeded",
+      summary: {
+        method: "exact_sys_id",
+        requestMethod: "GET",
+        endpointPath: `/api/now/table/incident/${"d".repeat(32)}`,
+        targetTable: "incident",
+        fieldNames: ["state"],
+        matchedFields: 1,
+        expectedFields: 1,
+      },
+      targetSysId: "d".repeat(32),
+      targetNumber: "INC0010005",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+    expect(JSON.stringify(result)).not.toContain("provider content");
   });
 
   it("rejects a mixed target pair returned by separate number and sys_id reads", async () => {

@@ -5,6 +5,8 @@ import {
   buildServiceNowWriteCommandMaterialHash,
   buildServiceNowWriteIdempotencyKey,
   hashServiceNowWriteConfirmationNonce,
+  hashServiceNowProviderCorrelationMarker,
+  serviceNowOperationProviderRequestBudget,
 } from "./idempotency";
 import type { NormalizedServiceNowWriteCommand } from "./types";
 
@@ -120,5 +122,28 @@ describe("ServiceNow write idempotency", () => {
       .toMatch(/^[a-f0-9]{64}$/);
     expect(hashServiceNowWriteConfirmationNonce("nonce-value-with-sufficient-entropy"))
       .not.toContain("nonce-value");
+    expect(hashServiceNowProviderCorrelationMarker(`SUPPER:${key}`))
+      .toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("derives the complete provider request budget from command target mode and auth", () => {
+    const create: NormalizedServiceNowWriteCommand = {
+      schemaVersion: "servicenow-write-normalized-v2",
+      commandType: "create_incident",
+      providerCorrelationMarker: `SUPPER:${"a".repeat(64)}`,
+      fields: { correlation_id: `SUPPER:${"a".repeat(64)}` },
+    };
+    expect(serviceNowOperationProviderRequestBudget(create, "basic")).toBe(3);
+    expect(serviceNowOperationProviderRequestBudget(create, "oauth_client_credentials")).toBe(4);
+    expect(serviceNowOperationProviderRequestBudget({
+      ...create,
+      commandType: "update_incident",
+      targetNumber: "INC0000001",
+    }, "basic")).toBe(2);
+    expect(serviceNowOperationProviderRequestBudget({
+      ...create,
+      commandType: "update_incident",
+      targetSysId: "b".repeat(32),
+    }, "basic")).toBe(1);
   });
 });
