@@ -8,7 +8,7 @@ import {
   normalizeOwnerEfforts,
   ticketDiff,
 } from "./domain";
-import { listBackups } from "./json-store";
+import { captureExternalImportBackups, listBackups } from "./json-store";
 import { loadImportMappings, type ImportMappings } from "./import-mappings";
 import {
   auditRepository,
@@ -521,6 +521,7 @@ export async function commitImport(
   ]);
   const now = new Date().toISOString();
   const batchId = crypto.randomUUID();
+  const externalImportBackups = await captureExternalImportBackups(batchId);
   const tickets = [...existingTickets];
   const history = [...existingHistory];
   const audits: Audit[] = [];
@@ -586,7 +587,7 @@ export async function commitImport(
   const afterBackups = (await listBackups()).filter((backup) => !beforeBackups.has(backup));
   const batch: ImportBatch = {
     id: batchId, fileName, kind, status: "completed", summary,
-    backupPaths: [...relationalBackups, ...afterBackups], actor, createdAt: now,
+    backupPaths: [...new Set([...externalImportBackups, ...relationalBackups, ...afterBackups])], actor, createdAt: now,
   };
   await importRepository.add(batch);
   await writeAudit({

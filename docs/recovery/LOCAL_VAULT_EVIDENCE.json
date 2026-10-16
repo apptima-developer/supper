@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-10-16T03:47:59.615Z",
+  "canonicalRoot": "/Volumes/Vault/storage/supper",
+  "mountedReadiness": true,
+  "historical": {
+    "count": 6085,
+    "allRawAndCompressedHashesVerified": true,
+    "manifestSha": "585247ac16c6e4bc50a42db88cf11c10657180dab76ae1c48458024568a0af69",
+    "unchanged": true,
+    "totalObjectsIncludingPriorSynthetic": 6175
+  },
+  "synthetic": {
+    "root": "/Volumes/Vault/storage/supper/phase04b-vault-synthetic/c050fc36-40bb-4ca8-bed1-3debccbf9287",
+    "written": 3,
+    "immutableConflictRejected": true,
+    "restartedReadVerified": true,
+    "catalogProtected": true,
+    "dryRunCandidates": 1,
+    "pruned": 1,
+    "remaining": 2,
+    "auditRecorded": true
+  },
+  "productionMutation": false
+}

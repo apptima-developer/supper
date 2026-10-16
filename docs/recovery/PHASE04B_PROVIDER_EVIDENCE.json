@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-10-16T02:33:50.525Z",
+  "syntheticOnly": true,
+  "bucket": "supper-snapshots-staging",
+  "region": "ap-southeast-1",
+  "prefix": "phase04b-synthetic/bd08ded6-dd51-46d4-a0f8-ad9b82c0b813",
+  "endpointPath": "/storage/v1/s3",
+  "pathStyle": true,
+  "sdkMaxAttempts": 1,
+  "productionAccess": false,
+  "historicalUploads": 0,
+  "disposition": "SUPABASE_S3_STAGING_INCOMPATIBLE",
+  "authenticatedList": true,
+  "putGetHeadMetadata": true,
+  "conditionalDuplicate": {
+    "status": null,
+    "originalUnchanged": false
+  },
+  "cleanup": {
+    "deleted": 1,
+    "remaining": 0
+  }
+}

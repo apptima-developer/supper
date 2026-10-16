@@ -19,7 +19,7 @@ describe("proxy request ordering", () => {
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "");
 
     expect((await proxy(request("/api/health/live"))).status).toBe(200);
-    expect(live().status).toBe(200);
+    expect(live(request("/api/health/live")).status).toBe(200);
   });
 
   it("allows readiness to return sanitized 503 checks instead of a proxy 403", async () => {
@@ -28,7 +28,7 @@ describe("proxy request ordering", () => {
     vi.stubEnv("SESSION_SECRET", "");
 
     expect((await proxy(request("/api/health/ready"))).status).toBe(200);
-    const response = ready();
+    const response = ready(request("/api/health/ready"));
     expect(response.status).toBe(503);
     const body = await response.json();
     expect(body.status).toBe("not_ready");

@@ -1,0 +1,19 @@
+{
+  "decision": "STAGING_DEPLOYMENT_BLOCKED",
+  "currentBranch": "main",
+  "currentHead": "5b6f68ac28b9604f9d44b982397e77072aa2ba4a",
+  "targetBranch": "ai_development",
+  "targetHead": "646caccc0c7b34de32ff6e0987f09be9a0338cb4",
+  "ahead": 0,
+  "behind": 33,
+  "changedFilesOnTargetSinceValidatedBase": 182,
+  "canonicalStagingUrl": "https://supper-git-aidevelopment-apptima.vercel.app",
+  "commitCreated": false,
+  "pushPerformed": false,
+  "deploymentTriggered": false,
+  "postDeploySmokePerformed": false,
+  "productionMutation": false,
+  "finalLocalGates": "NOT_RUN: stopped at pre-commit target-baseline blocker",
+  "localCredentialFileExcluded": true,
+  "requiredNextAction": "Integrate only validated source/docs changes onto current ai_development without rewriting its history; preserve local-only account changes; recheck capture coverage for target runtime/schema and rerun final gates before commit."
+}

@@ -1,0 +1,209 @@
+{
+  "timestamp": "2026-10-16T03:44:50.216Z",
+  "project": "supper-staging",
+  "urlSha256": "46be83ae09d6c4d23a5c0034e19bb80e88ab009928ebfe54922c28f262e7b950",
+  "sourceDigest": "3fc8e77b10a60f7709e77fecb42ea58e85c3465ca7d45cf009c081c318e50ed9",
+  "stableAcrossCapture": true,
+  "sourceReadOnly": true,
+  "snapshot": {
+    "backupPath": "backups/recovery/business-state-1792122281009-22be9066-15a8-410f-a3ff-27a218e9a8c8.json",
+    "file": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/objects/2026/10/recovery/business-state/f4d9b4417184b30bd0a0b9a997b83c1b61ad22b037531e8074d9a00de9d1cfe8/snapshot.json.gz",
+    "manifest": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/objects/2026/10/recovery/business-state/f4d9b4417184b30bd0a0b9a997b83c1b61ad22b037531e8074d9a00de9d1cfe8/manifest.json",
+    "catalog": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/catalogs/staging-business-22be9066-15a8-410f-a3ff-27a218e9a8c8.json",
+    "export": "/Volumes/Vault/storage/supper/recovery-exports/staging-business-22be9066-15a8-410f-a3ff-27a218e9a8c8.json",
+    "checksum": "b619ba3032c5b2e15f126d760494dc9aeeeea745962803077bdcf6f4a401f482",
+    "compressedChecksum": "7da4426890fbb5a106ca46c2b962f863c1954d584fbcc6d743ba96dcb294db97",
+    "compressedBytes": 5860,
+    "uncompressedBytes": 31681
+  },
+  "appliedMigrationVersions": [
+    "202607170001",
+    "202607170002",
+    "202607180001",
+    "202607180002",
+    "202607200001",
+    "202607200002",
+    "202607210001",
+    "202607220001",
+    "202607220002",
+    "202607220003",
+    "202607220004"
+  ],
+  "pendingDisabledMigrations": [
+    "202607230001_servicenow_write_kernel.sql"
+  ],
+  "restore": {
+    "database": "supper_staging_business_22be906615a8410fa3ff27a218e9a8c8",
+    "foreignKeysVerified": 31,
+    "allBusinessRowsMatch": true,
+    "ticketCustomerJoin": true,
+    "historyTicketJoin": true,
+    "usersAndAuthVersion": true,
+    "tables": {
+      "support_customers": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "aeedf464fdad54d9b691a2ce8add268ee5c17912365f31b40ea8ad85e2338242"
+      },
+      "support_tickets": {
+        "rows": 2,
+        "allColumnsMatch": true,
+        "sha256": "4fa9839c714896e9eb9593397581cff23079218bc5157732559481b1ad982d17"
+      },
+      "support_ticket_history": {
+        "rows": 3,
+        "allColumnsMatch": true,
+        "sha256": "4f5a04b58603c401be1b738b5b77f261a59463b44c03ca28fb1c8a439c6495c3"
+      },
+      "support_audit_log": {
+        "rows": 10,
+        "allColumnsMatch": true,
+        "sha256": "2cb1f1b37dc897419b466af5edd95c63ca4f9435ec67587cbce7c516481bc5cc"
+      },
+      "support_users": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "a8c6433fd9ea980bf2a56555b4c1a1433b725d55dfdbc44b448906f3352d2823"
+      },
+      "support_master_data": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "support_import_batches": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "support_import_snapshots": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "support_report_jobs": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "support_report_assets": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "external_ticket_links": {
+        "rows": 2,
+        "allColumnsMatch": true,
+        "sha256": "f1a10371f31f8bda21b7680e58d6eacf1ae2101316309fcf3263c960dcb4dc9a"
+      },
+      "integration_sync_state": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "c937065842cbc25948dcf1e076e5b659a8732914064f80bac97dddcbb5c5e75c"
+      },
+      "integration_sync_runs": {
+        "rows": 6,
+        "allColumnsMatch": true,
+        "sha256": "e3aa85d655b74b0ce76fe00dd90aeff042ca3e3261e672b242054d5caf4fefad"
+      },
+      "integration_sync_run_items": {
+        "rows": 4,
+        "allColumnsMatch": true,
+        "sha256": "2cd1f93e90f0f7bcef2e754f3d35bf85d17cd7ebc70b0fe653b8800156ff6263"
+      },
+      "integration_customer_mappings": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "6370f315decbbf9bb309a35271caad9a8fef85cf65a56ec4562276a34edc916c"
+      },
+      "integration_customer_mapping_events": {
+        "rows": 3,
+        "allColumnsMatch": true,
+        "sha256": "d4aa720d43ac0facc983a2bbe94462247421663fea296d65a1a1ff1f03e6f7cc"
+      },
+      "integration_channels": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "7d48255cd8374109fd9688b7586f3a8372d7f3c5937dd733e3a41ecbc26f16bd"
+      },
+      "integration_external_identities": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "fa06c1082a78ddfa24a23a8561430aa6644cf851c91059da7639f8db42ef1ea7"
+      },
+      "integration_identity_bindings": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "integration_identity_binding_events": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "intake_conversations": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "cd5b35b1028511fee92718c614dc743cceff66a993aa71c64190430046483993"
+      },
+      "intake_messages": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "1d6238630f7fbc4314ebe620778f752bb5dfa2ddc7f2956905e3eccfd8b101cd"
+      },
+      "intake_attachments": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "fd79b204e8ee04f8f1003a9568ca219d9c54baf6bb174e23b676e5920fab6950"
+      },
+      "intake_sessions": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "2281d6024102ad8db6f4cbc1baaf57b3baa3c1d5530bc3ef8e81466f0efe24d7"
+      },
+      "intake_events": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "a0ad380241a7cbbf5bc65d34055c1758edf8423e1a4c9dd929acc2cd0f8ad9a4"
+      },
+      "intake_ticket_links": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "integration_outbox": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "intake_conversation_events": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "f47c25530c59e820b4ca1db49758968e09a8d2e4f6cf2b7587d58cd6d546eed8"
+      },
+      "intake_session_events": {
+        "rows": 1,
+        "allColumnsMatch": true,
+        "sha256": "3b29dabe47b296b808d5afa6af58e4927bd3a3c32df3f356902c0fbcd1f95763"
+      },
+      "intake_event_deliveries": {
+        "rows": 4,
+        "allColumnsMatch": true,
+        "sha256": "37646d3acc6806134bb21674175c01a312601dfdddaf64120b45b0baa40eb428"
+      },
+      "app_store": {
+        "rows": 0,
+        "allColumnsMatch": true,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      }
+    }
+  },
+  "excluded": [
+    "Supabase managed schemas/Auth internals",
+    "support_login_rate_limits transient state",
+    "support_schema_migrations state reconstructed from versioned SQL",
+    "Monthly Report Factory local files are outside Supabase capture"
+  ],
+  "productionMutation": false,
+  "stagingMutation": false,
+  "pruneInvoked": false
+}

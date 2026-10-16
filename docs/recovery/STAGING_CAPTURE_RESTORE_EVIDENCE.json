@@ -1,0 +1,63 @@
+{
+  "disposition": "STAGING_CAPTURE_RESTORE_READY",
+  "timestamp": "2026-10-16T02:57:39.675Z",
+  "source": {
+    "project": "supper-staging",
+    "urlSha256": "46be83ae09d6c4d23a5c0034e19bb80e88ab009928ebfe54922c28f262e7b950",
+    "table": "public.support_tickets",
+    "projection": "data (all rows, ordered by relational id)",
+    "rowCount": 2,
+    "fullRowDigest": "f6ec6f7e0ff2e69945a7079849dddf0609f044c7245b56e912028411bc5a0e7f",
+    "unchangedAcrossValidation": true,
+    "access": "GET only"
+  },
+  "snapshot": {
+    "backupPath": "backups/core/tickets-1792119458950-225cef68-d04f-4faa-bbc5-8811f03b1e22.json",
+    "file": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/objects/2026/10/core/tickets/3e050d3c635ee6de19ba208995e1e9b73559cfd8cacae44b024025a7fd0d6ca7/snapshot.json.gz",
+    "manifest": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/objects/2026/10/core/tickets/3e050d3c635ee6de19ba208995e1e9b73559cfd8cacae44b024025a7fd0d6ca7/manifest.json",
+    "catalog": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/catalogs/staging-capture-225cef68-d04f-4faa-bbc5-8811f03b1e22.json",
+    "checksum": "e08598945b0c0f196886c324aa53aed89bed964a452a35d391459f86e2311eb1",
+    "compressedChecksum": "d6b8decbef520d2752918448beb64be330e1a718033601d3f01d893794333f8f",
+    "compressedBytes": 1074,
+    "uncompressedBytes": 2945,
+    "export": "/Volumes/Vault/storage/supper/recovery-exports/staging-capture-225cef68-d04f-4faa-bbc5-8811f03b1e22.json",
+    "category": "manual",
+    "integrity": "PASS"
+  },
+  "restore": {
+    "container": "supper-recovery-pg17",
+    "database": "supper_staging_restore_225cef68d04f4faabbc58811f03b1e22",
+    "table": "public.app_store",
+    "key": "core/tickets.json",
+    "method": "fresh isolated local PostgreSQL database, insert verified Vault export",
+    "rowCount": 2,
+    "canonicalHash": "e08598945b0c0f196886c324aa53aed89bed964a452a35d391459f86e2311eb1",
+    "schemaValidation": true,
+    "exactBusinessDataEquality": true,
+    "lookupQuery": true,
+    "domainEffortOwnerSeverity": true,
+    "relationalSchemaReinstatement": false
+  },
+  "productionMutation": false,
+  "stagingMutation": false,
+  "historicalSnapshotMutation": false,
+  "pruneInvoked": false,
+  "excluded": [
+    "other SUPPER datasets/tables",
+    "relational denormalized columns/indexes/policies (source digest recorded, business JSON restored)",
+    "Supabase Auth/service schemas",
+    "object storage and external attachments"
+  ],
+  "checks": {
+    "regressionPassed": 207,
+    "regressionSkipped": 16,
+    "regressionFailed": 0,
+    "typecheckExit": 0,
+    "scriptLintExit": 0,
+    "diffCheckExit": 0,
+    "scriptSha256": "3bbb783406d4fc9a3ebecfca4b8832c6ff87b6c919396c2726afdc035c7fa6ee",
+    "head": "5b6f68ac28b9604f9d44b982397e77072aa2ba4a",
+    "commitCreated": false,
+    "deploymentPerformed": false
+  }
+}

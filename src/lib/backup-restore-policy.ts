@@ -1,5 +1,19 @@
 import type { DataBackend } from "./env";
 import { HttpError } from "./request-security";
+import path from "node:path";
+
+export function backupTarget(backupPath: string) {
+  if (backupPath.includes("\\") || !/^backups\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9._-]+-\d{13}-[0-9a-f-]{8,64}\.json$/i.test(backupPath)) {
+    throw new Error("Invalid backup path");
+  }
+  const relative = backupPath.slice("backups/".length);
+  const match = path.posix.basename(relative).match(/^(.*)-(\d{13})-[0-9a-f-]+\.json$/i);
+  if (!match) throw new Error("Unrecognized backup name");
+  const target = path.posix.join(path.posix.dirname(relative), `${match[1]}.json`);
+  // Local full-business captures are parseable but deliberately absent from web-restorable targets.
+  if (!isKnownBackupTarget(target) && target !== "recovery/business-state.json") throw new Error("Unknown backup target");
+  return { target, timestamp: Number(match[2]) };
+}
 
 const jsonBackupTargets = [
   "audit/audit-log.json",

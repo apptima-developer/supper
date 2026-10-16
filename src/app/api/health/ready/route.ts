@@ -5,7 +5,7 @@ import { jsonResponseWithRequestId } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
 
-export function GET(request?: Request) {
+export function GET(request: Request) {
   const readiness = validateRuntimeEnvironment();
   const build = getBuildMetadata();
   return jsonResponseWithRequestId(

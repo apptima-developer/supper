@@ -3,7 +3,10 @@ import path from "node:path";
 import type { ZodType } from "zod";
 import { getDataBackend } from "./env";
 import { resolveStorageRouting } from "./storage-routing";
-import { assertActiveBackupTarget, isActiveBackupTarget, isKnownBackupTarget } from "./backup-restore-policy";
+import { assertActiveBackupTarget, isActiveBackupTarget, backupTarget } from "./backup-restore-policy";
+
+import { externalSnapshotStore, externalWrite, readBackup, saveCurrentSnapshot, validateSnapshotPayload, withSnapshotWrite } from "./snapshots/runtime";
+export { backupTarget } from "./backup-restore-policy";
 
 const DATA_ROOT = path.join(process.cwd(), "data");
 const locks = new Map<string, Promise<unknown>>();
@@ -83,6 +86,14 @@ export async function readJsonBatch<T extends JsonBatchSpec>(specs: T): Promise<
 
 export async function writeJsonAtomic<T>(relativePath: string, value: T, schema: ZodType<T>) {
   const parsed = schema.parse(value);
+  const archive = externalSnapshotStore();
+  if (archive) {
+    if (!usesSupabaseAppStore) throw new Error("External snapshot writer requires app_store");
+    return withSnapshotWrite(archive, relativePath, async () => {
+      await externalWrite(relativePath, parsed, await store(), archive);
+      return parsed;
+    });
+  }
   const suffix = `${Date.now()}-${crypto.randomUUID()}`;
 
   if (usesSupabaseAppStore) {
@@ -116,6 +127,19 @@ export async function writeJsonAtomic<T>(relativePath: string, value: T, schema:
 }
 
 export function updateJson<T>(relativePath: string, schema: ZodType<T>, updater: (current: T) => T | Promise<T>) {
+  const archive = externalSnapshotStore();
+  if (archive) {
+    if (!usesSupabaseAppStore) throw new Error("External snapshot writer requires app_store");
+    return withSnapshotWrite(archive, relativePath, async () => {
+      const database = await store();
+      const current = await database.getVersionedStore(relativePath);
+      if (!current) throw new JsonStoreRecordNotFoundError(relativePath);
+      const next = schema.parse(await updater(schema.parse(current.value)));
+      await saveCurrentSnapshot(relativePath, current, archive);
+      await database.setStoreIfUnchanged(relativePath, next, current.updatedAt);
+      return next;
+    });
+  }
   const previous = locks.get(relativePath) ?? Promise.resolve();
   const operation = previous.then(async () => {
     const current = await readJson(relativePath, schema);
@@ -128,7 +152,9 @@ export function updateJson<T>(relativePath: string, schema: ZodType<T>, updater:
 export async function listBackups() {
   if (usesSupabaseAppStore) {
     const keys = await (await store()).listStoreKeys("backups/");
-    return keys.filter(isActiveBackupPath).sort().reverse();
+    const archive = externalSnapshotStore();
+    const external = archive ? (await archive.listSnapshots()).map(s => s.backupPath) : [];
+    return [...new Set([...keys, ...external])].filter(isActiveBackupPath).sort().reverse();
   }
 
   const root = path.join(DATA_ROOT, "backups");
@@ -156,23 +182,19 @@ function isActiveBackupPath(relativeBackupPath: string) {
   }
 }
 
-export function backupTarget(relativeBackupPath: string) {
-  if (relativeBackupPath.includes("\\") || !/^backups\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9._-]+-\d{13}-[0-9a-f-]{8,64}\.json$/i.test(relativeBackupPath)) {
-    throw new Error("Invalid backup path");
-  }
-  const relative = relativeBackupPath.slice("backups/".length);
-  const directory = path.dirname(relative);
-  const match = path.basename(relative).match(/^(.*)-(\d{13})-[0-9a-f-]+\.json$/i);
-  if (!match) throw new Error("Unrecognized backup name");
-  const target = path.posix.join(directory, `${match[1]}.json`);
-  dataPath(target);
-  if (!isKnownBackupTarget(target)) throw new Error("Unknown backup target");
-  return { target, timestamp: Number(match[2]) };
-}
-
 export async function restoreBackup(relativeBackupPath: string) {
   const { target } = backupTarget(relativeBackupPath);
   assertActiveBackupTarget(dataBackend, target);
+  const archive = externalSnapshotStore();
+  if (archive) {
+    if (!usesSupabaseAppStore) throw new Error("External snapshot restore requires app_store");
+    return withSnapshotWrite(archive, target, async () => {
+      const database = await store();
+      const raw = await validateSnapshotPayload(relativeBackupPath, await readBackup(relativeBackupPath, database, archive));
+      await externalWrite(target, raw, database, archive);
+      return target;
+    });
+  }
 
   if (usesSupabaseAppStore) {
     const raw = await (await store()).getStore<unknown>(relativeBackupPath);
@@ -204,7 +226,30 @@ export async function restoreBackupSet(paths: string[]) {
     const current = earliest.get(parsed.target);
     if (!current || parsed.timestamp < current.timestamp) earliest.set(parsed.target, { path: backup, timestamp: parsed.timestamp });
   }
+  const archive = externalSnapshotStore();
+  if (archive) {
+    const database = await store();
+    // Validate the entire selected rollback set before changing its first dataset.
+    for (const { path: backup } of earliest.values()) {
+      assertActiveBackupTarget(dataBackend, backupTarget(backup).target);
+      await validateSnapshotPayload(backup, await readBackup(backup, database, archive));
+    }
+  }
   const restored: string[] = [];
   for (const { path: backup } of earliest.values()) restored.push(await restoreBackup(backup));
   return restored;
+}
+
+export async function captureExternalImportBackups(batchId: string) {
+  const archive = externalSnapshotStore();
+  if (!archive || dataBackend !== "supabase") return [];
+  const database = await store();
+  const backups: string[] = [];
+  for (const target of ["core/tickets.json", "core/ticket-history.json", "audit/audit-log.json"]) {
+    await withSnapshotWrite(archive, target, async () => {
+      const current = await database.getVersionedStore(target);
+      if (current) backups.push((await saveCurrentSnapshot(target, current, archive, batchId)).backupPath);
+    });
+  }
+  return backups;
 }

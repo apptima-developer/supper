@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-10-16T03:15:16.998Z",
+  "workspace": "/private/tmp/supper-staging-build-ThdhUD",
+  "log": "/private/tmp/supper-staging-build.log",
+  "exitCode": 0,
+  "compiler": "webpack",
+  "node": "v24.21.0",
+  "productionBuild": true,
+  "stagingProjectUsed": true,
+  "backend": "supabase-relational",
+  "vaultRuntimeDisabled": true,
+  "secretsEphemeral": true,
+  "actualStagingOriginConfigured": false,
+  "resolvedBlocker": "Health route Request argument required by Next generated route types"
+}
