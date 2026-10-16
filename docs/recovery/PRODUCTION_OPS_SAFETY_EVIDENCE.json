@@ -1,0 +1,97 @@
+{
+  "timestamp": "2026-10-16T09:19:29.145Z",
+  "disposition": "OWNER_ACTION_REQUIRED",
+  "weeklySchedule": "Sunday 02:30 Asia/Bangkok",
+  "capacitySchedule": "Daily 03:00 Asia/Bangkok",
+  "launchAgentsInstalled": true,
+  "launchAgentCapacityRun": "PASS",
+  "backup": {
+    "timestamp": "2026-10-16T09:16:18.511Z",
+    "mode": "backup",
+    "event": "snapshot",
+    "backupPath": "backups/recovery/business-state-1792142177720-d33e8104-ba24-4d0d-9b5e-e902964c8616.json",
+    "file": "/Volumes/Vault/storage/supper/snapshot-archives/local-vault/objects/2026/10/recovery/business-state/ff95d8c55e202420ffd7f6605587cca83d95bd41b56dd7c93b3c2ab22ff45dba/snapshot.json.gz",
+    "checksum": "40d635908ef97cdcb52e1643c0e6b968308c80b37d74edf74cad0aeb1fbc82d7",
+    "compressedBytes": 5149000,
+    "uncompressedBytes": 17200578,
+    "integrity": "PASS",
+    "catalog": "production-business-d33e8104-ba24-4d0d-9b5e-e902964c8616",
+    "tableCounts": {
+      "support_customers": 30,
+      "support_tickets": 1328,
+      "support_ticket_history": 5955,
+      "support_audit_log": 3341,
+      "support_users": 14,
+      "support_master_data": 8,
+      "support_import_batches": 5,
+      "support_import_snapshots": 0,
+      "support_report_jobs": 5,
+      "support_report_assets": 1,
+      "external_ticket_links": 0,
+      "integration_sync_state": 0,
+      "integration_sync_runs": 0,
+      "integration_sync_run_items": 0,
+      "integration_customer_mappings": 0,
+      "integration_customer_mapping_events": 0,
+      "integration_channels": 0,
+      "integration_external_identities": 0,
+      "integration_identity_bindings": 0,
+      "integration_identity_binding_events": 0,
+      "intake_conversations": 0,
+      "intake_messages": 0,
+      "intake_attachments": 0,
+      "intake_sessions": 0,
+      "intake_events": 0,
+      "intake_ticket_links": 0,
+      "integration_outbox": 0,
+      "intake_conversation_events": 0,
+      "intake_session_events": 0,
+      "intake_event_deliveries": 0,
+      "app_store": 17
+    },
+    "annualCompressedBytesEstimate": 267748000
+  },
+  "capacity": {
+    "timestamp": "2026-10-16T09:18:39.227Z",
+    "mode": "monitor",
+    "event": "capacity",
+    "databaseBytes": 33978035,
+    "capacityMb": 500,
+    "warningPercent": 80,
+    "usagePercent": 6.7956069999999995,
+    "status": "HEALTHY",
+    "sendAlert": false,
+    "warned": false,
+    "notificationDelivered": null
+  },
+  "vaultUnavailable": {
+    "explicitFailure": true,
+    "notificationPathInvoked": true,
+    "notificationResult": "EMAIL_NOT_CONFIGURED",
+    "payloadFallback": false,
+    "productionModified": false
+  },
+  "tests": {
+    "policyPassed": 2,
+    "policyFailed": 0,
+    "lint": "PASS",
+    "syntax": "PASS"
+  },
+  "applicationHealth": [
+    {
+      "environment": "production",
+      "http": 200,
+      "backend": "supabase-relational",
+      "commit": "47f509e74030",
+      "status": "ready"
+    },
+    {
+      "environment": "staging",
+      "http": 200
+    }
+  ],
+  "pruneEnabled": false,
+  "serviceNowWriteEnabled": false,
+  "remainingBlocker": "Email explicitly deferred by Owner; SMTP not configured. This limits operational readiness, not commit/push eligibility.",
+  "emailDeferredByOwner": true
+}
